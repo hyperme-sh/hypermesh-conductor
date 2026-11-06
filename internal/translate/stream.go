@@ -526,11 +526,20 @@ func (s *Stream) allocOut() int {
 }
 
 func (s *Stream) finishResponses() []byte {
+	text := s.respText.String()
+	// The terminal events repeat the text and each tool's arguments. Charge
+	// that expansion before buffering it.
+	extra := 3 * len(text)
+	for i := range s.respCalls {
+		extra += 2 * s.respCalls[i].args.Len()
+	}
+	if extra > 0 && !s.noteTranslated(extra) {
+		return s.failLarge(&bytes.Buffer{})
+	}
 	var out bytes.Buffer
 	if !s.respOpened {
 		out.Write(s.openResponses())
 	}
-	text := s.respText.String()
 	if s.textOpen {
 		out.Write(sseData(map[string]any{
 			"type": "response.output_text.done", "output_index": s.textIndex, "content_index": 0, "text": text,

@@ -375,6 +375,24 @@ func TestMaxTokensBecomesAnIncompleteResponse(t *testing.T) {
 	}
 }
 
+func TestResponsesFinishStaysInsideTheCap(t *testing.T) {
+	previous := maxEventBytes
+	maxEventBytes = 500
+	t.Cleanup(func() { maxEventBytes = previous })
+	stream := NewStream(ProtoResponses, ProtoMessages)
+	piece := strings.Repeat("a", 20)
+	for i := 0; i < 8; i++ {
+		chunk := "event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"delta\":{\"type\":\"text_delta\",\"text\":\"" + piece + "\"}}\n\n"
+		if out := stream.Consume([]byte(chunk)); stream.TooLarge() {
+			t.Fatal(string(out))
+		}
+	}
+	out := stream.Consume([]byte("event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n"))
+	if !stream.TooLarge() || len(out) > maxEventBytes || strings.Contains(string(out), piece+piece) {
+		t.Fatalf("too %v len %d out %s", stream.TooLarge(), len(out), out)
+	}
+}
+
 func TestResponsesSamplingAndStreamUsage(t *testing.T) {
 	wire, err := Request(ProtoResponses, ProviderAnthropic, "frontier", []byte(`{"temperature":0,"top_p":0.1,"input":"hi"}`))
 	if err != nil {
