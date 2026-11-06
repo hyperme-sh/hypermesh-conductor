@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -650,6 +651,71 @@ func truncatedServer(t *testing.T, status, contentType, body string) string {
 		}
 	}()
 	return "http://" + ln.Addr().String() + "/v1"
+}
+
+type failAfter struct {
+	header http.Header
+	writes int
+}
+
+func (f *failAfter) Header() http.Header {
+	if f.header == nil {
+		f.header = http.Header{}
+	}
+	return f.header
+}
+
+func (f *failAfter) Write(p []byte) (int, error) {
+	f.writes++
+	if f.writes > 1 {
+		return 0, errors.New("client gone")
+	}
+	return len(p), nil
+}
+
+func (f *failAfter) WriteHeader(int) {}
+
+func (f *failAfter) Flush() {}
+
+type scriptBody struct {
+	events []string
+	i      int
+	closed chan struct{}
+	once   sync.Once
+}
+
+func (s *scriptBody) Read(p []byte) (int, error) {
+	if s.i >= len(s.events) {
+		return 0, io.EOF
+	}
+	n := copy(p, s.events[s.i])
+	s.i++
+	return n, nil
+}
+
+func (s *scriptBody) Close() error {
+	s.once.Do(func() { close(s.closed) })
+	return nil
+}
+
+func TestStreamWriteFailureClosesUpstream(t *testing.T) {
+	events := make([]string, 100)
+	for i := range events {
+		events[i] = "data: {\"choices\":[{\"delta\":{\"content\":\"x\"}}]}\n\n"
+	}
+	body := &scriptBody{events: events, closed: make(chan struct{})}
+	resp := &http.Response{Body: body, StatusCode: http.StatusOK, Header: http.Header{}}
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+	p := New(config.Config{}, aiuditor.Stub{}, nil)
+	p.stream(&failAfter{}, req, resp, translate.Wire{Protocol: translate.ProtoChat}, time.Now(), nil, metrics.StepRecord{})
+	select {
+	case <-body.closed:
+	case <-time.After(time.Second):
+		t.Fatal("upstream body stayed open")
+	}
+	if body.i > 3 {
+		t.Fatalf("upstream events consumed %d", body.i)
+	}
 }
 
 func TestSplitStreamKeyIsRedacted(t *testing.T) {

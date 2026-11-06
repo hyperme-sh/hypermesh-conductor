@@ -346,6 +346,20 @@ func (p *Proxy) stream(w http.ResponseWriter, client *http.Request, resp *http.R
 	var pending []byte
 	var readErr error
 	failed := false
+	clientGone := false
+	writeClient := func(p []byte) bool {
+		if clientGone || len(p) == 0 {
+			return !clientGone
+		}
+		if _, err := w.Write(redact(p, secrets)); err != nil {
+			clientGone = true
+			readErr = err
+			_ = resp.Body.Close()
+			return false
+		}
+		flush(w)
+		return true
+	}
 	for {
 		n, err := resp.Body.Read(buf)
 		if n > 0 {
@@ -383,16 +397,14 @@ func (p *Proxy) stream(w http.ResponseWriter, client *http.Request, resp *http.R
 				break
 			}
 			if passthrough {
-				if len(ready) > 0 {
-					_, _ = w.Write(redact(ready, secrets))
-					flush(w)
+				if !writeClient(ready) {
+					break
 				}
 				continue
 			}
 			out := bridge.Consume(chunk)
-			if len(out) > 0 {
-				_, _ = w.Write(redact(out, secrets))
-				flush(w)
+			if !writeClient(out) {
+				break
 			}
 			if bridge.TooLarge() {
 				pending = nil
@@ -415,21 +427,20 @@ func (p *Proxy) stream(w http.ResponseWriter, client *http.Request, resp *http.R
 			}
 			usage.Absorb(&acc, payload, wire.Protocol == translate.ProtoEmbeddings)
 		}
-		if passthrough {
-			_, _ = w.Write(redact(pending, secrets))
-			flush(w)
+		if passthrough && !writeClient(pending) {
+			pending = nil
+		} else if passthrough {
 			pending = nil
 		}
 	}
-	var tail []byte
-	if readErr != nil {
-		tail = bridge.Abort()
-	} else {
-		tail = bridge.Finish()
-	}
-	if len(tail) > 0 {
-		_, _ = w.Write(redact(tail, secrets))
-		flush(w)
+	if !clientGone {
+		var tail []byte
+		if readErr != nil {
+			tail = bridge.Abort()
+		} else {
+			tail = bridge.Finish()
+		}
+		_ = writeClient(tail)
 	}
 	ms := elapsedMS(start)
 	record.LatencyMS = &ms
