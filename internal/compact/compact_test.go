@@ -1,9 +1,22 @@
 package compact
 
 import (
+	"encoding/json"
 	"strings"
 	"testing"
 )
+
+func TestSummaryKeepsLargeToolIntegers(t *testing.T) {
+	tool := `{"role":"assistant","content":[{"type":"tool_use","id":"call_1","name":"lookup","input":{"record_id":9007199254740993}}]}`
+	raw := []byte(`[` + tool + `,{"role":"user","content":"` + strings.Repeat("word ", 80) + `"}]`)
+	plan, err := PlanMessages(raw, 10, 0)
+	if err != nil || !plan.Needed {
+		t.Fatal(err, plan.Needed)
+	}
+	if !strings.Contains(plan.SummaryInput, "9007199254740993") || strings.Contains(plan.SummaryInput, "9007199254740992") {
+		t.Fatal(plan.SummaryInput)
+	}
+}
 
 func TestLeadingDeveloperMessageStaysInThePrefix(t *testing.T) {
 	dev := `{"role":"developer","content":"Follow these rules"}`
@@ -163,5 +176,12 @@ func TestTopLevelAudioAndOpaqueContentPreventCompaction(t *testing.T) {
 		if err != nil || plan.Needed {
 			t.Fatal(err, plan.Needed)
 		}
+	}
+}
+
+func TestSummaryPreservesLargeToolInputIntegers(t *testing.T) {
+	got := textOfAll([]json.RawMessage{json.RawMessage(`{"role":"assistant","content":[{"type":"tool_use","id":"call","name":"lookup","input":{"record_id":9007199254740993}}]}`)})
+	if !strings.Contains(got, "9007199254740993") {
+		t.Fatal(got)
 	}
 }
