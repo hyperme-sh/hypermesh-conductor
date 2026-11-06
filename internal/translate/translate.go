@@ -696,8 +696,6 @@ func anthropicContentToText(content any) (string, error) {
 				}
 				parts = append(parts, text)
 			case "tool_use":
-				name, _ := obj["name"].(string)
-				parts = append(parts, "[tool_use "+name+"]")
 			default:
 				return "", fmt.Errorf("unsupported content for protocol translation")
 			}

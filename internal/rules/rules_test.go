@@ -261,6 +261,48 @@ func TestDreamDoesNotShareOutcomesAcrossTasks(t *testing.T) {
 	}
 }
 
+func TestUnmatchedLinkOutcomesDoNotProposeEdits(t *testing.T) {
+	proposal, _, err := Dream(DreamInput{
+		Records: nil,
+		Outcomes: []Outcome{
+			{TaskID: "other", StepID: "s1", Kind: "link_used", From: "a", To: "b"},
+			{TaskID: "other", StepID: "s2", Kind: "link_used", From: "a", To: "b"},
+		},
+	}, Defaults(), t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(proposal.IndexLinks) != 0 {
+		t.Fatal(proposal.IndexLinks)
+	}
+}
+
+func TestFirstApplyArchivesTheDefaultPolicy(t *testing.T) {
+	dir := t.TempDir()
+	active := filepath.Join(dir, "active.json")
+	proposal := Defaults()
+	proposal.Version = 1
+	proposal.Routing.EscalateWhenPeakTokensAbove = map[string]int{"summarize": 10}
+	raw, err := Marshal(proposal)
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(dir, "proposal.json")
+	if err := os.WriteFile(path, raw, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := Apply(active, path); err != nil {
+		t.Fatal(err)
+	}
+	if err := Rollback(active); err != nil {
+		t.Fatal(err)
+	}
+	restored, err := Load(active)
+	if err != nil || restored.Version != 0 || restored.Routing.EscalateWhenPeakTokensAbove["summarize"] != 0 {
+		t.Fatal(err, restored.Version, restored.Routing.EscalateWhenPeakTokensAbove)
+	}
+}
+
 func TestVersionZeroArchiveSurvivesASecondApply(t *testing.T) {
 	dir := t.TempDir()
 	active := filepath.Join(dir, "active.json")
