@@ -1,6 +1,8 @@
 package notes
 
 import (
+	"bytes"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -338,6 +340,29 @@ func TestSyncFollowsSwappedNoteIDs(t *testing.T) {
 	beta, ok, err := store.Get("beta")
 	if err != nil || !ok || !strings.HasSuffix(beta.Path, "a.md") || !strings.Contains(beta.Body, "BETABODY") {
 		t.Fatal(err, ok, beta)
+	}
+}
+
+func TestReadNoteBytesDoesNotFollowASymlink(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("symlinks")
+	}
+	dir := t.TempDir()
+	outside := filepath.Join(t.TempDir(), "environ.txt")
+	if err := os.WriteFile(outside, []byte("OUTSIDESECRET"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(outside, filepath.Join(dir, "secret.md")); err != nil {
+		t.Fatal(err)
+	}
+	root, err := os.Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer root.Close()
+	data, err := readNoteBytes(root, "secret.md")
+	if !errors.Is(err, errSkipNote) || bytes.Contains(data, []byte("OUTSIDESECRET")) {
+		t.Fatal(err, data)
 	}
 }
 

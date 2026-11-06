@@ -296,17 +296,22 @@ func (e idCollision) Error() string {
 }
 
 func readNotes(dir string, files []string) ([]Note, []string, error) {
+	root, err := os.Open(dir)
+	if err != nil {
+		return nil, nil, err
+	}
+	defer root.Close()
 	incoming := make([]Note, 0, len(files))
 	counts := map[string]int{}
 	for _, path := range files {
-		info, err := os.Lstat(path)
-		if err != nil {
-			return nil, nil, err
-		}
-		if info.Mode()&os.ModeSymlink != 0 {
+		rel, err := filepath.Rel(dir, path)
+		if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
 			continue
 		}
-		data, err := os.ReadFile(path)
+		data, err := readNoteBytes(root, rel)
+		if errors.Is(err, errSkipNote) {
+			continue
+		}
 		if err != nil {
 			return nil, nil, err
 		}
