@@ -299,6 +299,13 @@ func readNotes(dir string, files []string) ([]Note, []string, error) {
 	incoming := make([]Note, 0, len(files))
 	counts := map[string]int{}
 	for _, path := range files {
+		info, err := os.Lstat(path)
+		if err != nil {
+			return nil, nil, err
+		}
+		if info.Mode()&os.ModeSymlink != 0 {
+			continue
+		}
 		data, err := os.ReadFile(path)
 		if err != nil {
 			return nil, nil, err
@@ -696,6 +703,12 @@ func markdownFiles(dir string) ([]string, error) {
 			return err
 		}
 		name := entry.Name()
+		if entry.Type()&os.ModeSymlink != 0 {
+			if entry.IsDir() {
+				return filepath.SkipDir
+			}
+			return nil
+		}
 		if entry.IsDir() {
 			if filepath.Clean(path) != filepath.Clean(dir) && name != "." && strings.HasPrefix(name, ".") {
 				return filepath.SkipDir

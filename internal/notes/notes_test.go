@@ -341,6 +341,39 @@ func TestSyncFollowsSwappedNoteIDs(t *testing.T) {
 	}
 }
 
+func TestSymlinkNotesAreNotIndexed(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("symlinks")
+	}
+	dir := t.TempDir()
+	outside := filepath.Join(t.TempDir(), "environ.txt")
+	if err := os.WriteFile(outside, []byte("OUTSIDESECRET from another file\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(outside, filepath.Join(dir, "secret.md")); err != nil {
+		t.Fatal(err)
+	}
+	writeNote(t, dir, "local.md", "---\nid: local\ntype: note\n---\n# Local\nLOCALBODY stays.\n")
+	store := openTestStore(t, dir)
+	stats, err := store.Rebuild(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stats.Notes != 1 {
+		t.Fatalf("%+v", stats)
+	}
+	if ids, err := store.Search("outsidesecret", 5); err != nil || len(ids) != 0 {
+		t.Fatal(err, ids)
+	}
+	if _, ok, err := store.Get("secret"); err != nil || ok {
+		t.Fatal(err, ok)
+	}
+	note, ok, err := store.Get("local")
+	if err != nil || !ok || !strings.Contains(note.Body, "LOCALBODY") {
+		t.Fatal(err, ok, note.Body)
+	}
+}
+
 func TestSyncFollowsAMovedNote(t *testing.T) {
 	dir := t.TempDir()
 	writeNote(t, dir, "a/alpha.md", "---\nid: alpha\ntype: note\nstatus: open\n---\n# Alpha\nMOVEDBODY\n")
