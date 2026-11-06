@@ -35,7 +35,22 @@ type Record struct {
 // Store is an append-only history file next to the metrics journal.
 type Store struct {
 	path string
-	mu   sync.Mutex
+}
+
+var historyLocks sync.Map
+
+func historyLock(path string) *sync.Mutex {
+	abs, err := filepath.Abs(path)
+	if err != nil {
+		abs = path
+	}
+	abs = filepath.Clean(abs)
+	if mu, ok := historyLocks.Load(abs); ok {
+		return mu.(*sync.Mutex)
+	}
+	mu := &sync.Mutex{}
+	actual, _ := historyLocks.LoadOrStore(abs, mu)
+	return actual.(*sync.Mutex)
 }
 
 // PathFor returns the history file beside a metrics journal.
@@ -65,8 +80,9 @@ func (s *Store) Append(record Record) error {
 	if need > maxHistoryBytes || need > maxTaskHistoryBytes {
 		return fmt.Errorf("history record exceeds the quota")
 	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	mu := historyLock(s.path)
+	mu.Lock()
+	defer mu.Unlock()
 	if err := s.makeRoom(record.TaskID, need); err != nil {
 		return err
 	}
