@@ -299,6 +299,48 @@ func TestLinkResolutionPrefersExactID(t *testing.T) {
 	}
 }
 
+func TestSearchSplitsPunctuationLikeTheIndex(t *testing.T) {
+	dir := t.TempDir()
+	writeNote(t, dir, "secret.md", "---\nid: secret\ntype: note\n---\n# Secret\nUse api_key and foo-bar here.\n")
+	store := openTestStore(t, dir)
+	if _, err := store.Rebuild(dir); err != nil {
+		t.Fatal(err)
+	}
+	for _, query := range []string{"api_key", "foo-bar"} {
+		ids, err := store.Search(query, 5)
+		if err != nil || len(ids) != 1 || ids[0] != "secret" {
+			t.Fatal(query, err, ids)
+		}
+	}
+}
+
+func TestSyncFollowsSwappedNoteIDs(t *testing.T) {
+	dir := t.TempDir()
+	writeNote(t, dir, "a.md", "---\nid: alpha\ntype: note\n---\n# A\nALPHABODY\n")
+	writeNote(t, dir, "b.md", "---\nid: beta\ntype: note\n---\n# B\nBETABODY\n")
+	store := openTestStore(t, dir)
+	if _, err := store.Sync(dir); err != nil {
+		t.Fatal(err)
+	}
+	writeNote(t, dir, "a.md", "---\nid: beta\ntype: note\n---\n# B\nBETABODY\n")
+	writeNote(t, dir, "b.md", "---\nid: alpha\ntype: note\n---\n# A\nALPHABODY\n")
+	stats, err := store.Sync(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stats.Notes != 2 || len(stats.Warnings) != 0 {
+		t.Fatalf("%+v", stats)
+	}
+	alpha, ok, err := store.Get("alpha")
+	if err != nil || !ok || !strings.HasSuffix(alpha.Path, "b.md") || !strings.Contains(alpha.Body, "ALPHABODY") {
+		t.Fatal(err, ok, alpha)
+	}
+	beta, ok, err := store.Get("beta")
+	if err != nil || !ok || !strings.HasSuffix(beta.Path, "a.md") || !strings.Contains(beta.Body, "BETABODY") {
+		t.Fatal(err, ok, beta)
+	}
+}
+
 func TestSyncFollowsAMovedNote(t *testing.T) {
 	dir := t.TempDir()
 	writeNote(t, dir, "a/alpha.md", "---\nid: alpha\ntype: note\nstatus: open\n---\n# Alpha\nMOVEDBODY\n")
