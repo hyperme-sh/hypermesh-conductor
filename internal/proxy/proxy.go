@@ -224,6 +224,7 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if hash, err := hashBody(proto, prepared); err == nil {
 		prelimHash = hash
 	}
+	query := userQuery(prepared)
 	next, didCompact, memLookups, memHits, compactErr := p.maybeCompact(r.Context(), r, proto, prepared, taskID, stepID, prelimHash, tier)
 	if compactErr != nil {
 		var denied proxyAuthError
@@ -239,8 +240,7 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	beforeNotes := prepared
 	if p.Notes != nil && acceptsNotes(proto) && authorizeProxy(r) == nil {
-		trustIDs := authorizeProxy(r) == nil
-		updated, got, err := p.insertNotes(prepared, userQuery(prepared), taskID, stepID, trustIDs)
+		updated, got, err := p.insertNotes(prepared, query, taskID, stepID, true)
 		memLookups += got.Lookups
 		memHits += got.Hits
 		if err == nil {

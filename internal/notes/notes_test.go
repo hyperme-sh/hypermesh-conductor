@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -296,6 +297,70 @@ func TestLinkResolutionPrefersExactID(t *testing.T) {
 	if len(neighbors) != 2 || neighbors[0] != "beta" || neighbors[1] != "gamma" {
 		t.Fatalf("%v", neighbors)
 	}
+}
+
+func TestSyncFollowsAMovedNote(t *testing.T) {
+	dir := t.TempDir()
+	writeNote(t, dir, "a/alpha.md", "---\nid: alpha\ntype: note\nstatus: open\n---\n# Alpha\nMOVEDBODY\n")
+	store := openTestStore(t, dir)
+	if _, err := store.Sync(dir); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(dir, "b"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(filepath.Join(dir, "a", "alpha.md"), filepath.Join(dir, "b", "alpha.md")); err != nil {
+		t.Fatal(err)
+	}
+	stats, err := store.Sync(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stats.Notes != 1 {
+		t.Fatalf("%+v", stats)
+	}
+	note, ok, err := store.Get("alpha")
+	if err != nil || !ok || !strings.Contains(note.Body, "MOVEDBODY") || !strings.HasSuffix(note.Path, filepath.Join("b", "alpha.md")) {
+		t.Fatal(err, ok, note)
+	}
+}
+
+func TestIndexIsOwnerOnly(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("unix permissions")
+	}
+	dir := t.TempDir()
+	path := filepath.Join(dir, ".conductor", "index.db")
+	store, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	check := func() {
+		t.Helper()
+		for _, candidate := range []string{path, filepath.Dir(path)} {
+			info, err := os.Stat(candidate)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if info.Mode().Perm()&0o077 != 0 {
+				t.Fatalf("%s mode %o", candidate, info.Mode().Perm())
+			}
+		}
+	}
+	check()
+	if err := os.Chmod(path, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	again, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = again.Close() })
+	check()
 }
 
 func TestExplicitIDCollisionDoesNotReplace(t *testing.T) {

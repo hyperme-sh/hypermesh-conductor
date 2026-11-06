@@ -1164,6 +1164,57 @@ func TestCompactionDoesNotSendTheFrontierCredential(t *testing.T) {
 	}
 }
 
+func TestCompactionRetrievesFromTheOriginalUserText(t *testing.T) {
+	var bodies []string
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		raw, _ := io.ReadAll(r.Body)
+		bodies = append(bodies, string(raw))
+		text := "ok"
+		if strings.Contains(string(raw), "Summarize the conversation tail") {
+			text = "SUMMARYTEXT"
+		}
+		_, _ = w.Write([]byte(`{"choices":[{"message":{"role":"assistant","content":"` + text + `"}}],"usage":{"prompt_tokens":4,"completion_tokens":1}}`))
+	}))
+	defer upstream.Close()
+	dir := t.TempDir()
+	notesDir := filepath.Join(dir, "notes")
+	if err := os.MkdirAll(notesDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(notesDir, "alpha.md"), []byte("---\nid: alpha\ntype: note\nstatus: open\n---\n# Alpha\nUNIQUEALPHA stays indexed.\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	store, err := notes.Open(filepath.Join(dir, "index.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	if _, err := store.Rebuild(notesDir); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("CONDUCTOR_CHEAP_API_KEY", "test-key-do-not-log")
+	cfg := loadTestConfig(t, dir, upstream.URL+"/v1", upstream.URL+"/v1", config.AuthEnv, config.ProviderOpenAICompatible)
+	cfg.Compaction.MaxTailTokens = 30
+	cfg.Compaction.RecentMessages = 0
+	journal := openJournal(t, dir)
+	server := New(cfg, aiuditor.Stub{}, journal)
+	server.Notes = notes.NewService(store)
+	long := "uniquealpha " + strings.Repeat("padding ", 80)
+	rec := do(server, "/v1/chat/completions", "parse", "task-1", "long-1", "", `{"messages":[{"role":"user","content":"`+long+`"}]}`)
+	if rec.Code != http.StatusOK {
+		t.Fatal(rec.Code, rec.Body.String())
+	}
+	var forwarded string
+	for _, body := range bodies {
+		if strings.Contains(body, "Compacted tail:") {
+			forwarded = body
+		}
+	}
+	if forwarded == "" || !strings.Contains(forwarded, "UNIQUEALPHA") {
+		t.Fatalf("%v", bodies)
+	}
+}
+
 func TestCompactionKeepsTheClientKeyOnTheCheapOrigin(t *testing.T) {
 	var auth string
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

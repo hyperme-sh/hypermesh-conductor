@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strings"
 
@@ -21,9 +22,14 @@ type Store struct {
 	db *sql.DB
 }
 
-// Open opens or creates the index database.
+// Open opens or creates the index database. The directory and database are
+// owner-only because they store note bodies.
 func Open(path string) (*Store, error) {
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+	dir := filepath.Dir(path)
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return nil, err
+	}
+	if err := os.Chmod(dir, 0o700); err != nil {
 		return nil, err
 	}
 	db, err := sql.Open("sqlite", "file:"+path+"?_pragma=busy_timeout(5000)")
@@ -35,7 +41,50 @@ func Open(path string) (*Store, error) {
 		_ = db.Close()
 		return nil, err
 	}
+	if err := restrictIndex(path); err != nil {
+		_ = db.Close()
+		return nil, err
+	}
 	return store, nil
+}
+
+func restrictIndex(path string) error {
+	for _, candidate := range []string{path, path + "-wal", path + "-shm", path + "-journal"} {
+		info, err := os.Stat(candidate)
+		if err != nil {
+			if os.IsNotExist(err) {
+				continue
+			}
+			return err
+		}
+		if info.IsDir() {
+			continue
+		}
+		if err := os.Chmod(candidate, 0o600); err != nil {
+			return err
+		}
+		if runtime.GOOS == "windows" {
+			continue
+		}
+		info, err = os.Stat(candidate)
+		if err != nil {
+			return err
+		}
+		if info.Mode().Perm()&0o077 != 0 {
+			return fmt.Errorf("note index is readable by other users")
+		}
+	}
+	if runtime.GOOS == "windows" {
+		return nil
+	}
+	info, err := os.Stat(filepath.Dir(path))
+	if err != nil {
+		return err
+	}
+	if info.Mode().Perm()&0o077 != 0 {
+		return fmt.Errorf("note index directory is readable by other users")
+	}
+	return nil
 }
 
 // Close closes the database.
@@ -121,12 +170,17 @@ func (s *Store) syncDir(dir string, replace bool) (Stats, error) {
 	seen := map[string]struct{}{}
 	for _, note := range incoming {
 		seen[note.Path] = struct{}{}
+	}
+	for _, note := range incoming {
 		var existingHash, existingID string
 		err = tx.QueryRow(`SELECT content_hash, id FROM notes WHERE path = ?`, note.Path).Scan(&existingHash, &existingID)
 		if err == nil && existingHash == note.Hash && existingID == note.ID {
 			continue
 		}
 		if err != nil && !errors.Is(err, sql.ErrNoRows) {
+			return stats, err
+		}
+		if err := releaseStaleOwner(tx, note, seen); err != nil {
 			return stats, err
 		}
 		if err := upsert(tx, note); err != nil {
@@ -235,6 +289,27 @@ type sqlDB interface {
 	Exec(query string, args ...any) (sql.Result, error)
 	Query(query string, args ...any) (*sql.Rows, error)
 	QueryRow(query string, args ...any) *sql.Row
+}
+
+// releaseStaleOwner drops an indexed path for this id when that path is no
+// longer in the directory. A rename keeps the id. Two files that both still
+// exist and share an id stay a collision.
+func releaseStaleOwner(tx sqlDB, note Note, seen map[string]struct{}) error {
+	var owner string
+	err := tx.QueryRow(`SELECT path FROM notes WHERE id = ?`, note.ID).Scan(&owner)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if owner == "" || owner == note.Path {
+		return nil
+	}
+	if _, ok := seen[owner]; ok {
+		return nil
+	}
+	return deletePath(tx, owner)
 }
 
 func upsert(tx sqlDB, note Note) error {
