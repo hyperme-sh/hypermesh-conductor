@@ -237,7 +237,7 @@ func runCmd(args []string, stdout, stderr io.Writer) int {
 		return 2
 	}
 	records, err := metrics.ReadJournal(*journalPath)
-	shown, ok := journalRecord(records, *taskID, *stepID)
+	shown, ok := journalRecord(records, rec.Header().Get("X-Conductor-Task"), rec.Header().Get("X-Conductor-Step"))
 	if err != nil || !ok {
 		fmt.Fprintln(stderr, "journal was not written")
 		return 1

@@ -145,6 +145,35 @@ func TestRunStopsBeforeTheProviderWhenTheJournalDirectoryIsMissing(t *testing.T)
 	}
 }
 
+func TestRunWithoutIDsPrintsTheGeneratedRow(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"choices":[{"message":{"role":"assistant","content":"ok"}}],"usage":{"prompt_tokens":2,"completion_tokens":1}}`))
+	}))
+	defer upstream.Close()
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "endpoints.json")
+	raw := fmt.Sprintf(`{
+		"listen": "127.0.0.1:8787",
+		"tiers": {
+			"cheap": {"provider":"openai-compatible","base_url":%q,"model":"local-small","auth":"passthrough","timeout_seconds":1},
+			"frontier": {"provider":"openai-compatible","base_url":%q,"model":"frontier","auth":"passthrough","timeout_seconds":1}
+		},
+		"prefix": {"system":"You are Conductor.","tools":[]},
+		"aiuditor": {"mode":"stub","fail_closed":true}
+	}`, upstream.URL+"/v1", upstream.URL+"/v1")
+	if err := os.WriteFile(configPath, []byte(raw), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	var stdout, stderr bytes.Buffer
+	code := Main([]string{
+		"run", "--config", configPath, "--journal", filepath.Join(dir, "journal.jsonl"),
+		"--class", "parse", "--message", "hello",
+	}, &stdout, &stderr)
+	if code != 0 || !strings.Contains(stdout.String(), `"task_id"`) || strings.Contains(stderr.String(), "journal was not written") {
+		t.Fatalf("code %d stderr %s stdout %s", code, stderr.String(), stdout.String())
+	}
+}
+
 func TestJournalRecordIsTheCurrentRun(t *testing.T) {
 	records := []metrics.StepRecord{
 		{TaskID: "task-1", StepID: "step-1", Tier: "cheap"},

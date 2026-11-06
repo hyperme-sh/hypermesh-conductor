@@ -335,6 +335,7 @@ func (p *Proxy) forward(w http.ResponseWriter, client *http.Request, upstream *h
 }
 
 func (p *Proxy) stream(w http.ResponseWriter, client *http.Request, resp *http.Response, wire translate.Wire, start time.Time, secrets []string, record metrics.StepRecord) {
+	stampRun(w, record)
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
 	w.WriteHeader(http.StatusOK)
@@ -461,6 +462,7 @@ func (p *Proxy) stream(w http.ResponseWriter, client *http.Request, resp *http.R
 }
 
 func (p *Proxy) finish(w http.ResponseWriter, client *http.Request, status int, body []byte, record metrics.StepRecord, secrets []string, streamed bool) {
+	stampRun(w, record)
 	if !streamed {
 		if body == nil {
 			body = mustJSON(map[string]any{"error": map[string]any{"message": errorText(record)}})
@@ -1002,6 +1004,15 @@ func errorText(record metrics.StepRecord) string {
 		return *record.Error
 	}
 	return "request failed"
+}
+
+func stampRun(w http.ResponseWriter, record metrics.StepRecord) {
+	if record.TaskID != "" {
+		w.Header().Set("X-Conductor-Task", record.TaskID)
+	}
+	if record.StepID != "" {
+		w.Header().Set("X-Conductor-Step", record.StepID)
+	}
 }
 
 func writeJSON(w http.ResponseWriter, status int, payload any) {
