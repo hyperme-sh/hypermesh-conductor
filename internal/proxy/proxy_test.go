@@ -391,6 +391,54 @@ func TestTruncatedProviderBodyIsUncertain(t *testing.T) {
 	}
 }
 
+func TestServerBoundsInboundConnections(t *testing.T) {
+	dir := t.TempDir()
+	cfg := loadTestConfig(t, dir, "http://127.0.0.1:9/v1", "http://127.0.0.1:9/v1", config.AuthPassthrough, config.ProviderOpenAICompatible)
+	server := New(cfg, aiuditor.Stub{}, nil).server()
+	if server.ReadHeaderTimeout <= 0 || server.ReadTimeout <= 0 || server.IdleTimeout <= 0 {
+		t.Fatalf("header %s read %s idle %s", server.ReadHeaderTimeout, server.ReadTimeout, server.IdleTimeout)
+	}
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+	limited := limitConns(ln, 1)
+	first, err := net.Dial("tcp", ln.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	accepted, err := limited.Accept()
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := net.Dial("tcp", ln.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer second.Close()
+	got := make(chan struct{})
+	go func() {
+		conn, err := limited.Accept()
+		if err == nil {
+			_ = conn.Close()
+		}
+		close(got)
+	}()
+	select {
+	case <-got:
+		t.Fatal("accepted a second connection while the first was open")
+	case <-time.After(50 * time.Millisecond):
+	}
+	_ = accepted.Close()
+	_ = first.Close()
+	select {
+	case <-got:
+	case <-time.After(time.Second):
+		t.Fatal("did not accept after the first connection closed")
+	}
+}
+
 func TestOversizedStreamLineIsUncertain(t *testing.T) {
 	previous := maxSSELine
 	maxSSELine = 64

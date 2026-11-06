@@ -18,6 +18,7 @@ import (
 	"os"
 	"regexp"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/hyperme-sh/hypermesh-conductor/internal/aiuditor"
@@ -57,6 +58,13 @@ func New(cfg config.Config, hop aiuditor.Hop, journal *metrics.Journal) *Proxy {
 	return &Proxy{Config: cfg, Hop: hop, Journal: journal, Logf: func(string, ...any) {}}
 }
 
+const (
+	readHeaderTimeout = 10 * time.Second
+	readTimeout       = 60 * time.Second
+	idleTimeout       = 120 * time.Second
+	maxConns          = 128
+)
+
 // ListenAndServe binds the configured loopback address.
 func (p *Proxy) ListenAndServe() error {
 	if err := config.ValidateListen(p.Config.Listen); err != nil {
@@ -66,8 +74,48 @@ func (p *Proxy) ListenAndServe() error {
 	if err != nil {
 		return err
 	}
-	server := &http.Server{Handler: p}
-	return server.Serve(listener)
+	return p.server().Serve(limitConns(listener, maxConns))
+}
+
+func (p *Proxy) server() *http.Server {
+	return &http.Server{
+		Handler:           p,
+		ReadHeaderTimeout: readHeaderTimeout,
+		ReadTimeout:       readTimeout,
+		IdleTimeout:       idleTimeout,
+	}
+}
+
+// limitConns stops Accept once n connections are open, so a drip of
+// unfinished handshakes cannot create an unbounded number of goroutines.
+func limitConns(ln net.Listener, n int) net.Listener {
+	return &connLimiter{Listener: ln, slots: make(chan struct{}, n)}
+}
+
+type connLimiter struct {
+	net.Listener
+	slots chan struct{}
+}
+
+func (l *connLimiter) Accept() (net.Conn, error) {
+	l.slots <- struct{}{}
+	conn, err := l.Listener.Accept()
+	if err != nil {
+		<-l.slots
+		return nil, err
+	}
+	return &trackedConn{Conn: conn, release: func() { <-l.slots }}, nil
+}
+
+type trackedConn struct {
+	net.Conn
+	release func()
+	once    sync.Once
+}
+
+func (c *trackedConn) Close() error {
+	c.once.Do(c.release)
+	return c.Conn.Close()
 }
 
 // ServeHTTP implements the local API.

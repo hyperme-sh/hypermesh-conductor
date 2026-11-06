@@ -154,6 +154,20 @@ func TestChatStreamClosesContentBlocks(t *testing.T) {
 	}
 }
 
+func TestTranslatedStreamCapsTotalText(t *testing.T) {
+	previous := maxEventBytes
+	maxEventBytes = 8
+	t.Cleanup(func() { maxEventBytes = previous })
+	stream := NewStream(ProtoResponses, ProtoMessages)
+	var out string
+	for i := 0; i < 5; i++ {
+		out += string(stream.Consume([]byte("data: {\"type\":\"content_block_delta\",\"delta\":{\"type\":\"text_delta\",\"text\":\"abcd\"}}\n\n")))
+	}
+	if !stream.TooLarge() || stream.respText.Len() > maxEventBytes || stream.translated > maxEventBytes {
+		t.Fatalf("large %v text %d translated %d out %s", stream.TooLarge(), stream.respText.Len(), stream.translated, out)
+	}
+}
+
 func TestStreamDropsAnOversizedLine(t *testing.T) {
 	previous := maxEventBytes
 	maxEventBytes = 16

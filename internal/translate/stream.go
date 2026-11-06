@@ -27,6 +27,7 @@ type Stream struct {
 	textIndex   int
 	nextOut     int
 	respCalls   []responseCall
+	translated  int
 	tooLarge    bool
 }
 
@@ -89,11 +90,21 @@ func (s *Stream) Consume(chunk []byte) []byte {
 // TooLarge reports that an upstream event exceeded the SSE line cap.
 func (s *Stream) TooLarge() bool { return s.tooLarge }
 
+func (s *Stream) noteTranslated(n int) bool {
+	if s.tooLarge || s.translated+n > maxEventBytes {
+		return false
+	}
+	s.translated += n
+	return true
+}
+
 func (s *Stream) failLarge(out *bytes.Buffer) []byte {
 	s.failed = true
 	s.tooLarge = true
 	s.done = true
 	s.buf = nil
+	s.respText.Reset()
+	s.respCalls = nil
 	out.Write(s.clientError(map[string]any{
 		"error": map[string]any{"message": "provider stream event is too large"},
 	}))
@@ -341,6 +352,9 @@ func (s *Stream) anthropicToResponses(kind string, obj map[string]any) []byte {
 			if !s.textOpen {
 				out.Write(s.openResponses())
 			}
+			if !s.noteTranslated(len(text)) {
+				return s.failLarge(&out)
+			}
 			s.respText.WriteString(text)
 			out.Write(sseData(map[string]any{
 				"type":          "response.output_text.delta",
@@ -391,6 +405,10 @@ func (s *Stream) appendFunctionArgs(obj, delta map[string]any) []byte {
 	for i := range s.respCalls {
 		if s.respCalls[i].block != blockIndex {
 			continue
+		}
+		if !s.noteTranslated(len(partial)) {
+			var out bytes.Buffer
+			return s.failLarge(&out)
 		}
 		s.respCalls[i].args.WriteString(partial)
 		return sseData(map[string]any{
