@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -722,6 +723,25 @@ func TestAnthropicCheapTierCompactsWithMessages(t *testing.T) {
 	}
 }
 
+func TestModifyKeepsTheOriginalStreamFlag(t *testing.T) {
+	var sawStream bool
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		raw, _ := io.ReadAll(r.Body)
+		sawStream = strings.Contains(string(raw), `"stream":true`)
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = io.WriteString(w, "data: {\"choices\":[{\"delta\":{\"content\":\"ok\"}}]}\n\ndata: [DONE]\n\n")
+	}))
+	defer upstream.Close()
+	dir := t.TempDir()
+	t.Setenv("CONDUCTOR_CHEAP_API_KEY", "test-key-do-not-log")
+	cfg := loadTestConfig(t, dir, upstream.URL+"/v1", upstream.URL+"/v1", config.AuthEnv, config.ProviderOpenAICompatible)
+	journal := openJournal(t, dir)
+	rec := do(New(cfg, stripStreamHop{}, journal), "/v1/chat/completions", "parse", "task-1", "stream-1", "", `{"stream":true,"messages":[{"role":"user","content":"hi"}]}`)
+	if rec.Code != http.StatusOK || !sawStream || rec.Header().Get("Content-Type") != "text/event-stream" {
+		t.Fatalf("code %d stream %v type %s body %s", rec.Code, sawStream, rec.Header().Get("Content-Type"), rec.Body.String())
+	}
+}
+
 func TestEmptySummaryKeepsTheOriginalTail(t *testing.T) {
 	var bodies []string
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -768,6 +788,21 @@ func TestOversizedProviderBodyIsRejected(t *testing.T) {
 	if err != nil || records[0].UsageStatus != metrics.StatusUncertain {
 		t.Fatal(err, records)
 	}
+}
+
+type stripStreamHop struct{}
+
+func (stripStreamHop) Review(_ context.Context, env aiuditor.Envelope) (aiuditor.Verdict, error) {
+	var obj map[string]any
+	if err := json.Unmarshal(env.Request.Body, &obj); err != nil {
+		return aiuditor.Verdict{}, err
+	}
+	delete(obj, "stream")
+	raw, err := json.Marshal(obj)
+	if err != nil {
+		return aiuditor.Verdict{}, err
+	}
+	return aiuditor.Verdict{Action: aiuditor.Modify, Reason: "drop stream", Body: raw}, nil
 }
 
 type neverEnding byte

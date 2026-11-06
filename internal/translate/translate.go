@@ -218,20 +218,11 @@ func responsesToAnthropic(body []byte, model string) ([]byte, error) {
 			if !ok {
 				return nil, fmt.Errorf("unsupported content for protocol translation")
 			}
-			role, _ := msg["role"].(string)
-			if role == "" {
-				role = "user"
-			}
-			text, err := contentToText(msg["content"])
+			converted, err := responsesItemToAnthropic(msg)
 			if err != nil {
 				return nil, err
 			}
-			if text == "" {
-				if direct, ok := msg["text"].(string); ok {
-					text = direct
-				}
-			}
-			messages = append(messages, map[string]any{"role": role, "content": text})
+			messages = append(messages, converted...)
 		}
 	default:
 		return nil, fmt.Errorf("unsupported content for protocol translation")
@@ -433,6 +424,95 @@ func userBlocksToOpenAI(blocks []any) ([]any, error) {
 		out = append(out, map[string]any{"role": "user", "content": ""})
 	}
 	return out, nil
+}
+
+func responsesItemToAnthropic(msg map[string]any) ([]any, error) {
+	kind, _ := msg["type"].(string)
+	switch kind {
+	case "function_call":
+		name, _ := msg["name"].(string)
+		id, _ := msg["call_id"].(string)
+		if id == "" {
+			id, _ = msg["id"].(string)
+		}
+		input, err := responsesArguments(msg["arguments"])
+		if err != nil {
+			return nil, err
+		}
+		return []any{map[string]any{
+			"role": "assistant",
+			"content": []any{map[string]any{
+				"type": "tool_use", "id": id, "name": name, "input": input,
+			}},
+		}}, nil
+	case "function_call_output":
+		id, _ := msg["call_id"].(string)
+		output, err := responsesOutput(msg["output"])
+		if err != nil {
+			return nil, err
+		}
+		return []any{map[string]any{
+			"role": "user",
+			"content": []any{map[string]any{
+				"type": "tool_result", "tool_use_id": id, "content": output,
+			}},
+		}}, nil
+	case "", "message":
+		role, _ := msg["role"].(string)
+		if role == "" {
+			role = "user"
+		}
+		text, err := contentToText(msg["content"])
+		if err != nil {
+			return nil, err
+		}
+		if text == "" {
+			if direct, ok := msg["text"].(string); ok {
+				text = direct
+			}
+		}
+		return []any{map[string]any{"role": role, "content": text}}, nil
+	default:
+		return nil, fmt.Errorf("unsupported content for protocol translation")
+	}
+}
+
+func responsesArguments(value any) (any, error) {
+	switch args := value.(type) {
+	case nil:
+		return map[string]any{}, nil
+	case string:
+		if args == "" {
+			return map[string]any{}, nil
+		}
+		var parsed any
+		if err := json.Unmarshal([]byte(args), &parsed); err != nil {
+			return nil, fmt.Errorf("unsupported content for protocol translation")
+		}
+		if _, ok := parsed.(map[string]any); !ok {
+			return nil, fmt.Errorf("unsupported content for protocol translation")
+		}
+		return parsed, nil
+	case map[string]any:
+		return args, nil
+	default:
+		return nil, fmt.Errorf("unsupported content for protocol translation")
+	}
+}
+
+func responsesOutput(value any) (string, error) {
+	switch output := value.(type) {
+	case nil:
+		return "", nil
+	case string:
+		return output, nil
+	default:
+		raw, err := json.Marshal(output)
+		if err != nil {
+			return "", fmt.Errorf("unsupported content for protocol translation")
+		}
+		return string(raw), nil
+	}
 }
 
 func contentToText(content any) (string, error) {

@@ -169,13 +169,40 @@ func textOfAll(items []json.RawMessage) string {
 		if err := json.Unmarshal(item, &obj); err != nil {
 			continue
 		}
-		switch content := obj["content"].(type) {
-		case string:
-			buf.WriteString(content)
-			buf.WriteByte('\n')
-		case []any:
-			for _, part := range content {
-				block, _ := part.(map[string]any)
+		if calls, ok := obj["tool_calls"].([]any); ok {
+			for _, call := range calls {
+				item, _ := call.(map[string]any)
+				fn, _ := item["function"].(map[string]any)
+				name, _ := fn["name"].(string)
+				id, _ := item["id"].(string)
+				args, _ := fn["arguments"].(string)
+				buf.WriteString("[tool_use " + name + " " + id + "] " + args + "\n")
+			}
+		}
+		writeSummaryContent(&buf, obj["content"])
+	}
+	return buf.String()
+}
+
+func writeSummaryContent(buf *bytes.Buffer, content any) {
+	switch value := content.(type) {
+	case string:
+		buf.WriteString(value)
+		buf.WriteByte('\n')
+	case []any:
+		for _, part := range value {
+			block, _ := part.(map[string]any)
+			switch block["type"] {
+			case "tool_use":
+				name, _ := block["name"].(string)
+				id, _ := block["id"].(string)
+				raw, _ := json.Marshal(block["input"])
+				buf.WriteString("[tool_use " + name + " " + id + "] " + string(raw) + "\n")
+			case "tool_result":
+				id, _ := block["tool_use_id"].(string)
+				buf.WriteString("[tool_result " + id + "] ")
+				writeSummaryContent(buf, block["content"])
+			default:
 				if text, ok := block["text"].(string); ok {
 					buf.WriteString(text)
 					buf.WriteByte('\n')
@@ -183,7 +210,6 @@ func textOfAll(items []json.RawMessage) string {
 			}
 		}
 	}
-	return buf.String()
 }
 
 func joinArray(items []json.RawMessage) json.RawMessage {

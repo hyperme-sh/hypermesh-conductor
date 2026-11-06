@@ -172,7 +172,7 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			p.finish(w, r, http.StatusBadGateway, nil, base, nil, false)
 			return
 		}
-		prepared = verdict.Body
+		prepared = forceStreamFlag(verdict.Body, stream)
 		if hash, err := hashBody(proto, prepared); err == nil {
 			prelimHash = hash
 			base.PrefixSHA256 = hash
@@ -742,6 +742,25 @@ func providerError(payload []byte) bool {
 	}
 	_, ok := obj["error"].(map[string]any)
 	return ok
+}
+
+func forceStreamFlag(body []byte, stream bool) []byte {
+	obj, err := jsonbody.Parse(body)
+	if err != nil {
+		return body
+	}
+	if stream {
+		if err := obj.Set("stream", true); err != nil {
+			return body
+		}
+	} else {
+		obj.Delete("stream")
+	}
+	raw, err := obj.Marshal()
+	if err != nil {
+		return body
+	}
+	return raw
 }
 
 func ssePayload(line []byte) []byte {

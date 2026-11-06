@@ -163,6 +163,21 @@ func TestChatStreamKeepsToolCalls(t *testing.T) {
 	}
 }
 
+func TestResponsesToolItemsBecomeAnthropicBlocks(t *testing.T) {
+	body := []byte(`{"input":[{"type":"function_call","call_id":"call_1","name":"lookup","arguments":"{\"q\":1}"},{"type":"function_call_output","call_id":"call_1","output":"balance is 930"}]}`)
+	wire, err := Request(ProtoResponses, ProviderAnthropic, "frontier", body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(wire.Body)
+	if !strings.Contains(text, `"type":"tool_use"`) || !strings.Contains(text, `"tool_use_id":"call_1"`) || !strings.Contains(text, "balance is 930") {
+		t.Fatal(text)
+	}
+	if _, err := Request(ProtoResponses, ProviderAnthropic, "frontier", []byte(`{"input":[{"type":"reasoning","summary":"secret"}]}`)); err == nil {
+		t.Fatal("unsupported responses item was forwarded")
+	}
+}
+
 func TestSameProtocolPreservesNestedBytes(t *testing.T) {
 	body := []byte(`{"messages":[{"role":"user","content":"a & b"}],"stream":false}`)
 	wire, err := Request(ProtoChat, ProviderOpenAICompatible, "local-small", body)

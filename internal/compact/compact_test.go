@@ -50,6 +50,17 @@ func TestToolExchangeIsNotSplit(t *testing.T) {
 	}
 }
 
+func TestAnthropicToolResultReachesTheSummary(t *testing.T) {
+	raw := []byte(`[{"role":"assistant","content":[{"type":"tool_use","id":"call_1","name":"lookup","input":{"q":1}}]},{"role":"user","content":[{"type":"tool_result","tool_use_id":"call_1","content":"balance is 930"}]}]`)
+	plan, err := PlanMessages(raw, 1, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !plan.Needed || !strings.Contains(plan.SummaryInput, "balance is 930") || !strings.Contains(plan.SummaryInput, "lookup") {
+		t.Fatal(plan.Needed, plan.SummaryInput)
+	}
+}
+
 func TestShortTailIsLeftAlone(t *testing.T) {
 	raw := []byte(`[{"role":"user","content":"hi"}]`)
 	plan, err := PlanMessages(raw, 1000, 2)
