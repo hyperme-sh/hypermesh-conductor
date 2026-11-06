@@ -73,6 +73,26 @@ func (s *Stream) resizeHeld(n int) bool {
 	return true
 }
 
+// Include provider-controlled metadata as well as accumulated content.
+func (s *Stream) retainedSize() int {
+	n := len(s.buf) + s.translated + len(s.id) + len(s.event) + len(s.respStop) + len(s.finishReason)
+	var usageSize func(map[string]any) int
+	usageSize = func(values map[string]any) int {
+		total := 0
+		for key, value := range values {
+			total += len(key) + 32
+			switch v := value.(type) {
+			case json.Number:
+				total += len(v)
+			case map[string]any:
+				total += usageSize(v)
+			}
+		}
+		return total
+	}
+	return n + usageSize(s.chatUsage)
+}
+
 // Close releases every retained provider byte, including on client disconnect.
 func (s *Stream) Close() {
 	s.buf = nil
@@ -81,7 +101,7 @@ func (s *Stream) Close() {
 	s.toolSlots = nil
 	s.chatTools = nil
 	s.chatUsage = nil
-	s.id, s.event = "", ""
+	s.id, s.event, s.respStop, s.finishReason = "", "", "", ""
 	s.resizeHeld(0)
 	s.closed = true
 }
@@ -140,7 +160,7 @@ func (s *Stream) Consume(chunk []byte) []byte {
 		if s.failed {
 			break
 		}
-		needed := len(s.buf) + s.translated + len(s.id) + len(s.event)
+		needed := s.retainedSize()
 		if needed > maxEventBytes || (needed > s.held && !s.resizeHeld(needed)) {
 			return s.failLarge(&out)
 		}
@@ -148,7 +168,7 @@ func (s *Stream) Consume(chunk []byte) []byte {
 	if !s.closed {
 		// Do not retain a consumed chunk's backing array outside its reservation.
 		s.buf = bytes.Clone(s.buf)
-		if !s.resizeHeld(len(s.buf) + s.translated + len(s.id) + len(s.event)) {
+		if !s.resizeHeld(s.retainedSize()) {
 			return s.failLarge(&out)
 		}
 	}
@@ -218,7 +238,7 @@ func (s *Stream) onLine(line string) []byte {
 		return nil
 	}
 	if strings.HasPrefix(line, "event:") {
-		s.event = strings.TrimSpace(strings.TrimPrefix(line, "event:"))
+		s.event = strings.Clone(strings.TrimSpace(strings.TrimPrefix(line, "event:")))
 		return nil
 	}
 	if !strings.HasPrefix(line, "data:") {

@@ -52,3 +52,22 @@ func TestMessageIDsAndPartialLinesConsumeSharedBudget(t *testing.T) {
 		t.Error("partial event bypassed retained ID reservation")
 	}
 }
+
+func TestProviderMetadataRemainsCharged(t *testing.T) {
+	old := maxRetainedStreamBytes
+	maxRetainedStreamBytes = 2048
+	t.Cleanup(func() { maxRetainedStreamBytes = old })
+	s := NewStream(ProtoMessages, ProtoChat)
+	defer s.Close()
+	s.Consume([]byte("data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"" + strings.Repeat("f", 1000) + "\"}]}\n\n"))
+	if used := retainedStreamBytes.Load(); used < 1000 {
+		t.Fatalf("finish metadata uncharged: %d", used)
+	}
+	s.Close()
+	s = NewStream(ProtoChat, ProtoMessages)
+	defer s.Close()
+	s.Consume([]byte("event: " + strings.Repeat(" ", 1000) + "x\n"))
+	if used := retainedStreamBytes.Load(); used != 1 {
+		t.Fatalf("event retained backing bytes: %d", used)
+	}
+}
