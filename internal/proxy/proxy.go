@@ -370,7 +370,7 @@ func (p *Proxy) stream(w http.ResponseWriter, client *http.Request, resp *http.R
 			break
 		}
 	}
-	if len(pending) > 0 {
+	if len(pending) > 0 && readErr == nil {
 		if payload := ssePayload(pending); payload != nil {
 			if providerError(payload) {
 				failed = true
@@ -378,7 +378,13 @@ func (p *Proxy) stream(w http.ResponseWriter, client *http.Request, resp *http.R
 			usage.Absorb(&acc, payload, wire.Protocol == translate.ProtoEmbeddings)
 		}
 	}
-	if tail := bridge.Finish(); len(tail) > 0 {
+	var tail []byte
+	if readErr != nil {
+		tail = bridge.Abort()
+	} else {
+		tail = bridge.Finish()
+	}
+	if len(tail) > 0 {
 		_, _ = w.Write(redact(tail, secrets))
 		flush(w)
 	}
@@ -818,10 +824,7 @@ func (p *Proxy) applyReview(w http.ResponseWriter, r *http.Request, base *metric
 		p.finish(w, r, http.StatusForbidden, nil, *base, nil, false)
 		return prepared, true
 	case aiuditor.Modify:
-		if len(verdict.Body) == 0 {
-			return prepared, false
-		}
-		if !json.Valid(verdict.Body) {
+		if len(verdict.Body) == 0 || !json.Valid(verdict.Body) {
 			msg := "aiuditor modify was not JSON"
 			base.Error = &msg
 			base.UsageStatus = metrics.StatusUncertain

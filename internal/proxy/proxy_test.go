@@ -453,13 +453,53 @@ func TestOversizedStreamLineIsUncertain(t *testing.T) {
 	cfg := loadTestConfig(t, dir, upstream.URL+"/v1", upstream.URL+"/v1", config.AuthEnv, config.ProviderOpenAICompatible)
 	journal := openJournal(t, dir)
 	rec := do(New(cfg, aiuditor.Stub{}, journal), "/v1/chat/completions", "summarize", "task-1", "huge-line", "", `{"stream":true,"messages":[{"role":"user","content":"hi"}]}`)
-	if rec.Code != http.StatusOK || rec.Body.Len() > maxSSELine {
+	if rec.Code != http.StatusOK || strings.Contains(rec.Body.String(), strings.Repeat("a", 32)) || !strings.Contains(rec.Body.String(), "provider request failed") {
 		t.Fatalf("code %d bytes %d body %q", rec.Code, rec.Body.Len(), rec.Body.String())
 	}
 	records, err := metrics.ReadJournal(journal.Path())
 	if err != nil || len(records) != 1 || records[0].UsageStatus != metrics.StatusUncertain || records[0].Error == nil {
 		t.Fatal(err, records)
 	}
+}
+
+func TestBrokenResponsesStreamIsNotCompleted(t *testing.T) {
+	payload := "event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"delta\":{\"type\":\"text_delta\",\"text\":\"partial\"}}\n\n"
+	base := truncatedServer(t, "200 OK", "text/event-stream", payload)
+	dir := t.TempDir()
+	cfg := loadTestConfig(t, dir, base, base, config.AuthPassthrough, config.ProviderAnthropic)
+	journal := openJournal(t, dir)
+	rec := do(New(cfg, aiuditor.Stub{}, journal), "/v1/responses", "parse", "task-1", "cut-1", "", `{"stream":true,"input":"hi"}`)
+	body := rec.Body.String()
+	if rec.Code != http.StatusOK || strings.Contains(body, `"status":"completed"`) || !strings.Contains(body, `"type":"error"`) {
+		t.Fatalf("code %d body %s", rec.Code, body)
+	}
+	records, err := metrics.ReadJournal(journal.Path())
+	if err != nil || len(records) != 1 || records[0].UsageStatus != metrics.StatusUncertain || records[0].Error == nil {
+		t.Fatal(err, records)
+	}
+}
+
+func TestModifyWithoutABodyDoesNotForward(t *testing.T) {
+	hits := 0
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits++
+		_, _ = w.Write([]byte(`{"usage":{"prompt_tokens":1,"completion_tokens":1}}`))
+	}))
+	defer upstream.Close()
+	dir := t.TempDir()
+	t.Setenv("CONDUCTOR_CHEAP_API_KEY", "test-key-do-not-log")
+	cfg := loadTestConfig(t, dir, upstream.URL+"/v1", upstream.URL+"/v1", config.AuthEnv, config.ProviderOpenAICompatible)
+	journal := openJournal(t, dir)
+	rec := do(New(cfg, emptyModify{}, journal), "/v1/chat/completions", "parse", "task-1", "secret-1", "", `{"messages":[{"role":"user","content":"see SECRET"}]}`)
+	if rec.Code != http.StatusBadGateway || hits != 0 || strings.Contains(rec.Body.String(), "SECRET") {
+		t.Fatalf("code %d hits %d body %s", rec.Code, hits, rec.Body.String())
+	}
+}
+
+type emptyModify struct{}
+
+func (emptyModify) Review(context.Context, aiuditor.Envelope) (aiuditor.Verdict, error) {
+	return aiuditor.Verdict{Action: aiuditor.Modify, Reason: "edit"}, nil
 }
 
 func TestTruncatedStreamIsUncertain(t *testing.T) {

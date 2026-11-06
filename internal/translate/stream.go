@@ -111,6 +111,17 @@ func (s *Stream) failLarge(out *bytes.Buffer) []byte {
 	return out.Bytes()
 }
 
+// Abort tells the client the upstream ended in failure. It does not emit a
+// successful completion.
+func (s *Stream) Abort() []byte {
+	if s.done || s.failed {
+		return nil
+	}
+	s.failed = true
+	s.done = true
+	return s.clientError(map[string]any{"error": map[string]any{"message": "provider request failed"}})
+}
+
 // Finish flushes a closing event when the upstream ended quietly.
 func (s *Stream) Finish() []byte {
 	if s.passthrough() || s.done || s.failed {

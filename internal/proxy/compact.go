@@ -132,7 +132,10 @@ func (p *Proxy) cheapSummary(ctx context.Context, client *http.Request, tail str
 		}
 	} else if verdict.Action == aiuditor.Deny {
 		return "", usage.UncertainUsage(), 0, fmt.Errorf("aiuditor deny: %s", verdict.Reason)
-	} else if verdict.Action == aiuditor.Modify && json.Valid(verdict.Body) {
+	} else if verdict.Action == aiuditor.Modify {
+		if !json.Valid(verdict.Body) {
+			return "", usage.UncertainUsage(), 0, fmt.Errorf("aiuditor modify was not JSON")
+		}
 		forced, err := forceModel(verdict.Body, tier.Model)
 		if err != nil {
 			return "", usage.UncertainUsage(), 0, err
