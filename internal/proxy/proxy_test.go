@@ -1000,6 +1000,93 @@ func TestMessagesPrefixMatchUsesTheClientToolShape(t *testing.T) {
 	}
 }
 
+func TestTerminalStreamClosesTheProviderBody(t *testing.T) {
+	for _, tc := range []struct {
+		path, provider, payload, want string
+	}{
+		{"/v1/responses", config.ProviderAnthropic, "event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n", `"type":"response.completed"`},
+		{"/v1/chat/completions", config.ProviderOpenAICompatible, "data: {\"choices\":[{\"delta\":{\"content\":\"yo\"}}]}\n\ndata: [DONE]\n\n", "[DONE]"},
+	} {
+		held := make(chan struct{})
+		release := make(chan struct{})
+		upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "text/event-stream")
+			w.WriteHeader(http.StatusOK)
+			_, _ = io.WriteString(w, tc.payload)
+			if f, ok := w.(http.Flusher); ok {
+				f.Flush()
+			}
+			close(held)
+			<-release
+		}))
+		dir := t.TempDir()
+		cfg := loadTestConfig(t, dir, upstream.URL+"/v1", upstream.URL+"/v1", config.AuthPassthrough, tc.provider)
+		done := make(chan *httptest.ResponseRecorder, 1)
+		go func() {
+			done <- do(New(cfg, aiuditor.Stub{}, openJournal(t, dir)), tc.path, "parse", "task-1", "done-1", "", `{"stream":true,"messages":[{"role":"user","content":"hi"}],"input":"hi"}`)
+		}()
+		select {
+		case <-held:
+		case <-time.After(2 * time.Second):
+			close(release)
+			upstream.Close()
+			t.Fatalf("%s did not send the terminal event", tc.path)
+		}
+		select {
+		case rec := <-done:
+			close(release)
+			upstream.Close()
+			if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), tc.want) {
+				t.Fatalf("%s code %d body %s", tc.path, rec.Code, rec.Body.String())
+			}
+		case <-time.After(2 * time.Second):
+			close(release)
+			upstream.Close()
+			t.Fatalf("%s waited for the provider body to close", tc.path)
+		}
+	}
+}
+
+type growSummaryHop struct{}
+
+func (growSummaryHop) Review(_ context.Context, env aiuditor.Envelope) (aiuditor.Verdict, error) {
+	if !strings.Contains(string(env.Request.Body), "Summarize the conversation tail") {
+		return aiuditor.Verdict{Action: aiuditor.Allow, Reason: "ok"}, nil
+	}
+	grown := `{"model":"local-small","messages":[{"role":"user","content":"` + strings.Repeat("y", 5000) + `"}]}`
+	return aiuditor.Verdict{Action: aiuditor.Modify, Reason: "grow", Body: []byte(grown)}, nil
+}
+
+func TestSummaryModifyStaysInsideTheBodyBudget(t *testing.T) {
+	previous := bodyLimit
+	bodyLimit = 4096
+	t.Cleanup(func() {
+		bodyMu.Lock()
+		bodyUsed = 0
+		bodyLimit = previous
+		bodyMu.Unlock()
+	})
+	var sent int
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		raw, _ := io.ReadAll(r.Body)
+		sent = len(raw)
+		_, _ = w.Write([]byte(`{"choices":[{"message":{"content":"ok"}}],"usage":{"prompt_tokens":1,"completion_tokens":1}}`))
+	}))
+	defer upstream.Close()
+	dir := t.TempDir()
+	cfg := loadTestConfig(t, dir, upstream.URL+"/v1", upstream.URL+"/v1", config.AuthPassthrough, config.ProviderOpenAICompatible)
+	cfg.Compaction.MaxTailTokens = 30
+	cfg.Compaction.RecentMessages = 0
+	long := strings.Repeat("word ", 40)
+	rec := do(New(cfg, growSummaryHop{}, openJournal(t, dir)), "/v1/chat/completions", "parse", "task-1", "sum-1", "", `{"messages":[{"role":"user","content":"`+long+`"}]}`)
+	bodyMu.Lock()
+	used := bodyUsed
+	bodyMu.Unlock()
+	if rec.Code != http.StatusServiceUnavailable || sent != 0 || used != 0 || !strings.Contains(rec.Body.String(), "budget") {
+		t.Fatalf("code %d sent %d used %d body %s", rec.Code, sent, used, rec.Body.String())
+	}
+}
+
 func TestResponsesFailureIsUncertain(t *testing.T) {
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/event-stream")

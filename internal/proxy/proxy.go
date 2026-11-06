@@ -235,6 +235,10 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			writeJSON(w, http.StatusUnauthorized, map[string]any{"error": map[string]any{"message": compactErr.Error()}})
 			return
 		}
+		if errors.Is(compactErr, errBodyBudget) {
+			writeJSON(w, http.StatusServiceUnavailable, map[string]any{"error": map[string]any{"message": "request body budget exceeded"}})
+			return
+		}
 	}
 	if didCompact {
 		prepared = next
@@ -370,6 +374,7 @@ func (p *Proxy) stream(w http.ResponseWriter, client *http.Request, resp *http.R
 	var pending []byte
 	var readErr error
 	failed := false
+	terminal := false
 	clientGone := false
 	writeClient := func(p []byte) bool {
 		if clientGone || len(p) == 0 {
@@ -411,10 +416,14 @@ func (p *Proxy) stream(w http.ResponseWriter, client *http.Request, resp *http.R
 				line := pending[:i]
 				ready = append(ready, pending[:i+1]...)
 				pending = pending[i+1:]
+				if streamDone(line) {
+					terminal = true
+				}
 				payload := ssePayload(line)
 				if payload != nil {
 					if providerError(payload) {
 						failed = true
+						terminal = true
 					}
 					usage.Absorb(&acc, payload, wire.Protocol == translate.ProtoEmbeddings)
 				}
@@ -429,6 +438,10 @@ func (p *Proxy) stream(w http.ResponseWriter, client *http.Request, resp *http.R
 				if !writeClient(ready) {
 					break
 				}
+				if terminal {
+					_ = resp.Body.Close()
+					break
+				}
 			} else {
 				out := bridge.Consume(chunk)
 				if !writeClient(out) {
@@ -437,6 +450,10 @@ func (p *Proxy) stream(w http.ResponseWriter, client *http.Request, resp *http.R
 				if bridge.TooLarge() {
 					pending = nil
 					readErr = fmt.Errorf("provider stream event is too large")
+					_ = resp.Body.Close()
+					break
+				}
+				if bridge.Closed() {
 					_ = resp.Body.Close()
 					break
 				}
@@ -869,6 +886,27 @@ func authorizeProxy(src *http.Request) error {
 		return proxyAuthError{"proxy token is required to use the configured provider key"}
 	}
 	return nil
+}
+
+func streamDone(line []byte) bool {
+	text := strings.TrimSpace(string(line))
+	if !strings.HasPrefix(text, "data:") {
+		return false
+	}
+	data := strings.TrimSpace(strings.TrimPrefix(text, "data:"))
+	if data == "[DONE]" {
+		return true
+	}
+	var obj map[string]any
+	if err := json.Unmarshal([]byte(data), &obj); err != nil {
+		return false
+	}
+	switch obj["type"] {
+	case "message_stop", "response.completed", "response.incomplete", "response.failed", "error":
+		return true
+	default:
+		return false
+	}
 }
 
 func providerError(payload []byte) bool {

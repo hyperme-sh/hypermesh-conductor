@@ -49,7 +49,7 @@ func (p *Proxy) maybeCompact(ctx context.Context, client *http.Request, proto st
 	}
 	if err != nil {
 		var denied proxyAuthError
-		if errors.As(err, &denied) {
+		if errors.As(err, &denied) || errors.Is(err, errBodyBudget) {
 			return prepared, false, err
 		}
 		msg := "compaction request failed"
@@ -155,6 +155,12 @@ func (p *Proxy) cheapSummary(ctx context.Context, client *http.Request, tail str
 		}
 		bodyToSend = forced
 	}
+	reserved := 0
+	defer func() { releaseBody(reserved) }()
+	if !replaceReservation(reserved, len(bodyToSend)) {
+		return "", usage.UncertainUsage(), 0, errBodyBudget
+	}
+	reserved = len(bodyToSend)
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, tier.BaseURL+"/"+wire.Path, bytes.NewReader(bodyToSend))
 	if err != nil {
 		return "", usage.UncertainUsage(), 0, err

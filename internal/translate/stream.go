@@ -93,6 +93,9 @@ func (s *Stream) retainedSize() int {
 	return n + usageSize(s.chatUsage)
 }
 
+// Closed reports that a terminal event released the retained provider bytes.
+func (s *Stream) Closed() bool { return s.closed }
+
 // Close releases every retained provider byte, including on client disconnect.
 func (s *Stream) Close() {
 	s.buf = nil
