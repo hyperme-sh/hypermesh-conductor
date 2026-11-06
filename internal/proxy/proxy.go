@@ -126,57 +126,17 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	stream := boolField(obj, "stream")
 	prelimHash, _ := hashBody(proto, prepared)
-	verdict, hopErr := p.Hop.Review(r.Context(), aiuditor.Envelope{
-		Request: aiuditor.Request{
-			Protocol: proto,
-			Method:   r.Method,
-			Path:     r.URL.Path,
-			Stream:   stream,
-			Headers:  aiuditor.FilterHeaders(r.Header),
-			Body:     prepared,
-		},
-		Routing: aiuditor.Routing{
-			JobClass:           decision.JobClass,
-			Tier:               decision.Tier,
-			ModelID:            tier.Model,
-			Reason:             decision.Reason,
-			SuggestionTier:     decision.SuggestionTier,
-			SuggestionAccepted: decision.SuggestionAccepted,
-			PrefixSHA256:       prelimHash,
-		},
-	})
 	base := p.baseRecord(taskID, stepID, decision, tier.Model, prelimHash)
 	if prefixMatch {
 		yes := true
 		base.PrefixCacheMatch = &yes
 	}
-	if hopErr != nil {
-		if p.Config.AIU.FailClosed {
-			msg := "aiuditor unreachable"
-			base.Error = &msg
-			base.UsageStatus = metrics.StatusUncertain
-			p.finish(w, r, http.StatusServiceUnavailable, nil, base, nil, false)
-			return
-		}
-	} else if verdict.Action == aiuditor.Deny {
-		msg := "aiuditor deny: " + verdict.Reason
-		base.Error = &msg
-		base.UsageStatus = metrics.StatusUncertain
-		p.finish(w, r, http.StatusForbidden, nil, base, nil, false)
+	prepared, halted := p.applyReview(w, r, &base, proto, prepared, stream, decision, tier, prelimHash)
+	if halted {
 		return
-	} else if verdict.Action == aiuditor.Modify && len(verdict.Body) > 0 {
-		if !json.Valid(verdict.Body) {
-			msg := "aiuditor modify was not JSON"
-			base.Error = &msg
-			base.UsageStatus = metrics.StatusUncertain
-			p.finish(w, r, http.StatusBadGateway, nil, base, nil, false)
-			return
-		}
-		prepared = forceStreamFlag(verdict.Body, stream)
-		if hash, err := hashBody(proto, prepared); err == nil {
-			prelimHash = hash
-			base.PrefixSHA256 = hash
-		}
+	}
+	if hash, err := hashBody(proto, prepared); err == nil {
+		prelimHash = hash
 	}
 	next, didCompact, compactErr := p.maybeCompact(r.Context(), r, proto, prepared, taskID, stepID, prelimHash)
 	if compactErr != nil {
@@ -190,6 +150,10 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		prepared = next
 		yes := true
 		base.Compacted = &yes
+		prepared, halted = p.applyReview(w, r, &base, proto, prepared, stream, decision, tier, base.PrefixSHA256)
+		if halted {
+			return
+		}
 	}
 	forced, err := forceModel(prepared, tier.Model)
 	if err != nil {
@@ -742,6 +706,62 @@ func providerError(payload []byte) bool {
 	}
 	_, ok := obj["error"].(map[string]any)
 	return ok
+}
+
+func (p *Proxy) applyReview(w http.ResponseWriter, r *http.Request, base *metrics.StepRecord, proto string, prepared []byte, stream bool, decision routing.Decision, tier config.Tier, hash string) ([]byte, bool) {
+	verdict, hopErr := p.Hop.Review(r.Context(), aiuditor.Envelope{
+		Request: aiuditor.Request{
+			Protocol: proto,
+			Method:   r.Method,
+			Path:     r.URL.Path,
+			Stream:   stream,
+			Headers:  aiuditor.FilterHeaders(r.Header),
+			Body:     prepared,
+		},
+		Routing: aiuditor.Routing{
+			JobClass:           decision.JobClass,
+			Tier:               decision.Tier,
+			ModelID:            tier.Model,
+			Reason:             decision.Reason,
+			SuggestionTier:     decision.SuggestionTier,
+			SuggestionAccepted: decision.SuggestionAccepted,
+			PrefixSHA256:       hash,
+		},
+	})
+	if hopErr != nil {
+		if p.Config.AIU.FailClosed {
+			msg := "aiuditor unreachable"
+			base.Error = &msg
+			base.UsageStatus = metrics.StatusUncertain
+			p.finish(w, r, http.StatusServiceUnavailable, nil, *base, nil, false)
+			return prepared, true
+		}
+		return prepared, false
+	}
+	switch verdict.Action {
+	case aiuditor.Deny:
+		msg := "aiuditor deny: " + verdict.Reason
+		base.Error = &msg
+		base.UsageStatus = metrics.StatusUncertain
+		p.finish(w, r, http.StatusForbidden, nil, *base, nil, false)
+		return prepared, true
+	case aiuditor.Modify:
+		if len(verdict.Body) == 0 {
+			return prepared, false
+		}
+		if !json.Valid(verdict.Body) {
+			msg := "aiuditor modify was not JSON"
+			base.Error = &msg
+			base.UsageStatus = metrics.StatusUncertain
+			p.finish(w, r, http.StatusBadGateway, nil, *base, nil, false)
+			return prepared, true
+		}
+		prepared = forceStreamFlag(verdict.Body, stream)
+		if next, err := hashBody(proto, prepared); err == nil {
+			base.PrefixSHA256 = next
+		}
+	}
+	return prepared, false
 }
 
 func forceStreamFlag(body []byte, stream bool) []byte {

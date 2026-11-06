@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -740,6 +741,49 @@ func TestModifyKeepsTheOriginalStreamFlag(t *testing.T) {
 	if rec.Code != http.StatusOK || !sawStream || rec.Header().Get("Content-Type") != "text/event-stream" {
 		t.Fatalf("code %d stream %v type %s body %s", rec.Code, sawStream, rec.Header().Get("Content-Type"), rec.Body.String())
 	}
+}
+
+func TestCompactedSummaryIsReviewedBeforeForwarding(t *testing.T) {
+	var mains []string
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		raw, _ := io.ReadAll(r.Body)
+		if strings.Contains(string(raw), "Summarize the conversation tail") {
+			_, _ = w.Write([]byte(`{"choices":[{"message":{"role":"assistant","content":"AIUDITOR_BLOCKED"}}],"usage":{"prompt_tokens":4,"completion_tokens":1}}`))
+			return
+		}
+		mains = append(mains, string(raw))
+		_, _ = w.Write([]byte(`{"choices":[{"message":{"role":"assistant","content":"ok"}}],"usage":{"prompt_tokens":2,"completion_tokens":1}}`))
+	}))
+	defer upstream.Close()
+	dir := t.TempDir()
+	t.Setenv("CONDUCTOR_CHEAP_API_KEY", "test-key-do-not-log")
+	cfg := loadTestConfig(t, dir, upstream.URL+"/v1", upstream.URL+"/v1", config.AuthEnv, config.ProviderOpenAICompatible)
+	cfg.Compaction.MaxTailTokens = 30
+	cfg.Compaction.RecentMessages = 0
+	journal := openJournal(t, dir)
+	long := strings.Repeat("LONGTAILMARKER ", 40)
+	body := `{"messages":[{"role":"user","content":"` + long + `"}]}`
+	denied := do(New(cfg, blockCompactedHop{deny: true}, journal), "/v1/chat/completions", "parse", "task-1", "deny-1", "", body)
+	if denied.Code != http.StatusForbidden || len(mains) != 0 {
+		t.Fatalf("code %d mains %d body %s", denied.Code, len(mains), denied.Body.String())
+	}
+	changed := do(New(cfg, blockCompactedHop{}, journal), "/v1/chat/completions", "parse", "task-1", "edit-1", "", body)
+	if changed.Code != http.StatusOK || len(mains) != 1 || strings.Contains(mains[0], "AIUDITOR_BLOCKED") || !strings.Contains(mains[0], "[redacted]") {
+		t.Fatalf("code %d mains %v body %s", changed.Code, mains, changed.Body.String())
+	}
+}
+
+type blockCompactedHop struct{ deny bool }
+
+func (h blockCompactedHop) Review(_ context.Context, env aiuditor.Envelope) (aiuditor.Verdict, error) {
+	if !strings.Contains(string(env.Request.Body), "AIUDITOR_BLOCKED") {
+		return aiuditor.Verdict{Action: aiuditor.Allow, Reason: "ok"}, nil
+	}
+	if h.deny {
+		return aiuditor.Verdict{Action: aiuditor.Deny, Reason: "blocked"}, nil
+	}
+	raw := bytes.ReplaceAll(env.Request.Body, []byte("AIUDITOR_BLOCKED"), []byte("[redacted]"))
+	return aiuditor.Verdict{Action: aiuditor.Modify, Reason: "redact", Body: raw}, nil
 }
 
 func TestEmptySummaryKeepsTheOriginalTail(t *testing.T) {
