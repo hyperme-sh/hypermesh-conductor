@@ -446,6 +446,64 @@ func TestPaddedStreamReleasesTheRawBodyBudget(t *testing.T) {
 	}
 }
 
+func TestProviderResponsesShareTheBodyBudget(t *testing.T) {
+	previous := bodyLimit
+	bodyLimit = 2500
+	t.Cleanup(func() {
+		bodyMu.Lock()
+		bodyUsed = 0
+		bodyLimit = previous
+		bodyMu.Unlock()
+	})
+	held := make(chan struct{})
+	release := make(chan struct{})
+	var once sync.Once
+	payload := strings.Repeat("y", 2000)
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.WriteString(w, payload)
+		if f, ok := w.(http.Flusher); ok {
+			f.Flush()
+		}
+		once.Do(func() { close(held) })
+		<-release
+	}))
+	defer upstream.Close()
+	dir := t.TempDir()
+	cfg := loadTestConfig(t, dir, upstream.URL+"/v1", upstream.URL+"/v1", config.AuthPassthrough, config.ProviderOpenAICompatible)
+	server := New(cfg, aiuditor.Stub{}, openJournal(t, dir))
+	done := make(chan *httptest.ResponseRecorder, 1)
+	go func() {
+		done <- do(server, "/v1/chat/completions", "parse", "task-1", "hold", "", `{"messages":[{"role":"user","content":"hi"}]}`)
+	}()
+	select {
+	case <-held:
+	case <-time.After(2 * time.Second):
+		t.Fatal("provider response was not read")
+	}
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		bodyMu.Lock()
+		used := bodyUsed
+		bodyMu.Unlock()
+		if used >= len(payload) {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("response bytes were not reserved: %d", used)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	second := do(server, "/v1/chat/completions", "parse", "task-1", "over", "", `{"messages":[{"role":"user","content":"hi"}]}`)
+	close(release)
+	first := <-done
+	bodyMu.Lock()
+	used := bodyUsed
+	bodyMu.Unlock()
+	if second.Code != http.StatusServiceUnavailable || !strings.Contains(second.Body.String(), "budget") || used != 0 {
+		t.Fatalf("first %d second %d used %d body %s", first.Code, second.Code, used, second.Body.String())
+	}
+}
+
 func TestBodyBudgetRejectsASecondLargeRequest(t *testing.T) {
 	previous := bodyLimit
 	bodyLimit = 2500

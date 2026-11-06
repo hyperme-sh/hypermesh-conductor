@@ -45,8 +45,9 @@ var (
 )
 
 var (
-	errBodyTooLarge = errors.New("request body is too large")
-	errBodyBudget   = errors.New("request body budget exceeded")
+	errBodyTooLarge     = errors.New("request body is too large")
+	errBodyBudget       = errors.New("request body budget exceeded")
+	errResponseTooLarge = errors.New("provider response is too large")
 )
 
 // maxSSELine bounds one streaming event. A provider that never sends a
@@ -325,7 +326,18 @@ func (p *Proxy) forward(w http.ResponseWriter, client *http.Request, upstream *h
 		return
 	}
 	if resp.StatusCode >= 400 {
-		raw, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+		raw, held, readErr := readReserved(resp.Body, 1<<20)
+		defer releaseBody(held)
+		if errors.Is(readErr, errBodyBudget) {
+			_ = resp.Body.Close()
+			ms := elapsedMS(start)
+			record.LatencyMS = &ms
+			msg := "request body budget exceeded"
+			record.Error = &msg
+			record.UsageStatus = metrics.StatusUncertain
+			p.finish(w, client, http.StatusServiceUnavailable, nil, record, secrets, false)
+			return
+		}
 		ms := elapsedMS(start)
 		record.LatencyMS = &ms
 		msg := fmt.Sprintf("provider HTTP %d", resp.StatusCode)
@@ -338,15 +350,21 @@ func (p *Proxy) forward(w http.ResponseWriter, client *http.Request, upstream *h
 		p.stream(w, client, resp, wire, start, secrets, record)
 		return
 	}
-	raw, err := io.ReadAll(io.LimitReader(resp.Body, maxBody+1))
+	raw, held, err := readReserved(resp.Body, maxBody)
+	defer releaseBody(held)
 	ms := elapsedMS(start)
 	record.LatencyMS = &ms
-	if err == nil && len(raw) > maxBody {
-		err = fmt.Errorf("provider response is too large")
+	if errors.Is(err, errBodyBudget) {
+		_ = resp.Body.Close()
+		msg := "request body budget exceeded"
+		record.Error = &msg
+		record.UsageStatus = metrics.StatusUncertain
+		p.finish(w, client, http.StatusServiceUnavailable, nil, record, secrets, false)
+		return
 	}
 	if err != nil {
 		msg := "provider request failed"
-		if len(raw) > maxBody {
+		if errors.Is(err, errResponseTooLarge) {
 			msg = "provider response is too large"
 		}
 		record.Error = &msg
@@ -1195,6 +1213,34 @@ func writeJSON(w http.ResponseWriter, status int, payload any) {
 func mustJSON(payload any) []byte {
 	raw, _ := json.Marshal(payload)
 	return raw
+}
+
+// readReserved buffers a provider response and charges every byte to the
+// shared body budget. The caller releases held when it drops the buffer.
+// A failed reservation returns the bytes already kept so they can be released.
+func readReserved(r io.Reader, limit int) ([]byte, int, error) {
+	var body []byte
+	held := 0
+	buf := make([]byte, 32*1024)
+	for {
+		n, err := r.Read(buf)
+		if n > 0 {
+			if len(body)+n > limit {
+				return body, held, errResponseTooLarge
+			}
+			if !reserveBody(n) {
+				return body, held, errBodyBudget
+			}
+			held += n
+			body = append(body, buf[:n]...)
+		}
+		if err == io.EOF {
+			return body, held, nil
+		}
+		if err != nil {
+			return body, held, err
+		}
+	}
 }
 
 func readRequestBody(r io.Reader) ([]byte, error) {
