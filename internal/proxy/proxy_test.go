@@ -1768,6 +1768,9 @@ func TestTerminalProviderEventsCloseOpenHTTPBody(t *testing.T) {
 		terminal string
 	}{
 		{"passthrough_done", config.ProviderOpenAICompatible, "data: [DONE]\n\n"},
+		{"split_done", config.ProviderOpenAICompatible, "data: [DONE]\n"},
+		{"split_completed", config.ProviderOpenAICompatible, "data: {\"type\":\"response.completed\"}\n"},
+		{"split_error", config.ProviderOpenAICompatible, "data: {\"error\":{\"message\":\"failed\"}}\n"},
 		{"passthrough_error", config.ProviderOpenAICompatible, "data: {\"error\":{\"message\":\"failed\"}}\n\n"},
 		{"translated_stop", config.ProviderAnthropic, "event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n"},
 		{"translated_error", config.ProviderAnthropic, "event: error\ndata: {\"type\":\"error\",\"error\":{\"message\":\"failed\"}}\n\n"},
@@ -1792,7 +1795,10 @@ func TestTerminalProviderEventsCloseOpenHTTPBody(t *testing.T) {
 			done := make(chan struct{})
 			go func() {
 				defer close(done)
-				do(p, "/v1/chat/completions", "parse", "terminal-task", tc.name, "", `{"messages":[{"role":"user","content":"hi"}],"stream":true}`)
+				rec := do(p, "/v1/chat/completions", "parse", "terminal-task", tc.name, "", `{"messages":[{"role":"user","content":"hi"}],"stream":true}`)
+				if !strings.HasSuffix(rec.Body.String(), "\n\n") {
+					t.Errorf("terminal frame missing delimiter: %q", rec.Body.String())
+				}
 			}()
 			select {
 			case <-done:

@@ -427,6 +427,13 @@ func (p *Proxy) stream(w http.ResponseWriter, client *http.Request, resp *http.R
 					}
 					usage.Absorb(&acc, payload, wire.Protocol == translate.ProtoEmbeddings)
 				}
+				if terminal {
+					// Complete the SSE frame even when the transport split its
+					// final blank line into a read that would otherwise block.
+					ready = append(ready, '\n')
+					pending = nil
+					break
+				}
 			}
 			if overflow {
 				pending = nil
