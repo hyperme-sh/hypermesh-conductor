@@ -146,9 +146,8 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	body, err := readRequestBody(r.Body)
-	if len(body) > 0 {
-		defer releaseBody(len(body))
-	}
+	held := len(body)
+	defer func() { releaseBody(held) }()
 	if errors.Is(err, errBodyTooLarge) {
 		writeJSON(w, http.StatusRequestEntityTooLarge, map[string]any{"error": map[string]any{"message": "request body is too large"}})
 		return
@@ -178,6 +177,13 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"error": map[string]any{"message": "request body must be a JSON object"}})
 		return
 	}
+	if !replaceReservation(held, len(prepared)) {
+		held = 0
+		writeJSON(w, http.StatusServiceUnavailable, map[string]any{"error": map[string]any{"message": "request body budget exceeded"}})
+		return
+	}
+	held = len(prepared)
+	body = nil
 	policy, err := rules.Load(p.Config.RulesFile)
 	if err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"error": map[string]any{"message": err.Error()}})
@@ -993,12 +999,30 @@ func reserveBody(n int) bool {
 }
 
 func releaseBody(n int) {
+	if n == 0 {
+		return
+	}
 	bodyMu.Lock()
 	bodyUsed -= n
 	if bodyUsed < 0 {
 		bodyUsed = 0
 	}
 	bodyMu.Unlock()
+}
+
+func replaceReservation(oldN, newN int) bool {
+	bodyMu.Lock()
+	defer bodyMu.Unlock()
+	used := bodyUsed - oldN
+	if used < 0 {
+		used = 0
+	}
+	if newN < 0 || used > bodyLimit || newN > bodyLimit-used {
+		bodyUsed = used
+		return false
+	}
+	bodyUsed = used + newN
+	return true
 }
 
 func flush(w http.ResponseWriter) {

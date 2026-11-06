@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net"
+	"net/url"
 	"os"
 	"strings"
 	"time"
@@ -379,6 +380,9 @@ func validateBaseURL(tier, baseURL string) error {
 	if strings.HasSuffix(path, "/chat/completions") || strings.HasSuffix(path, "/embeddings") || strings.HasSuffix(path, "/messages") || strings.HasSuffix(path, "/responses") {
 		return fmt.Errorf("tiers.%s.base_url is the API root, such as https://host/v1", tier)
 	}
+	if strings.HasPrefix(baseURL, "http://") && !loopbackURL(baseURL) {
+		return fmt.Errorf("tiers.%s.base_url must use https off the loopback interface", tier)
+	}
 	return nil
 }
 
@@ -505,7 +509,23 @@ func validateHTTPURL(raw string) error {
 	if host == "" || strings.Contains(host, "@") {
 		return fmt.Errorf("must not carry credentials")
 	}
+	if strings.HasPrefix(raw, "http://") && !loopbackURL(raw) {
+		return fmt.Errorf("must use https off the loopback interface")
+	}
 	return nil
+}
+
+func loopbackURL(raw string) bool {
+	parsed, err := url.Parse(raw)
+	if err != nil {
+		return false
+	}
+	host := parsed.Hostname()
+	if strings.EqualFold(host, "localhost") {
+		return true
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
 }
 
 func rejectSecrets(obj map[string]any, where string) error {

@@ -44,6 +44,22 @@ func TestRejectsSecretsAndBadURLs(t *testing.T) {
 		t.Fatal("expected API root rejection")
 	}
 	base = example(t)
+	base["tiers"].(map[string]any)["cheap"].(map[string]any)["base_url"] = "http://example.test/v1"
+	if _, err := Load(write(t, dir, "plain.json", base)); err == nil {
+		t.Fatal("expected https requirement")
+	}
+	base = example(t)
+	base["aiuditor"] = map[string]any{"mode": "http", "url": "http://aiuditor.example.test/review", "fail_closed": true}
+	if _, err := Load(write(t, dir, "aiu.json", base)); err == nil {
+		t.Fatal("expected aiuditor https requirement")
+	}
+	base = example(t)
+	base["tiers"].(map[string]any)["cheap"].(map[string]any)["base_url"] = "https://example.test/v1"
+	base["aiuditor"] = map[string]any{"mode": "http", "url": "http://127.0.0.1:9/review", "fail_closed": true}
+	if _, err := Load(write(t, dir, "https.json", base)); err != nil {
+		t.Fatal(err)
+	}
+	base = example(t)
 	base["listen"] = "0.0.0.0:8787"
 	if _, err := Load(write(t, dir, "listen.json", base)); err == nil {
 		t.Fatal("expected loopback rejection")

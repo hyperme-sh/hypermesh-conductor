@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -391,9 +392,59 @@ func TestTruncatedProviderBodyIsUncertain(t *testing.T) {
 	}
 }
 
+func TestPaddedStreamReleasesTheRawBodyBudget(t *testing.T) {
+	previous := bodyLimit
+	t.Cleanup(func() {
+		bodyMu.Lock()
+		bodyUsed = 0
+		bodyLimit = previous
+		bodyMu.Unlock()
+	})
+	held := make(chan struct{})
+	release := make(chan struct{})
+	var calls atomic.Int32
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if calls.Add(1) == 1 {
+			w.Header().Set("Content-Type", "text/event-stream")
+			w.WriteHeader(http.StatusOK)
+			if f, ok := w.(http.Flusher); ok {
+				f.Flush()
+			}
+			close(held)
+			<-release
+			_, _ = io.WriteString(w, "data: [DONE]\n\n")
+			return
+		}
+		_, _ = w.Write([]byte(`{"usage":{"prompt_tokens":1,"completion_tokens":1}}`))
+	}))
+	defer upstream.Close()
+	dir := t.TempDir()
+	cfg := loadTestConfig(t, dir, upstream.URL+"/v1", upstream.URL+"/v1", config.AuthPassthrough, config.ProviderOpenAICompatible)
+	journal := openJournal(t, dir)
+	server := New(cfg, aiuditor.Stub{}, journal)
+	core := `{"stream":true,"messages":[{"role":"user","content":"hi"}]}`
+	padded := core + strings.Repeat(" ", 3000)
+	bodyLimit = len(padded)
+	done := make(chan *httptest.ResponseRecorder, 1)
+	go func() {
+		done <- do(server, "/v1/chat/completions", "parse", "task-1", "pad", "", padded)
+	}()
+	select {
+	case <-held:
+	case <-time.After(2 * time.Second):
+		t.Fatal("padded stream did not reach the provider")
+	}
+	peer := do(server, "/v1/chat/completions", "parse", "task-1", "peer", "", `{"messages":[{"role":"user","content":"yo"}]}`)
+	close(release)
+	first := <-done
+	if first.Code != http.StatusOK || peer.Code == http.StatusServiceUnavailable {
+		t.Fatalf("stream %d peer %d body %s", first.Code, peer.Code, peer.Body.String())
+	}
+}
+
 func TestBodyBudgetRejectsASecondLargeRequest(t *testing.T) {
 	previous := bodyLimit
-	bodyLimit = 200
+	bodyLimit = 2500
 	t.Cleanup(func() {
 		bodyMu.Lock()
 		bodyUsed = 0
@@ -414,7 +465,7 @@ func TestBodyBudgetRejectsASecondLargeRequest(t *testing.T) {
 	cfg := loadTestConfig(t, dir, upstream.URL+"/v1", upstream.URL+"/v1", config.AuthPassthrough, config.ProviderOpenAICompatible)
 	journal := openJournal(t, dir)
 	server := New(cfg, aiuditor.Stub{}, journal)
-	payload := `{"messages":[{"role":"user","content":"` + strings.Repeat("x", 80) + `"}]}`
+	payload := `{"messages":[{"role":"user","content":"` + strings.Repeat("x", 1500) + `"}]}`
 	done := make(chan *httptest.ResponseRecorder, 1)
 	go func() {
 		done <- do(server, "/v1/chat/completions", "parse", "task-1", "hold", "", payload)
