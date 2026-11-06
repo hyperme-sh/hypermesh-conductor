@@ -1681,6 +1681,9 @@ func TestOversizedProviderBodyIsRejected(t *testing.T) {
 	dir := t.TempDir()
 	t.Setenv("CONDUCTOR_CHEAP_API_KEY", "test-key-do-not-log")
 	cfg := loadTestConfig(t, dir, upstream.URL+"/v1", upstream.URL+"/v1", config.AuthEnv, config.ProviderOpenAICompatible)
+	// This checks the size cap, not a network deadline; race instrumentation
+	// can take over two seconds to generate and read the 32 MiB fixture.
+	cfg.Cheap.Timeout = 15 * time.Second
 	journal := openJournal(t, dir)
 	rec := do(New(cfg, aiuditor.Stub{}, journal), "/v1/embeddings", "embed", "task-1", "emb-1", "", `{"input":"hello"}`)
 	if rec.Code != http.StatusBadGateway || !strings.Contains(rec.Body.String(), "too large") {
