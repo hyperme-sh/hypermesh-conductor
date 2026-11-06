@@ -207,8 +207,17 @@ func (s *Store) syncDir(dir string, replace bool) (Stats, error) {
 	var stats Stats
 	stats.Warnings = warnings
 	seen := map[string]struct{}{}
+	byPath := map[string]string{}
+	duplicates := map[string]struct{}{}
+	claimed := map[string]string{}
 	for _, note := range incoming {
 		seen[note.Path] = struct{}{}
+		byPath[note.Path] = note.ID
+		if prev, ok := claimed[note.ID]; ok && prev != note.Path {
+			duplicates[note.ID] = struct{}{}
+			continue
+		}
+		claimed[note.ID] = note.Path
 	}
 	for _, note := range incoming {
 		var existingHash, existingID string
@@ -219,7 +228,7 @@ func (s *Store) syncDir(dir string, replace bool) (Stats, error) {
 		if err != nil && !errors.Is(err, sql.ErrNoRows) {
 			return stats, err
 		}
-		if err := releaseStaleOwner(tx, note, seen); err != nil {
+		if err := releaseStaleOwner(tx, note, seen, byPath, duplicates); err != nil {
 			return stats, err
 		}
 		if err := upsert(tx, note); err != nil {
@@ -330,10 +339,13 @@ type sqlDB interface {
 	QueryRow(query string, args ...any) *sql.Row
 }
 
-// releaseStaleOwner drops an indexed path for this id when that path is no
-// longer in the directory. A rename keeps the id. Two files that both still
-// exist and share an id stay a collision.
-func releaseStaleOwner(tx sqlDB, note Note, seen map[string]struct{}) error {
+// releaseStaleOwner drops an indexed path for this id when that path no
+// longer holds the id. A rename or a swap of two files keeps each id. Two
+// incoming files that share an id stay a collision.
+func releaseStaleOwner(tx sqlDB, note Note, seen map[string]struct{}, byPath map[string]string, duplicates map[string]struct{}) error {
+	if _, dup := duplicates[note.ID]; dup {
+		return nil
+	}
 	var owner string
 	err := tx.QueryRow(`SELECT path FROM notes WHERE id = ?`, note.ID).Scan(&owner)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -346,7 +358,9 @@ func releaseStaleOwner(tx sqlDB, note Note, seen map[string]struct{}) error {
 		return nil
 	}
 	if _, ok := seen[owner]; ok {
-		return nil
+		if byPath[owner] == note.ID {
+			return nil
+		}
 	}
 	return deletePath(tx, owner)
 }
@@ -700,26 +714,27 @@ func markdownFiles(dir string) ([]string, error) {
 func ftsQuery(text string) string {
 	var tokens []string
 	seen := map[string]struct{}{}
-	for _, field := range strings.Fields(text) {
-		var b strings.Builder
-		for _, r := range field {
-			if unicodeLetter(r) {
-				b.WriteRune(r)
-			}
-		}
+	var b strings.Builder
+	flush := func() {
 		token := strings.ToLower(b.String())
+		b.Reset()
 		if len(token) < 3 {
-			continue
+			return
 		}
-		if _, ok := seen[token]; ok {
-			continue
+		if _, ok := seen[token]; ok || len(tokens) == 8 {
+			return
 		}
 		seen[token] = struct{}{}
 		tokens = append(tokens, `"`+token+`"`)
-		if len(tokens) == 8 {
-			break
-		}
 	}
+	for _, r := range text {
+		if unicodeLetter(r) {
+			b.WriteRune(r)
+			continue
+		}
+		flush()
+	}
+	flush()
 	return strings.Join(tokens, " OR ")
 }
 
