@@ -7,11 +7,13 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/url"
 	"os"
 	"path/filepath"
 	"runtime"
 	"sort"
 	"strings"
+	"unicode"
 
 	_ "modernc.org/sqlite"
 )
@@ -22,17 +24,33 @@ type Store struct {
 	db *sql.DB
 }
 
-// Open opens or creates the index database. The directory and database are
-// owner-only because they store note bodies.
+// Open creates private database files without changing an existing parent's permissions.
 func Open(path string) (*Store, error) {
+	path, err := filepath.Abs(path)
+	if err != nil {
+		return nil, err
+	}
 	dir := filepath.Dir(path)
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return nil, err
 	}
-	if err := os.Chmod(dir, 0o700); err != nil {
+	file, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR, 0o600)
+	if err != nil {
 		return nil, err
 	}
-	db, err := sql.Open("sqlite", "file:"+path+"?_pragma=busy_timeout(5000)")
+	if err := file.Close(); err != nil {
+		return nil, err
+	}
+	// Restrict existing files before SQLite can persist or read private content.
+	if err := restrictIndex(path); err != nil {
+		return nil, err
+	}
+	uriPath := filepath.ToSlash(path)
+	if !strings.HasPrefix(uriPath, "/") {
+		uriPath = "/" + uriPath
+	}
+	uri := url.URL{Scheme: "file", Path: uriPath, RawQuery: "_pragma=busy_timeout(5000)"}
+	db, err := sql.Open("sqlite", uri.String())
 	if err != nil {
 		return nil, err
 	}
@@ -74,16 +92,7 @@ func restrictIndex(path string) error {
 			return fmt.Errorf("note index is readable by other users")
 		}
 	}
-	if runtime.GOOS == "windows" {
-		return nil
-	}
-	info, err := os.Stat(filepath.Dir(path))
-	if err != nil {
-		return err
-	}
-	if info.Mode().Perm()&0o077 != 0 {
-		return fmt.Errorf("note index directory is readable by other users")
-	}
+
 	return nil
 }
 
@@ -685,5 +694,5 @@ func ftsQuery(text string) string {
 }
 
 func unicodeLetter(r rune) bool {
-	return (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9')
+	return unicode.IsLetter(r) || unicode.IsDigit(r)
 }

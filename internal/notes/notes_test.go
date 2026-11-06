@@ -352,9 +352,6 @@ func TestIndexIsOwnerOnly(t *testing.T) {
 	if err := os.Chmod(path, 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.Chmod(filepath.Dir(path), 0o755); err != nil {
-		t.Fatal(err)
-	}
 	again, err := Open(path)
 	if err != nil {
 		t.Fatal(err)
@@ -620,5 +617,52 @@ func TestExactIDWinsOverTitleWhenResolvingLinks(t *testing.T) {
 	violations, err := store.Violations()
 	if err != nil || len(violations) != 1 {
 		t.Fatal(err, violations)
+	}
+}
+
+func TestIndexPreservesExistingParentPermissions(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("unix permissions")
+	}
+	dir := t.TempDir()
+	if err := os.Chmod(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	store, err := Open(filepath.Join(dir, "index.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	info, err := os.Stat(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Mode().Perm() != 0o755 {
+		t.Fatalf("changed parent to %o", info.Mode().Perm())
+	}
+	db, err := os.Stat(filepath.Join(dir, "index.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if db.Mode().Perm() != 0o600 {
+		t.Fatalf("database mode %o", db.Mode().Perm())
+	}
+}
+
+func TestIndexPathMetacharactersAndUnicodeSearch(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "notes?archive#100%")
+	if runtime.GOOS == "windows" {
+		dir = filepath.Join(t.TempDir(), "notes#100%")
+	}
+	writeNote(t, dir, "words.md", "# Words\ncontraseña привет 世界\n")
+	store := openTestStore(t, dir)
+	if _, err := store.Rebuild(dir); err != nil {
+		t.Fatal(err)
+	}
+	for _, term := range []string{"contraseña", "привет", "世界"} {
+		found, err := store.Search(term, 5)
+		if err != nil || len(found) != 1 {
+			t.Fatalf("search %q: %v %v", term, found, err)
+		}
 	}
 }
