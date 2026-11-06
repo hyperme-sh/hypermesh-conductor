@@ -6,8 +6,10 @@ package history
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sync"
 )
 
@@ -52,15 +54,37 @@ func (s *Store) Append(record Record) error {
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	file, err := os.OpenFile(s.path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
+	file, err := os.OpenFile(s.path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600)
 	if err != nil {
 		return err
 	}
 	defer file.Close()
+	if err := ensureOwnerOnly(s.path); err != nil {
+		return err
+	}
 	if _, err := file.Write(append(raw, '\n')); err != nil {
 		return err
 	}
 	return file.Sync()
+}
+
+// ensureOwnerOnly keeps prompt tails unreadable by other accounts.
+// An existing group- or world-readable file is tightened before the write.
+func ensureOwnerOnly(path string) error {
+	if err := os.Chmod(path, 0o600); err != nil {
+		return fmt.Errorf("history file is readable by other users")
+	}
+	if runtime.GOOS == "windows" {
+		return nil
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		return err
+	}
+	if info.Mode().Perm()&0o077 != 0 {
+		return fmt.Errorf("history file is readable by other users")
+	}
+	return nil
 }
 
 // Read loads every history row.
