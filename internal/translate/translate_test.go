@@ -5,6 +5,20 @@ import (
 	"testing"
 )
 
+func TestStructuredOutputIsNotSilentlyDropped(t *testing.T) {
+	_, err := Request(ProtoChat, ProviderAnthropic, "frontier", []byte(`{"response_format":{"type":"json_schema","json_schema":{"name":"out","schema":{"type":"object"}}},"messages":[{"role":"user","content":"hi"}]}`))
+	if err == nil || !strings.Contains(err.Error(), "response_format") {
+		t.Fatal(err)
+	}
+	wire, err := Request(ProtoChat, ProviderAnthropic, "frontier", []byte(`{"response_format":{"type":"text"},"messages":[{"role":"user","content":"hi"}]}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(wire.Body), "response_format") {
+		t.Fatal(string(wire.Body))
+	}
+}
+
 func TestChatRequestBecomesAnthropicMessages(t *testing.T) {
 	wire, err := Request(ProtoChat, ProviderAnthropic, "frontier", []byte(`{"model":"other","max_tokens":32,"messages":[{"role":"system","content":"be brief"},{"role":"user","content":"hi"}]}`))
 	if err != nil {

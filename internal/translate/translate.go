@@ -138,6 +138,9 @@ func chatToAnthropic(body []byte, model string) ([]byte, error) {
 	if err := decodeJSON(body, &req); err != nil {
 		return nil, fmt.Errorf("request body is not JSON")
 	}
+	if err := rejectResponseFormat(req); err != nil {
+		return nil, err
+	}
 	messages, _ := req["messages"].([]any)
 	system, converted, err := splitChatMessages(messages)
 	if err != nil {
@@ -294,6 +297,22 @@ func responsesToolsToAnthropic(tools []any) ([]any, error) {
 		out = append(out, map[string]any{"name": name, "description": desc, "input_schema": schema})
 	}
 	return out, nil
+}
+
+func rejectResponseFormat(req map[string]any) error {
+	format, ok := req["response_format"]
+	if !ok || format == nil {
+		return nil
+	}
+	obj, ok := format.(map[string]any)
+	if !ok {
+		return fmt.Errorf("unsupported response_format for protocol translation")
+	}
+	kind, _ := obj["type"].(string)
+	if kind == "" || kind == "text" {
+		return nil
+	}
+	return fmt.Errorf("unsupported response_format %s for protocol translation", kind)
 }
 
 func splitChatMessages(messages []any) (string, []any, error) {

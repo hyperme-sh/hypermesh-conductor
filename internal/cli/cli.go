@@ -237,13 +237,14 @@ func runCmd(args []string, stdout, stderr io.Writer) int {
 		return 2
 	}
 	records, err := metrics.ReadJournal(*journalPath)
-	if err != nil || len(records) == 0 {
+	shown, ok := journalRecord(records, *taskID, *stepID)
+	if err != nil || !ok {
 		fmt.Fprintln(stderr, "journal was not written")
 		return 1
 	}
-	shown := records[len(records)-1].Wire()
+	wire := shown.Wire()
 	payload := map[string]any{}
-	encoded, _ := json.Marshal(shown)
+	encoded, _ := json.Marshal(wire)
 	_ = json.Unmarshal(encoded, &payload)
 	payload["content"] = contentOf(rec.Body.Bytes())
 	if err := writePretty(stdout, payload); err != 0 {
@@ -253,6 +254,18 @@ func runCmd(args []string, stdout, stderr io.Writer) int {
 		return 1
 	}
 	return 0
+}
+
+func journalRecord(records []metrics.StepRecord, taskID, stepID string) (metrics.StepRecord, bool) {
+	var found metrics.StepRecord
+	ok := false
+	for _, record := range records {
+		if record.TaskID == taskID && record.StepID == stepID {
+			found = record
+			ok = true
+		}
+	}
+	return found, ok
 }
 
 func contentOf(body []byte) any {

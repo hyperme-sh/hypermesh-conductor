@@ -145,6 +145,20 @@ func TestRunStopsBeforeTheProviderWhenTheJournalDirectoryIsMissing(t *testing.T)
 	}
 }
 
+func TestJournalRecordIsTheCurrentRun(t *testing.T) {
+	records := []metrics.StepRecord{
+		{TaskID: "task-1", StepID: "step-1", Tier: "cheap"},
+		{TaskID: "task-2", StepID: "step-9", Tier: "frontier"},
+	}
+	got, ok := journalRecord(records, "task-1", "step-1")
+	if !ok || got.TaskID != "task-1" || got.StepID != "step-1" || got.Tier != "cheap" {
+		t.Fatal(got, ok)
+	}
+	if _, ok := journalRecord(records, "task-1", "missing"); ok {
+		t.Fatal("missing row was selected")
+	}
+}
+
 func TestRunEmbeddingAliasUsesTheEmbeddingsEndpoint(t *testing.T) {
 	var path string
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
