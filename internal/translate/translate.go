@@ -262,6 +262,9 @@ func responsesToAnthropic(body []byte, model string) ([]byte, error) {
 	if err := applyToolChoice(out, req, true); err != nil {
 		return nil, err
 	}
+	if err := applySampling(out, req, true); err != nil {
+		return nil, err
+	}
 	if stream, ok := req["stream"].(bool); ok && stream {
 		out["stream"] = true
 	}

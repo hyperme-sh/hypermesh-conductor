@@ -310,6 +310,30 @@ func TestMaxTokensBecomesAnIncompleteResponse(t *testing.T) {
 	}
 }
 
+func TestResponsesSamplingAndStreamUsage(t *testing.T) {
+	wire, err := Request(ProtoResponses, ProviderAnthropic, "frontier", []byte(`{"temperature":0,"top_p":0.1,"input":"hi"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(wire.Body)
+	if !strings.Contains(text, `"temperature":0`) || !strings.Contains(text, `"top_p":0.1`) {
+		t.Fatal(text)
+	}
+	stream := NewStream(ProtoResponses, ProtoMessages)
+	var out string
+	for _, chunk := range []string{
+		"event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"m1\",\"usage\":{\"input_tokens\":20,\"cache_read_input_tokens\":80,\"cache_creation_input_tokens\":50}}}\n\n",
+		"event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"delta\":{\"type\":\"text_delta\",\"text\":\"yo\"}}\n\n",
+		"event: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"output_tokens\":5}}\n\n",
+		"event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n",
+	} {
+		out += string(stream.Consume([]byte(chunk)))
+	}
+	if !strings.Contains(out, `"input_tokens":150`) || !strings.Contains(out, `"cached_tokens":80`) || !strings.Contains(out, `"output_tokens":5`) {
+		t.Fatal(out)
+	}
+}
+
 func TestResponsesToolsAndStreamLifecycle(t *testing.T) {
 	body := []byte(`{"tools":[{"type":"function","name":"weather","description":"Forecast","parameters":{"type":"object"}}],"tool_choice":"required","input":"hi"}`)
 	wire, err := Request(ProtoResponses, ProviderAnthropic, "frontier", body)

@@ -57,6 +57,9 @@ func NewStream(clientProto, upstreamProto string) *Stream {
 	return &Stream{client: clientProto, upstream: upstreamProto}
 }
 
+// Passthrough reports that upstream bytes are copied to the client.
+func (s *Stream) Passthrough() bool { return s.passthrough() }
+
 func (s *Stream) passthrough() bool {
 	if s.client == s.upstream {
 		return true
@@ -399,6 +402,9 @@ func (s *Stream) anthropicToResponses(kind string, obj map[string]any) []byte {
 			if id, ok := message["id"].(string); ok && id != "" {
 				s.id = id
 			}
+			if usage, ok := message["usage"].(map[string]any); ok {
+				s.chatUsage = mergeUsage(s.chatUsage, usage)
+			}
 		}
 		return s.ensureResponse()
 	case "content_block_start":
@@ -437,6 +443,9 @@ func (s *Stream) anthropicToResponses(kind string, obj map[string]any) []byte {
 			if reason, ok := delta["stop_reason"].(string); ok && reason != "" {
 				s.respStop = reason
 			}
+		}
+		if usage, ok := obj["usage"].(map[string]any); ok {
+			s.chatUsage = mergeUsage(s.chatUsage, usage)
 		}
 		return nil
 	case "message_stop":
@@ -540,6 +549,9 @@ func (s *Stream) finishResponses() []byte {
 	response := s.responsesObject(text, status)
 	if details != nil {
 		response["incomplete_details"] = details
+	}
+	if len(s.chatUsage) > 0 {
+		response["usage"] = usageToResponses(s.chatUsage)
 	}
 	out.Write(sseData(map[string]any{
 		"type":     event,

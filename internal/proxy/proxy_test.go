@@ -650,6 +650,28 @@ func truncatedServer(t *testing.T, status, contentType, body string) string {
 	return "http://" + ln.Addr().String() + "/v1"
 }
 
+func TestSplitStreamKeyIsRedacted(t *testing.T) {
+	const key = "sk-test-provider-key-value"
+	t.Setenv("CONDUCTOR_CHEAP_API_KEY", key)
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		flusher := w.(http.Flusher)
+		_, _ = io.WriteString(w, "data: {\"error\":\"")
+		flusher.Flush()
+		time.Sleep(30 * time.Millisecond)
+		_, _ = io.WriteString(w, key+"\"}\n\n")
+		flusher.Flush()
+	}))
+	defer upstream.Close()
+	dir := t.TempDir()
+	cfg := loadTestConfig(t, dir, upstream.URL+"/v1", upstream.URL+"/v1", config.AuthEnv, config.ProviderOpenAICompatible)
+	journal := openJournal(t, dir)
+	rec := do(New(cfg, aiuditor.Stub{}, journal), "/v1/chat/completions", "parse", "task-1", "split-key", "", `{"stream":true,"messages":[{"role":"user","content":"hi"}]}`)
+	if strings.Contains(rec.Body.String(), key) || !strings.Contains(rec.Body.String(), "[redacted]") {
+		t.Fatal(rec.Body.String())
+	}
+}
+
 func TestProviderRedirectIsNotSuccess(t *testing.T) {
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Location", "http://169.254.169.254/latest")

@@ -338,6 +338,7 @@ func (p *Proxy) stream(w http.ResponseWriter, client *http.Request, resp *http.R
 	w.WriteHeader(http.StatusOK)
 	flush(w)
 	bridge := translate.NewStream(protocolOfRequest(client), wire.Protocol)
+	passthrough := bridge.Passthrough()
 	acc := usage.UncertainUsage()
 	buf := make([]byte, 32*1024)
 	var pending []byte
@@ -349,6 +350,7 @@ func (p *Proxy) stream(w http.ResponseWriter, client *http.Request, resp *http.R
 			chunk := buf[:n]
 			pending = append(pending, chunk...)
 			overflow := false
+			var ready []byte
 			for {
 				i := bytes.IndexByte(pending, '\n')
 				if i < 0 {
@@ -362,6 +364,7 @@ func (p *Proxy) stream(w http.ResponseWriter, client *http.Request, resp *http.R
 					break
 				}
 				line := pending[:i]
+				ready = append(ready, pending[:i+1]...)
 				pending = pending[i+1:]
 				payload := ssePayload(line)
 				if payload != nil {
@@ -376,6 +379,13 @@ func (p *Proxy) stream(w http.ResponseWriter, client *http.Request, resp *http.R
 				readErr = fmt.Errorf("provider stream event is too large")
 				_ = resp.Body.Close()
 				break
+			}
+			if passthrough {
+				if len(ready) > 0 {
+					_, _ = w.Write(redact(ready, secrets))
+					flush(w)
+				}
+				continue
 			}
 			out := bridge.Consume(chunk)
 			if len(out) > 0 {
@@ -402,6 +412,11 @@ func (p *Proxy) stream(w http.ResponseWriter, client *http.Request, resp *http.R
 				failed = true
 			}
 			usage.Absorb(&acc, payload, wire.Protocol == translate.ProtoEmbeddings)
+		}
+		if passthrough {
+			_, _ = w.Write(redact(pending, secrets))
+			flush(w)
+			pending = nil
 		}
 	}
 	var tail []byte
