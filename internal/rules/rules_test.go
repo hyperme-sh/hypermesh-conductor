@@ -206,6 +206,44 @@ func TestDreamMedianUsesFailedTasksOnly(t *testing.T) {
 	}
 }
 
+func TestBodyProposalIsOwnerOnly(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.Chmod(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "0001.json"), []byte("{}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "0002.json"), []byte("{}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	in := 40
+	records := []metrics.StepRecord{
+		step("s1", "summarize", "cheap", &in),
+		step("s2", "summarize", "cheap", &in),
+	}
+	outcomes := []Outcome{
+		{TaskID: "task-1", StepID: "s1", Kind: "test_failed"},
+		{TaskID: "task-1", StepID: "s2", Kind: "test_failed"},
+	}
+	hist := []history.Record{{StepID: "s1", Summary: "PRIVATE-PROMPT-BODY"}}
+	_, path, err := Dream(DreamInput{Records: records, Outcomes: outcomes, History: hist, Bodies: true}, Defaults(), dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Mode().Perm()&0o077 != 0 {
+		t.Fatalf("mode %o", info.Mode().Perm())
+	}
+	blob, err := os.ReadFile(path)
+	if err != nil || !strings.Contains(string(blob), "PRIVATE-PROMPT-BODY") {
+		t.Fatal(err, string(blob))
+	}
+}
+
 func TestDreamDoesNotShareOutcomesAcrossTasks(t *testing.T) {
 	in := 10
 	first := step("s1", "summarize", "cheap", &in)

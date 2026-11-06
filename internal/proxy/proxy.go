@@ -35,6 +35,19 @@ import (
 
 const maxBody = 32 << 20
 
+// bodyLimit is the total request-body bytes buffered at once, before
+// authorization. It is one max body, not one per connection.
+var (
+	bodyMu    sync.Mutex
+	bodyUsed  int
+	bodyLimit = maxBody
+)
+
+var (
+	errBodyTooLarge = errors.New("request body is too large")
+	errBodyBudget   = errors.New("request body budget exceeded")
+)
+
 // maxSSELine bounds one streaming event. A provider that never sends a
 // newline cannot grow the proxy without limit. Streaming reads have no
 // overall deadline, so the cap is what stops the read.
@@ -132,13 +145,20 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		p.serveModels(w)
 		return
 	}
-	body, err := io.ReadAll(io.LimitReader(r.Body, maxBody+1))
-	if err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]any{"error": map[string]any{"message": "unreadable body"}})
+	body, err := readRequestBody(r.Body)
+	if len(body) > 0 {
+		defer releaseBody(len(body))
+	}
+	if errors.Is(err, errBodyTooLarge) {
+		writeJSON(w, http.StatusRequestEntityTooLarge, map[string]any{"error": map[string]any{"message": "request body is too large"}})
 		return
 	}
-	if len(body) > maxBody {
-		writeJSON(w, http.StatusRequestEntityTooLarge, map[string]any{"error": map[string]any{"message": "request body is too large"}})
+	if errors.Is(err, errBodyBudget) {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]any{"error": map[string]any{"message": "request body budget exceeded"}})
+		return
+	}
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": map[string]any{"message": "unreadable body"}})
 		return
 	}
 	obj, err := jsonbody.Parse(body)
@@ -936,6 +956,48 @@ func writeJSON(w http.ResponseWriter, status int, payload any) {
 func mustJSON(payload any) []byte {
 	raw, _ := json.Marshal(payload)
 	return raw
+}
+
+func readRequestBody(r io.Reader) ([]byte, error) {
+	var body []byte
+	buf := make([]byte, 32*1024)
+	for {
+		n, err := r.Read(buf)
+		if n > 0 {
+			if len(body)+n > maxBody {
+				return body, errBodyTooLarge
+			}
+			if !reserveBody(n) {
+				return body, errBodyBudget
+			}
+			body = append(body, buf[:n]...)
+		}
+		if err == io.EOF {
+			return body, nil
+		}
+		if err != nil {
+			return body, err
+		}
+	}
+}
+
+func reserveBody(n int) bool {
+	bodyMu.Lock()
+	defer bodyMu.Unlock()
+	if n < 0 || bodyUsed > bodyLimit || n > bodyLimit-bodyUsed {
+		return false
+	}
+	bodyUsed += n
+	return true
+}
+
+func releaseBody(n int) {
+	bodyMu.Lock()
+	bodyUsed -= n
+	if bodyUsed < 0 {
+		bodyUsed = 0
+	}
+	bodyMu.Unlock()
 }
 
 func flush(w http.ResponseWriter) {

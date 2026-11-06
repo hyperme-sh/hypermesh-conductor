@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sort"
 
 	"github.com/hyperme-sh/hypermesh-conductor/internal/history"
@@ -172,10 +173,38 @@ func Dream(in DreamInput, active File, proposalsDir string) (Proposal, string, e
 		return Proposal{}, "", err
 	}
 	path := filepath.Join(proposalsDir, fmt.Sprintf("%04d.json", version))
-	if err := os.WriteFile(path, raw, 0o644); err != nil {
+	mode := os.FileMode(0o644)
+	if in.Bodies {
+		mode = 0o600
+	}
+	if err := os.WriteFile(path, raw, mode); err != nil {
 		return Proposal{}, "", err
 	}
+	if in.Bodies {
+		if err := ownerOnly(path); err != nil {
+			return Proposal{}, "", err
+		}
+	}
 	return proposal, path, nil
+}
+
+// ownerOnly keeps a body-bearing proposal unreadable by other accounts.
+// An existing group- or world-readable file is tightened, then checked.
+func ownerOnly(path string) error {
+	if err := os.Chmod(path, 0o600); err != nil {
+		return fmt.Errorf("proposal is readable by other users")
+	}
+	if runtime.GOOS == "windows" {
+		return nil
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		return err
+	}
+	if info.Mode().Perm()&0o077 != 0 {
+		return fmt.Errorf("proposal is readable by other users")
+	}
+	return nil
 }
 
 func excerptFor(stepIDs []string, rows []history.Record) string {

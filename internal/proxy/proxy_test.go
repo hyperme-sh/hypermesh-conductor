@@ -391,6 +391,47 @@ func TestTruncatedProviderBodyIsUncertain(t *testing.T) {
 	}
 }
 
+func TestBodyBudgetRejectsASecondLargeRequest(t *testing.T) {
+	previous := bodyLimit
+	bodyLimit = 200
+	t.Cleanup(func() {
+		bodyMu.Lock()
+		bodyUsed = 0
+		bodyLimit = previous
+		bodyMu.Unlock()
+	})
+	held := make(chan struct{})
+	release := make(chan struct{})
+	var once sync.Once
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.ReadAll(r.Body)
+		once.Do(func() { close(held) })
+		<-release
+		_, _ = w.Write([]byte(`{"usage":{"prompt_tokens":1,"completion_tokens":1}}`))
+	}))
+	defer upstream.Close()
+	dir := t.TempDir()
+	cfg := loadTestConfig(t, dir, upstream.URL+"/v1", upstream.URL+"/v1", config.AuthPassthrough, config.ProviderOpenAICompatible)
+	journal := openJournal(t, dir)
+	server := New(cfg, aiuditor.Stub{}, journal)
+	payload := `{"messages":[{"role":"user","content":"` + strings.Repeat("x", 80) + `"}]}`
+	done := make(chan *httptest.ResponseRecorder, 1)
+	go func() {
+		done <- do(server, "/v1/chat/completions", "parse", "task-1", "hold", "", payload)
+	}()
+	select {
+	case <-held:
+	case <-time.After(2 * time.Second):
+		t.Fatal("first request did not reach the provider")
+	}
+	second := do(server, "/v1/chat/completions", "parse", "task-1", "over", "", payload)
+	close(release)
+	first := <-done
+	if first.Code != http.StatusOK || second.Code != http.StatusServiceUnavailable || !strings.Contains(second.Body.String(), "budget") {
+		t.Fatalf("first %d second %d body %s", first.Code, second.Code, second.Body.String())
+	}
+}
+
 func TestOutboundTransportIsShared(t *testing.T) {
 	dir := t.TempDir()
 	cfg := loadTestConfig(t, dir, "http://127.0.0.1:9/v1", "http://127.0.0.1:9/v1", config.AuthPassthrough, config.ProviderOpenAICompatible)
