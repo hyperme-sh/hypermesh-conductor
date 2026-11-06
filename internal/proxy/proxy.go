@@ -400,6 +400,7 @@ func (p *Proxy) stream(w http.ResponseWriter, client *http.Request, resp *http.R
 			chunk := buf[:n]
 			pending = append(pending, chunk...)
 			overflow := false
+			framed := false
 			var ready []byte
 			for {
 				i := bytes.IndexByte(pending, '\n')
@@ -427,6 +428,9 @@ func (p *Proxy) stream(w http.ResponseWriter, client *http.Request, resp *http.R
 					}
 					usage.Absorb(&acc, payload, wire.Protocol == translate.ProtoEmbeddings)
 				}
+				if terminal && len(bytes.TrimRight(line, "\r")) == 0 {
+					framed = true
+				}
 			}
 			if overflow {
 				pending = nil
@@ -435,6 +439,9 @@ func (p *Proxy) stream(w http.ResponseWriter, client *http.Request, resp *http.R
 				break
 			}
 			if passthrough {
+				if terminal && !framed {
+					ready = append(ready, '\n')
+				}
 				if !writeClient(ready) {
 					break
 				}
