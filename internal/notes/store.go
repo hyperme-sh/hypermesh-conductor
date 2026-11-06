@@ -7,11 +7,14 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/url"
 	"os"
 	"path/filepath"
 	"runtime"
 	"sort"
 	"strings"
+	"unicode"
+	"unicode/utf8"
 
 	_ "modernc.org/sqlite"
 )
@@ -22,17 +25,19 @@ type Store struct {
 	db *sql.DB
 }
 
-// Open opens or creates the index database. The directory and database are
-// owner-only because they store note bodies.
+// Open opens or creates the index database. The database file is owner-only
+// because it stores note bodies. A directory this program creates, including
+// .conductor, is owner-only too. An existing directory the caller supplied is
+// left unchanged.
 func Open(path string) (*Store, error) {
-	dir := filepath.Dir(path)
-	if err := os.MkdirAll(dir, 0o700); err != nil {
+	if err := prepareIndexDir(filepath.Dir(path)); err != nil {
 		return nil, err
 	}
-	if err := os.Chmod(dir, 0o700); err != nil {
+	dsn, err := sqliteDSN(path)
+	if err != nil {
 		return nil, err
 	}
-	db, err := sql.Open("sqlite", "file:"+path+"?_pragma=busy_timeout(5000)")
+	db, err := sql.Open("sqlite", dsn)
 	if err != nil {
 		return nil, err
 	}
@@ -46,6 +51,39 @@ func Open(path string) (*Store, error) {
 		return nil, err
 	}
 	return store, nil
+}
+
+func prepareIndexDir(dir string) error {
+	info, err := os.Stat(dir)
+	if os.IsNotExist(err) {
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			return err
+		}
+		return os.Chmod(dir, 0o700)
+	}
+	if err != nil {
+		return err
+	}
+	if !info.IsDir() {
+		return fmt.Errorf("note index directory %s is not a directory", dir)
+	}
+	if filepath.Base(dir) != ".conductor" {
+		return nil
+	}
+	return os.Chmod(dir, 0o700)
+}
+
+func sqliteDSN(path string) (string, error) {
+	abs, err := filepath.Abs(path)
+	if err != nil {
+		return "", err
+	}
+	slash := filepath.ToSlash(abs)
+	if !strings.HasPrefix(slash, "/") {
+		slash = "/" + slash
+	}
+	uri := (&url.URL{Scheme: "file", Path: slash}).String()
+	return uri + "?_pragma=busy_timeout(5000)", nil
 }
 
 func restrictIndex(path string) error {
@@ -73,16 +111,6 @@ func restrictIndex(path string) error {
 		if info.Mode().Perm()&0o077 != 0 {
 			return fmt.Errorf("note index is readable by other users")
 		}
-	}
-	if runtime.GOOS == "windows" {
-		return nil
-	}
-	info, err := os.Stat(filepath.Dir(path))
-	if err != nil {
-		return err
-	}
-	if info.Mode().Perm()&0o077 != 0 {
-		return fmt.Errorf("note index directory is readable by other users")
 	}
 	return nil
 }
@@ -669,7 +697,7 @@ func ftsQuery(text string) string {
 			}
 		}
 		token := strings.ToLower(b.String())
-		if len(token) < 3 {
+		if utf8.RuneCountInString(token) < 3 {
 			continue
 		}
 		if _, ok := seen[token]; ok {
@@ -685,5 +713,5 @@ func ftsQuery(text string) string {
 }
 
 func unicodeLetter(r rune) bool {
-	return (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9')
+	return unicode.IsLetter(r) || unicode.IsDigit(r)
 }
