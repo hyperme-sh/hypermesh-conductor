@@ -446,6 +446,40 @@ func TestPaddedStreamReleasesTheRawBodyBudget(t *testing.T) {
 	}
 }
 
+func TestAIUVerdictIsReservedWhileItIsRead(t *testing.T) {
+	previous := bodyLimit
+	bodyLimit = 4096
+	t.Cleanup(func() {
+		bodyMu.Lock()
+		bodyUsed = 0
+		bodyLimit = previous
+		bodyMu.Unlock()
+	})
+	var upstreamHits int
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		upstreamHits++
+		_, _ = w.Write([]byte(`{"usage":{"prompt_tokens":1,"completion_tokens":1}}`))
+	}))
+	defer upstream.Close()
+	verdict := `{"action":"modify","reason":"grow","body":{"messages":[{"role":"user","content":"` + strings.Repeat("y", 6000) + `"}]}}`
+	var hopHits int
+	hop := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hopHits++
+		_, _ = io.WriteString(w, verdict)
+	}))
+	defer hop.Close()
+	dir := t.TempDir()
+	cfg := loadTestConfig(t, dir, upstream.URL+"/v1", upstream.URL+"/v1", config.AuthPassthrough, config.ProviderOpenAICompatible)
+	cfg.AIU.FailClosed = false
+	rec := do(New(cfg, aiuditor.HTTP{URL: hop.URL, Timeout: time.Second}, openJournal(t, dir)), "/v1/chat/completions", "parse", "task-1", "hop-budget", "", `{"messages":[{"role":"user","content":"hi"}]}`)
+	bodyMu.Lock()
+	used := bodyUsed
+	bodyMu.Unlock()
+	if rec.Code != http.StatusServiceUnavailable || hopHits != 1 || upstreamHits != 0 || used != 0 || !strings.Contains(rec.Body.String(), "budget") {
+		t.Fatalf("code %d hop %d upstream %d used %d body %s", rec.Code, hopHits, upstreamHits, used, rec.Body.String())
+	}
+}
+
 func TestProviderResponsesShareTheBodyBudget(t *testing.T) {
 	previous := bodyLimit
 	bodyLimit = 2500
@@ -627,6 +661,55 @@ func TestOversizedStreamLineIsUncertain(t *testing.T) {
 	records, err := metrics.ReadJournal(journal.Path())
 	if err != nil || len(records) != 1 || records[0].UsageStatus != metrics.StatusUncertain || records[0].Error == nil {
 		t.Fatal(err, records)
+	}
+}
+
+func TestKeylessLocalTierDoesNotRequireAProxyToken(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Authorization") != "" || r.Header.Get("x-api-key") != "" {
+			t.Errorf("keyless tier received a credential")
+		}
+		_, _ = w.Write([]byte(`{"usage":{"prompt_tokens":1,"completion_tokens":1}}`))
+	}))
+	defer upstream.Close()
+	dir := t.TempDir()
+	cfg := loadTestConfig(t, dir, upstream.URL+"/v1", upstream.URL+"/v1", config.AuthPassthroughOrEnv, config.ProviderOpenAICompatible)
+	cfg.Cheap.APIKeyEnv = ""
+	cfg.Frontier.APIKeyEnv = ""
+	t.Setenv(config.ProxyTokenEnv, "")
+	rec := do(New(cfg, aiuditor.Stub{}, openJournal(t, dir)), "/v1/chat/completions", "parse", "task-1", "local-1", "", `{"messages":[{"role":"user","content":"hi"}]}`)
+	if rec.Code != http.StatusOK {
+		t.Fatal(rec.Code, rec.Body.String())
+	}
+}
+
+func TestCleanEOFBeforeCompletionIsUncertain(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = io.WriteString(w, "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"m1\",\"usage\":{\"input_tokens\":4,\"output_tokens\":0}}}\n\n")
+		_, _ = io.WriteString(w, "event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"delta\":{\"type\":\"text_delta\",\"text\":\"partial\"}}\n\n")
+	}))
+	defer upstream.Close()
+	dir := t.TempDir()
+	cfg := loadTestConfig(t, dir, upstream.URL+"/v1", upstream.URL+"/v1", config.AuthPassthrough, config.ProviderAnthropic)
+	journal := openJournal(t, dir)
+	rec := do(New(cfg, aiuditor.Stub{}, journal), "/v1/responses", "parse", "task-1", "cut-clean", "", `{"stream":true,"input":"hi"}`)
+	body := rec.Body.String()
+	if strings.Contains(body, `"type":"response.completed"`) || !strings.Contains(body, "provider request failed") {
+		t.Fatal(body)
+	}
+	records, err := metrics.ReadJournal(journal.Path())
+	if err != nil || len(records) != 1 || records[0].UsageStatus != metrics.StatusUncertain || records[0].InputTokens != nil || records[0].OutputTokens != nil || records[0].Error == nil {
+		t.Fatal(err, records)
+	}
+}
+
+func TestKeylessCompactionDoesNotRequireAProxyToken(t *testing.T) {
+	t.Setenv(config.ProxyTokenEnv, "")
+	tier := config.Tier{Auth: config.AuthPassthroughOrEnv}
+	req := httptest.NewRequest(http.MethodPost, "/", nil)
+	if err := authorizeCompaction(req, tier); err != nil {
+		t.Fatal(err)
 	}
 }
 
@@ -1650,6 +1733,9 @@ func TestOversizedProviderBodyIsRejected(t *testing.T) {
 	dir := t.TempDir()
 	t.Setenv("CONDUCTOR_CHEAP_API_KEY", "test-key-do-not-log")
 	cfg := loadTestConfig(t, dir, upstream.URL+"/v1", upstream.URL+"/v1", config.AuthEnv, config.ProviderOpenAICompatible)
+	// This checks the size cap, not a network deadline; race instrumentation
+	// can take over two seconds to generate and read the 32 MiB fixture.
+	cfg.Cheap.Timeout = 15 * time.Second
 	journal := openJournal(t, dir)
 	rec := do(New(cfg, aiuditor.Stub{}, journal), "/v1/embeddings", "embed", "task-1", "emb-1", "", `{"input":"hello"}`)
 	if rec.Code != http.StatusBadGateway || !strings.Contains(rec.Body.String(), "too large") {

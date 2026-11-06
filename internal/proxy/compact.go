@@ -106,7 +106,7 @@ func authorizeCompaction(client *http.Request, tier config.Tier) error {
 		return nil
 	}
 	clientKey := clientCredential(client, tier.Provider)
-	needEnv := tier.Auth == config.AuthEnv || (tier.Auth == config.AuthPassthroughOrEnv && clientKey == "")
+	needEnv := tier.APIKeyEnv != "" && (tier.Auth == config.AuthEnv || (tier.Auth == config.AuthPassthroughOrEnv && clientKey == ""))
 	if !needEnv {
 		return nil
 	}
@@ -150,7 +150,7 @@ func (p *Proxy) cheapSummary(ctx context.Context, client *http.Request, tail str
 		return "", usage.UncertainUsage(), 0, errBodyBudget
 	}
 	defer func() { releaseBody(held) }()
-	verdict, hopErr := p.Hop.Review(ctx, aiuditor.Envelope{
+	verdict, hopErr := p.Hop.Review(aiuditor.WithResponseBudget(ctx, reserveBody, releaseBody), aiuditor.Envelope{
 		Request: aiuditor.Request{
 			Protocol: wire.Protocol,
 			Method:   http.MethodPost,
@@ -163,8 +163,12 @@ func (p *Proxy) cheapSummary(ctx context.Context, client *http.Request, tail str
 			Reason: "compaction of the tail on the cheap tier",
 		},
 	})
+	defer verdict.Release()
 	bodyToSend := wire.Body
 	if hopErr != nil {
+		if errors.Is(hopErr, aiuditor.ErrResponseBudget) {
+			return "", usage.UncertainUsage(), 0, errBodyBudget
+		}
 		if p.Config.AIU.FailClosed {
 			return "", usage.UncertainUsage(), 0, hopErr
 		}

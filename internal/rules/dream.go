@@ -103,9 +103,16 @@ func Dream(in DreamInput, active File, proposalsDir string) (Proposal, string, e
 		})
 	}
 
+	journalSteps := map[string]bool{}
+	for _, row := range in.Records {
+		journalSteps[outcomeKey(row.TaskID, row.StepID)] = true
+	}
 	linkAdds := map[string][]string{}
 	linkDrops := map[string][]string{}
 	for _, outcome := range in.Outcomes {
+		if !journalSteps[outcomeKey(outcome.TaskID, outcome.StepID)] {
+			continue
+		}
 		key := outcome.From + "\t" + outcome.To
 		switch outcome.Kind {
 		case "link_used":
@@ -292,19 +299,17 @@ func Apply(activePath, proposalPath string) error {
 	if err != nil {
 		return err
 	}
-	if _, err := os.Stat(activePath); err == nil {
-		revDir := filepath.Join(filepath.Dir(activePath), "revisions")
-		if err := os.MkdirAll(revDir, 0o755); err != nil {
-			return err
-		}
-		blob, err := Marshal(current)
-		if err != nil {
-			return err
-		}
-		rev := nextRevision(revDir)
-		if err := os.WriteFile(filepath.Join(revDir, fmt.Sprintf("%04d.json", rev)), blob, 0o644); err != nil {
-			return err
-		}
+	revDir := filepath.Join(filepath.Dir(activePath), "revisions")
+	if err := os.MkdirAll(revDir, 0o755); err != nil {
+		return err
+	}
+	blob, err := Marshal(current)
+	if err != nil {
+		return err
+	}
+	rev := nextRevision(revDir)
+	if err := os.WriteFile(filepath.Join(revDir, fmt.Sprintf("%04d.json", rev)), blob, 0o644); err != nil {
+		return err
 	}
 	next := proposal.File
 	if next.Version <= current.Version {

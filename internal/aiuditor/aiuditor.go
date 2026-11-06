@@ -13,6 +13,7 @@ import (
 	"io"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -51,10 +52,47 @@ type Envelope struct {
 
 // Verdict is allow, deny, or modify. Modify carries a replacement JSON body.
 type Verdict struct {
-	Action string          `json:"action"`
-	Reason string          `json:"reason"`
-	Body   json.RawMessage `json:"body,omitempty"`
+	release func()
+	Action  string          `json:"action"`
+	Reason  string          `json:"reason"`
+	Body    json.RawMessage `json:"body,omitempty"`
 }
+
+// Release drops the HTTP response reservation after the verdict is no longer used.
+func (v Verdict) Release() {
+	if v.release != nil {
+		v.release()
+	}
+}
+
+type responseBudget struct {
+	reserve func(int) bool
+	release func(int)
+}
+type responseBudgetKey struct{}
+
+// WithResponseBudget shares the caller's aggregate buffer allowance.
+func WithResponseBudget(ctx context.Context, reserve func(int) bool, release func(int)) context.Context {
+	return context.WithValue(ctx, responseBudgetKey{}, responseBudget{reserve, release})
+}
+
+var fallbackMu sync.Mutex
+var fallbackUsed int
+var fallbackBudget = responseBudget{
+	reserve: func(n int) bool {
+		fallbackMu.Lock()
+		defer fallbackMu.Unlock()
+		if n > (32<<20)-fallbackUsed {
+			return false
+		}
+		fallbackUsed += n
+		return true
+	},
+	release: func(n int) { fallbackMu.Lock(); fallbackUsed -= n; fallbackMu.Unlock() },
+}
+
+// ErrResponseBudget is always fatal, including when transport fail-open is configured.
+var ErrResponseBudget = fmt.Errorf("aiuditor response budget exceeded")
 
 // Hop reviews one request.
 type Hop interface {
@@ -247,9 +285,42 @@ func (h HTTP) Review(ctx context.Context, env Envelope) (Verdict, error) {
 		return Verdict{}, fmt.Errorf("aiuditor unreachable")
 	}
 	defer resp.Body.Close()
-	respBody, err := io.ReadAll(io.LimitReader(resp.Body, 8<<20))
-	if err != nil {
-		return Verdict{}, fmt.Errorf("aiuditor unreachable")
+	budget, ok := ctx.Value(responseBudgetKey{}).(responseBudget)
+	if !ok {
+		budget = fallbackBudget
+	}
+	held := 0
+	var once sync.Once
+	release := func() { once.Do(func() { budget.release(held) }) }
+	transferred := false
+	defer func() {
+		if !transferred {
+			release()
+		}
+	}()
+	var respBody []byte
+	chunk := make([]byte, 32*1024)
+	for {
+		n, readErr := resp.Body.Read(chunk)
+		if n > 0 {
+			if len(respBody)+n > 8<<20 {
+				return Verdict{}, fmt.Errorf("aiuditor response too large")
+			}
+			// Cover append capacity growth and the decoded RawMessage copy before
+			// allocating either. Keep that allowance until the caller releases it.
+			charge := 3 * n
+			if !budget.reserve(charge) {
+				return Verdict{}, ErrResponseBudget
+			}
+			held += charge
+			respBody = append(respBody, chunk[:n]...)
+		}
+		if readErr == io.EOF {
+			break
+		}
+		if readErr != nil {
+			return Verdict{}, fmt.Errorf("aiuditor unreachable")
+		}
 	}
 	if resp.StatusCode != http.StatusOK {
 		return Verdict{}, fmt.Errorf("aiuditor HTTP %d", resp.StatusCode)
@@ -260,6 +331,8 @@ func (h HTTP) Review(ctx context.Context, env Envelope) (Verdict, error) {
 	}
 	switch verdict.Action {
 	case Allow, Deny, Modify:
+		verdict.release = release
+		transferred = true
 		return verdict, nil
 	default:
 		return Verdict{}, fmt.Errorf("aiuditor response has an unknown action")

@@ -218,7 +218,8 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		yes := true
 		base.PrefixCacheMatch = &yes
 	}
-	prepared, halted := p.applyReview(w, r, &base, proto, prepared, stream, decision, tier, prelimHash)
+	prepared, halted, reviewRelease := p.applyReview(w, r, &base, proto, prepared, stream, decision, tier, prelimHash)
+	defer reviewRelease()
 	if halted {
 		return
 	}
@@ -265,7 +266,9 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	if didCompact || !bytes.Equal(beforeNotes, prepared) {
 		var halted bool
-		prepared, halted = p.applyReview(w, r, &base, proto, prepared, stream, decision, tier, base.PrefixSHA256)
+		var secondRelease func()
+		prepared, halted, secondRelease = p.applyReview(w, r, &base, proto, prepared, stream, decision, tier, base.PrefixSHA256)
+		defer secondRelease()
 		if halted {
 			return
 		}
@@ -508,7 +511,9 @@ func (p *Proxy) stream(w http.ResponseWriter, client *http.Request, resp *http.R
 			}
 		}
 		if err != nil {
-			if err != io.EOF {
+			if err == io.EOF && !terminal && !bridge.Closed() {
+				readErr = fmt.Errorf("provider stream ended before completion")
+			} else if err != io.EOF {
 				readErr = err
 			}
 			break
@@ -701,7 +706,7 @@ func applyAuth(dst, src *http.Request, tier config.Tier) ([]string, error) {
 	clientKey := clientCredential(src, tier.Provider)
 	var envKey string
 	var err error
-	needEnv := tier.Auth == config.AuthEnv || (tier.Auth == config.AuthPassthroughOrEnv && clientKey == "")
+	needEnv := tier.APIKeyEnv != "" && (tier.Auth == config.AuthEnv || (tier.Auth == config.AuthPassthroughOrEnv && clientKey == ""))
 	if needEnv {
 		if err = authorizeProxy(src); err != nil {
 			return nil, err
@@ -984,8 +989,8 @@ func providerError(payload []byte) bool {
 	return ok
 }
 
-func (p *Proxy) applyReview(w http.ResponseWriter, r *http.Request, base *metrics.StepRecord, proto string, prepared []byte, stream bool, decision routing.Decision, tier config.Tier, hash string) ([]byte, bool) {
-	verdict, hopErr := p.Hop.Review(r.Context(), aiuditor.Envelope{
+func (p *Proxy) applyReview(w http.ResponseWriter, r *http.Request, base *metrics.StepRecord, proto string, prepared []byte, stream bool, decision routing.Decision, tier config.Tier, hash string) ([]byte, bool, func()) {
+	verdict, hopErr := p.Hop.Review(aiuditor.WithResponseBudget(r.Context(), reserveBody, releaseBody), aiuditor.Envelope{
 		Request: aiuditor.Request{
 			Protocol: proto,
 			Method:   r.Method,
@@ -1005,14 +1010,17 @@ func (p *Proxy) applyReview(w http.ResponseWriter, r *http.Request, base *metric
 		},
 	})
 	if hopErr != nil {
-		if p.Config.AIU.FailClosed {
+		if p.Config.AIU.FailClosed || errors.Is(hopErr, aiuditor.ErrResponseBudget) {
 			msg := "aiuditor unreachable"
+			if errors.Is(hopErr, aiuditor.ErrResponseBudget) {
+				msg = "request body budget exceeded"
+			}
 			base.Error = &msg
 			base.UsageStatus = metrics.StatusUncertain
 			p.finish(w, r, http.StatusServiceUnavailable, nil, *base, nil, false)
-			return prepared, true
+			return prepared, true, verdict.Release
 		}
-		return prepared, false
+		return prepared, false, verdict.Release
 	}
 	switch verdict.Action {
 	case aiuditor.Deny:
@@ -1020,21 +1028,21 @@ func (p *Proxy) applyReview(w http.ResponseWriter, r *http.Request, base *metric
 		base.Error = &msg
 		base.UsageStatus = metrics.StatusUncertain
 		p.finish(w, r, http.StatusForbidden, nil, *base, nil, false)
-		return prepared, true
+		return prepared, true, verdict.Release
 	case aiuditor.Modify:
 		if len(verdict.Body) == 0 || !json.Valid(verdict.Body) {
 			msg := "aiuditor modify was not JSON"
 			base.Error = &msg
 			base.UsageStatus = metrics.StatusUncertain
 			p.finish(w, r, http.StatusBadGateway, nil, *base, nil, false)
-			return prepared, true
+			return prepared, true, verdict.Release
 		}
 		prepared = forceStreamFlag(verdict.Body, stream)
 		if next, err := hashBody(proto, prepared); err == nil {
 			base.PrefixSHA256 = next
 		}
 	}
-	return prepared, false
+	return prepared, false, verdict.Release
 }
 
 // upstreamClient reuses one bounded transport for every provider call.
