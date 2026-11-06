@@ -20,6 +20,9 @@ const Schema = "hypermesh.conductor.history.v0"
 var (
 	maxHistoryBytes     = 32 << 20
 	maxTaskHistoryBytes = 8 << 20
+	// Stores are opened per request. Serialize the complete history update
+	// across instances, including quota eviction and atomic replacement.
+	historyMu sync.Mutex
 )
 
 // Record is one original tail.
@@ -35,7 +38,6 @@ type Record struct {
 // Store is an append-only history file next to the metrics journal.
 type Store struct {
 	path string
-	mu   sync.Mutex
 }
 
 // PathFor returns the history file beside a metrics journal.
@@ -65,8 +67,8 @@ func (s *Store) Append(record Record) error {
 	if need > maxHistoryBytes || need > maxTaskHistoryBytes {
 		return fmt.Errorf("history record exceeds the quota")
 	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	historyMu.Lock()
+	defer historyMu.Unlock()
 	if err := s.makeRoom(record.TaskID, need); err != nil {
 		return err
 	}

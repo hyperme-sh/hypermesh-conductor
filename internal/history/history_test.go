@@ -2,9 +2,11 @@ package history
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 )
 
@@ -91,5 +93,52 @@ func TestHistoryStaysInsideTheQuota(t *testing.T) {
 	info, err := os.Stat(path)
 	if err != nil || info.Size() > int64(maxHistoryBytes) {
 		t.Fatal(err, info.Size())
+	}
+}
+
+func TestConcurrentStoresPreserveAppendsDuringEviction(t *testing.T) {
+	oldTotal, oldTask := maxHistoryBytes, maxTaskHistoryBytes
+	maxHistoryBytes, maxTaskHistoryBytes = 10000, 10000
+	defer func() { maxHistoryBytes, maxTaskHistoryBytes = oldTotal, oldTask }()
+	path := filepath.Join(t.TempDir(), "history.jsonl")
+	store, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Append(Record{TaskID: "old", Summary: strings.Repeat("x", 9500)}); err != nil {
+		t.Fatal(err)
+	}
+	var wg sync.WaitGroup
+	for i := 0; i < 20; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			s, err := Open(path)
+			if err != nil {
+				t.Error(err)
+				return
+			}
+			if err := s.Append(Record{TaskID: fmt.Sprint(i), Summary: strings.Repeat("y", 100)}); err != nil {
+				t.Error(err)
+			}
+		}(i)
+	}
+	wg.Wait()
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	seen := map[string]bool{}
+	for _, line := range strings.Split(strings.TrimSpace(string(raw)), "\n") {
+		var r Record
+		if err := json.Unmarshal([]byte(line), &r); err != nil {
+			t.Fatal(err)
+		}
+		seen[r.TaskID] = true
+	}
+	for i := 0; i < 20; i++ {
+		if !seen[fmt.Sprint(i)] {
+			t.Fatalf("lost appended record %d", i)
+		}
 	}
 }

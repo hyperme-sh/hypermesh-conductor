@@ -508,3 +508,18 @@ func TestSameProtocolPreservesNestedBytes(t *testing.T) {
 		t.Fatal(string(wire.Body))
 	}
 }
+
+func TestAnthropicHonorsParallelToolProhibition(t *testing.T) {
+	for _, proto := range []string{ProtoChat, ProtoResponses} {
+		for _, choice := range []string{"", `,"tool_choice":"auto"`, `,"tool_choice":"required"`} {
+			input := `{"parallel_tool_calls":false,"messages":[{"role":"user","content":"hi"}],"input":"hi"` + choice + `}`
+			got, err := Request(proto, ProviderAnthropic, "frontier", []byte(input))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !strings.Contains(string(got.Body), `"disable_parallel_tool_use":true`) {
+				t.Fatal(string(got.Body))
+			}
+		}
+	}
+}

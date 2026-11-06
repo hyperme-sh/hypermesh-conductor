@@ -174,7 +174,9 @@ func textOfAll(items []json.RawMessage) string {
 	var buf bytes.Buffer
 	for _, item := range items {
 		var obj map[string]any
-		if err := json.Unmarshal(item, &obj); err != nil {
+		decoder := json.NewDecoder(bytes.NewReader(item))
+		decoder.UseNumber()
+		if err := decoder.Decode(&obj); err != nil {
 			continue
 		}
 		if calls, ok := obj["tool_calls"].([]any); ok {

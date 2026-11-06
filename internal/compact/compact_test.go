@@ -1,6 +1,7 @@
 package compact
 
 import (
+	"encoding/json"
 	"strings"
 	"testing"
 )
@@ -163,5 +164,12 @@ func TestTopLevelAudioAndOpaqueContentPreventCompaction(t *testing.T) {
 		if err != nil || plan.Needed {
 			t.Fatal(err, plan.Needed)
 		}
+	}
+}
+
+func TestSummaryPreservesLargeToolInputIntegers(t *testing.T) {
+	got := textOfAll([]json.RawMessage{json.RawMessage(`{"role":"assistant","content":[{"type":"tool_use","id":"call","name":"lookup","input":{"record_id":9007199254740993}}]}`)})
+	if !strings.Contains(got, "9007199254740993") {
+		t.Fatal(got)
 	}
 }

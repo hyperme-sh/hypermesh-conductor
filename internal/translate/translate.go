@@ -1143,7 +1143,15 @@ func copyStop(dst map[string]any, value any) error {
 
 func applyToolChoice(dst, src map[string]any, toAnthropic bool) error {
 	value, ok := src["tool_choice"]
-	if !ok || value == nil {
+	parallel, hasParallel := src["parallel_tool_calls"]
+	if toAnthropic && hasParallel {
+		if _, valid := parallel.(bool); !valid {
+			return fmt.Errorf("parallel_tool_calls must be a boolean")
+		}
+		if !ok || value == nil {
+			value = "auto"
+		}
+	} else if !ok || value == nil {
 		return nil
 	}
 	var choice any
@@ -1155,6 +1163,9 @@ func applyToolChoice(dst, src map[string]any, toAnthropic bool) error {
 	}
 	if err != nil {
 		return err
+	}
+	if toAnthropic && hasParallel {
+		choice.(map[string]any)["disable_parallel_tool_use"] = !parallel.(bool)
 	}
 	dst["tool_choice"] = choice
 	return nil
