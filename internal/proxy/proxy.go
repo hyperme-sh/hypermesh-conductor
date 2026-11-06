@@ -488,7 +488,9 @@ func (p *Proxy) stream(w http.ResponseWriter, client *http.Request, resp *http.R
 			}
 		}
 		if err != nil {
-			if err != io.EOF {
+			if err == io.EOF && !terminal && !bridge.Closed() {
+				readErr = fmt.Errorf("provider stream ended before completion")
+			} else if err != io.EOF {
 				readErr = err
 			}
 			break
@@ -681,7 +683,7 @@ func applyAuth(dst, src *http.Request, tier config.Tier) ([]string, error) {
 	clientKey := clientCredential(src, tier.Provider)
 	var envKey string
 	var err error
-	needEnv := tier.Auth == config.AuthEnv || (tier.Auth == config.AuthPassthroughOrEnv && clientKey == "")
+	needEnv := tier.APIKeyEnv != "" && (tier.Auth == config.AuthEnv || (tier.Auth == config.AuthPassthroughOrEnv && clientKey == ""))
 	if needEnv {
 		if err = authorizeProxy(src); err != nil {
 			return nil, err

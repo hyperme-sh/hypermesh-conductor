@@ -101,7 +101,16 @@ func TestToolCallsSurviveTranslation(t *testing.T) {
 		t.Fatal(err)
 	}
 	text = string(back.Body)
-	if !strings.Contains(text, `"tool_calls"`) || !strings.Contains(text, `"id":"call_1"`) || !strings.Contains(text, `"tool_call_id":"call_1"`) || !strings.Contains(text, `"content":null`) {
+	if !strings.Contains(text, `"tool_calls"`) || !strings.Contains(text, `"id":"call_1"`) || !strings.Contains(text, `"tool_call_id":"call_1"`) || !strings.Contains(text, `"content":null`) || strings.Contains(text, "[tool_use") {
+		t.Fatal(text)
+	}
+	mixed := []byte(`{"id":"m1","content":[{"type":"text","text":"looked up"},{"type":"tool_use","id":"call_1","name":"lookup","input":{"q":1}}],"stop_reason":"tool_use"}`)
+	chatOut, err := Response(ProtoChat, ProtoMessages, mixed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	text = string(chatOut)
+	if !strings.Contains(text, `"content":"looked up"`) || !strings.Contains(text, `"tool_calls"`) || strings.Contains(text, "[tool_use") {
 		t.Fatal(text)
 	}
 }

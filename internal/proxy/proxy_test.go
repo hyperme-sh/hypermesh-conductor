@@ -663,6 +663,46 @@ func TestOversizedStreamLineIsUncertain(t *testing.T) {
 	}
 }
 
+func TestKeylessLocalTierDoesNotRequireAProxyToken(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Authorization") != "" || r.Header.Get("x-api-key") != "" {
+			t.Errorf("keyless tier received a credential")
+		}
+		_, _ = w.Write([]byte(`{"usage":{"prompt_tokens":1,"completion_tokens":1}}`))
+	}))
+	defer upstream.Close()
+	dir := t.TempDir()
+	cfg := loadTestConfig(t, dir, upstream.URL+"/v1", upstream.URL+"/v1", config.AuthPassthroughOrEnv, config.ProviderOpenAICompatible)
+	cfg.Cheap.APIKeyEnv = ""
+	cfg.Frontier.APIKeyEnv = ""
+	t.Setenv(config.ProxyTokenEnv, "")
+	rec := do(New(cfg, aiuditor.Stub{}, openJournal(t, dir)), "/v1/chat/completions", "parse", "task-1", "local-1", "", `{"messages":[{"role":"user","content":"hi"}]}`)
+	if rec.Code != http.StatusOK {
+		t.Fatal(rec.Code, rec.Body.String())
+	}
+}
+
+func TestCleanEOFBeforeCompletionIsUncertain(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = io.WriteString(w, "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"m1\",\"usage\":{\"input_tokens\":4,\"output_tokens\":0}}}\n\n")
+		_, _ = io.WriteString(w, "event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"delta\":{\"type\":\"text_delta\",\"text\":\"partial\"}}\n\n")
+	}))
+	defer upstream.Close()
+	dir := t.TempDir()
+	cfg := loadTestConfig(t, dir, upstream.URL+"/v1", upstream.URL+"/v1", config.AuthPassthrough, config.ProviderAnthropic)
+	journal := openJournal(t, dir)
+	rec := do(New(cfg, aiuditor.Stub{}, journal), "/v1/responses", "parse", "task-1", "cut-clean", "", `{"stream":true,"input":"hi"}`)
+	body := rec.Body.String()
+	if strings.Contains(body, `"type":"response.completed"`) || !strings.Contains(body, "provider request failed") {
+		t.Fatal(body)
+	}
+	records, err := metrics.ReadJournal(journal.Path())
+	if err != nil || len(records) != 1 || records[0].UsageStatus != metrics.StatusUncertain || records[0].InputTokens != nil || records[0].OutputTokens != nil || records[0].Error == nil {
+		t.Fatal(err, records)
+	}
+}
+
 func TestBrokenResponsesStreamIsNotCompleted(t *testing.T) {
 	payload := "event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"delta\":{\"type\":\"text_delta\",\"text\":\"partial\"}}\n\n"
 	base := truncatedServer(t, "200 OK", "text/event-stream", payload)
