@@ -28,13 +28,7 @@ func MarkdownDiffs(list []Note) string {
 		fmt.Fprintf(&b, "--- a/%s\n+++ b/%s\n@@\n-status: %s\n+status: dropped\n", drop.Path, drop.Path, drop.Status)
 	}
 	for _, note := range list {
-		linked := map[string]struct{}{}
-		for _, target := range note.Links {
-			linked[fold(target)] = struct{}{}
-		}
-		for _, target := range wikiLinks(note.Body) {
-			linked[fold(target)] = struct{}{}
-		}
+		linked := knownLinkTargets(note)
 		for _, other := range list {
 			if other.ID == note.ID {
 				continue
@@ -53,4 +47,25 @@ func MarkdownDiffs(list []Note) string {
 		}
 	}
 	return b.String()
+}
+
+// knownLinkTargets is the set of notes this note already points at. Dream
+// passes Store.All(), whose Links come from the index, and the body still
+// contains the wikilink when that field was not filled.
+func knownLinkTargets(note Note) map[string]struct{} {
+	linked := map[string]struct{}{}
+	add := func(target string) {
+		target = fold(target)
+		if target == "" {
+			return
+		}
+		linked[target] = struct{}{}
+	}
+	for _, target := range note.Links {
+		add(target)
+	}
+	for _, target := range wikiLinks(note.Body) {
+		add(target)
+	}
+	return linked
 }

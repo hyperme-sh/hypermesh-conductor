@@ -321,6 +321,17 @@ Gamma detail.
 	if strings.Contains(diff, "[[beta]]") || !strings.Contains(diff, "[[gamma]]") {
 		t.Fatal(diff)
 	}
+	// The dream path used to hand MarkdownDiffs notes whose Links field was
+	// empty. The wikilink in the body is still an existing link, and it must
+	// not crowd out the missing one.
+	stripped := append([]Note(nil), list...)
+	for i := range stripped {
+		stripped[i].Links = nil
+	}
+	again := MarkdownDiffs(stripped)
+	if strings.Contains(again, "[[beta]]") || !strings.Contains(again, "[[gamma]]") {
+		t.Fatal(again)
+	}
 }
 
 func TestRetrieveStaysWithinBudget(t *testing.T) {
