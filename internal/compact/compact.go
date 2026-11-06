@@ -198,7 +198,7 @@ func containsUnsummarized(items []json.RawMessage) bool {
 		if err := json.Unmarshal(item, &obj); err != nil {
 			return true
 		}
-		if contentUnsummarized(obj["content"]) {
+		if _, audio := obj["audio"]; audio || contentUnsummarized(obj["content"]) {
 			return true
 		}
 	}
@@ -208,7 +208,12 @@ func containsUnsummarized(items []json.RawMessage) bool {
 func contentUnsummarized(content any) bool {
 	blocks, ok := content.([]any)
 	if !ok {
-		return false
+		switch content.(type) {
+		case nil, string:
+			return false
+		default:
+			return true
+		}
 	}
 	for _, part := range blocks {
 		block, ok := part.(map[string]any)
@@ -216,7 +221,14 @@ func contentUnsummarized(content any) bool {
 			return true
 		}
 		switch block["type"] {
-		case "text", "tool_use", "":
+		case "text", "":
+			if _, ok := block["text"].(string); !ok {
+				return true
+			}
+		case "tool_use":
+			if _, ok := block["input"]; !ok {
+				return true
+			}
 		case "tool_result":
 			if contentUnsummarized(block["content"]) {
 				return true

@@ -125,3 +125,43 @@ func TestShortTailIsLeftAlone(t *testing.T) {
 		t.Fatal("short tail should stay")
 	}
 }
+func TestUnsupportedOlderContentPreventsCompaction(t *testing.T) {
+	for _, block := range []string{
+		`{"type":"image_url","image_url":{"url":"https://example.invalid/image"}}`,
+		`{"type":"image","source":{"type":"base64","data":"image"}}`,
+		`{"type":"tool_result","tool_use_id":"tool","content":[{"type":"image","source":{}}]}`,
+		`{"type":"unknown","text":"caption"}`,
+	} {
+		raw := []byte(`[{"role":"user","content":[{"type":"text","text":"` + strings.Repeat("long ", 80) + `"},` + block + `]},{"role":"user","content":"What was in the image?"}]`)
+		plan, err := PlanMessages(raw, 10, 1)
+		if err != nil || plan.Needed {
+			t.Fatal(err, plan.Needed, block)
+		}
+	}
+}
+
+func TestUnsupportedRecentContentIsRetained(t *testing.T) {
+	image := `{"role":"user","content":[{"type":"image_url","image_url":{"url":"https://example.invalid/image"}}]}`
+	raw := []byte(`[{"role":"user","content":"` + strings.Repeat("long ", 80) + `"},` + image + `]`)
+	plan, err := PlanMessages(raw, 10, 1)
+	if err != nil || !plan.Needed {
+		t.Fatal(err, plan.Needed)
+	}
+	result, err := ApplyMessages(plan, "summary")
+	if err != nil || !strings.Contains(string(result), image) {
+		t.Fatal(err, string(result))
+	}
+}
+
+func TestTopLevelAudioAndOpaqueContentPreventCompaction(t *testing.T) {
+	for _, message := range []string{
+		`{"role":"assistant","content":"spoken words","audio":{"id":"audio-1"}}`,
+		`{"role":"user","content":{"image":"opaque"}}`,
+	} {
+		raw := []byte(`[` + message + `,{"role":"user","content":"` + strings.Repeat("question ", 80) + `"}]`)
+		plan, err := PlanMessages(raw, 10, 1)
+		if err != nil || plan.Needed {
+			t.Fatal(err, plan.Needed)
+		}
+	}
+}
