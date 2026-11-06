@@ -117,7 +117,9 @@ mkdir -p runs
 
 Tails longer than `compaction.max_tail_tokens` are summarized on the cheap tier. The original tail is stored in `history.jsonl` next to the metrics journal. The system prompt and tools stay the prefix that is hashed.
 
-`conductor dream` replays the journal and writes an inactive rule proposal. `conductor rules diff`, `apply`, and `rollback` review that file. Proposals cannot loosen AIuditor rules. Prompt bodies are included only with `dream --bodies`.
+`conductor dream` replays the journal and writes an inactive rule proposal. `conductor rules diff`, `apply`, and `rollback` review that file. Proposals cannot loosen AIuditor rules. Prompt bodies are included only with `dream --bodies`. With `--notes`, dream also writes a markdown diff of proposed links and merges and does not change the notes.
+
+Linked notes live as Markdown under `notes.dir`. `conductor index rebuild` and `conductor index status` maintain a local SQLite index of wikilinks, backlinks, and full text. A request inserts a small neighborhood after the stable prefix. `conductor summary` includes the memory-cache hit rate. See [docs/notes.md](docs/notes.md).
 
 ## Contributing
 

@@ -17,6 +17,7 @@ import (
 	"github.com/hyperme-sh/hypermesh-conductor/internal/history"
 	"github.com/hyperme-sh/hypermesh-conductor/internal/jsonbody"
 	"github.com/hyperme-sh/hypermesh-conductor/internal/metrics"
+	"github.com/hyperme-sh/hypermesh-conductor/internal/notes"
 	"github.com/hyperme-sh/hypermesh-conductor/internal/translate"
 	"github.com/hyperme-sh/hypermesh-conductor/internal/usage"
 )
@@ -40,25 +41,30 @@ func (p *Proxy) maybeCompact(ctx context.Context, client *http.Request, proto st
 	if err := authorizeCompaction(compactionClient, p.Config.Cheap); err != nil {
 		return prepared, false, err
 	}
-	summary, parsed, latency, err := p.cheapSummary(ctx, compactionClient, plan.SummaryInput)
-	compactID := stepID + ".compact"
-	record := metrics.StepRecord{
-		TaskID: taskID, StepID: compactID, JobClass: "summarize", Tier: "cheap",
-		ModelID: p.Config.Cheap.Model, Reason: "compaction of the tail on the cheap tier",
-		PrefixSHA256: prefixHash, LatencyMS: &latency, UsageStatus: metrics.StatusUncertain,
+	summary, parsed, latency, cached, err := p.tailSummary(ctx, compactionClient, prefixHash, plan.SummaryInput)
+	if !cached {
+		compactID := stepID + ".compact"
+		record := metrics.StepRecord{
+			TaskID: taskID, StepID: compactID, JobClass: "summarize", Tier: "cheap",
+			ModelID: p.Config.Cheap.Model, Reason: "compaction of the tail on the cheap tier",
+			PrefixSHA256: prefixHash, LatencyMS: &latency, UsageStatus: metrics.StatusUncertain,
+		}
+		if err != nil {
+			var denied proxyAuthError
+			if errors.As(err, &denied) {
+				return prepared, false, err
+			}
+			msg := "compaction request failed"
+			record.Error = &msg
+			p.journal(record)
+			return prepared, false, nil
+		}
+		applyUsage(&record, parsed, p.Config, "cheap")
+		p.journal(record)
 	}
 	if err != nil {
-		var denied proxyAuthError
-		if errors.As(err, &denied) {
-			return prepared, false, err
-		}
-		msg := "compaction request failed"
-		record.Error = &msg
-		p.journal(record)
 		return prepared, false, nil
 	}
-	applyUsage(&record, parsed, p.Config, "cheap")
-	p.journal(record)
 	rewritten, err := compact.ApplyMessages(plan, summary)
 	if err != nil {
 		return prepared, false, nil
@@ -106,6 +112,19 @@ func authorizeCompaction(client *http.Request, tier config.Tier) error {
 		return nil
 	}
 	return authorizeProxy(client)
+}
+
+func (p *Proxy) tailSummary(ctx context.Context, client *http.Request, prefixHash, tail string) (string, usage.Usage, int, bool, error) {
+	if p.Notes != nil && p.Notes.Cache != nil {
+		if cached, ok := p.Notes.Cache.Get("sum:" + notes.SummaryKey(prefixHash, tail)); ok && cached != "" {
+			return cached, usage.UncertainUsage(), 0, true, nil
+		}
+	}
+	summary, parsed, latency, err := p.cheapSummary(ctx, client, tail)
+	if err == nil && p.Notes != nil && p.Notes.Cache != nil {
+		p.Notes.Cache.Put("sum:"+notes.SummaryKey(prefixHash, tail), summary)
+	}
+	return summary, parsed, latency, false, err
 }
 
 func (p *Proxy) cheapSummary(ctx context.Context, client *http.Request, tail string) (string, usage.Usage, int, error) {

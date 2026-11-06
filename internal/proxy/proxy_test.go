@@ -21,6 +21,7 @@ import (
 	"github.com/hyperme-sh/hypermesh-conductor/internal/aiuditor"
 	"github.com/hyperme-sh/hypermesh-conductor/internal/config"
 	"github.com/hyperme-sh/hypermesh-conductor/internal/metrics"
+	"github.com/hyperme-sh/hypermesh-conductor/internal/notes"
 	"github.com/hyperme-sh/hypermesh-conductor/internal/prefix"
 	"github.com/hyperme-sh/hypermesh-conductor/internal/translate"
 )
@@ -1407,6 +1408,83 @@ func (b neverEnding) Read(p []byte) (int, error) {
 		p[i] = byte(b)
 	}
 	return len(p), nil
+}
+
+func TestRetrievedNotesFollowThePrefixAndStayOutOfTheJournal(t *testing.T) {
+	var bodies []string
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		raw, _ := io.ReadAll(r.Body)
+		bodies = append(bodies, string(raw))
+		_, _ = w.Write([]byte(`{"choices":[{"message":{"role":"assistant","content":"ok"}}],"usage":{"prompt_tokens":9,"completion_tokens":1}}`))
+	}))
+	defer upstream.Close()
+	dir := t.TempDir()
+	notesDir := filepath.Join(dir, "notes")
+	if err := os.MkdirAll(notesDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(notesDir, "fact.md"), []byte(`---
+id: fact-1
+type: fact
+status: open
+---
+# Local fact
+SENTENCEUNIQUE stays on disk.
+[[step-1]]
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(notesDir, "step.md"), []byte(`---
+id: step-1
+type: steps
+status: open
+order: 1
+---
+# Do the step
+Step detail STEPPAGE.
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	store, err := notes.Open(filepath.Join(dir, "index.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	if _, err := store.Rebuild(notesDir); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("CONDUCTOR_CHEAP_API_KEY", "test-key-do-not-log")
+	t.Setenv(config.ProxyTokenEnv, "proxy-token-for-tests")
+	cfg := loadTestConfig(t, dir, upstream.URL+"/v1", upstream.URL+"/v1", config.AuthEnv, config.ProviderOpenAICompatible)
+	journal := openJournal(t, dir)
+	server := New(cfg, aiuditor.Stub{}, journal)
+	server.Notes = notes.NewService(store)
+	system := `{"role":"system","name":"keep","content":"Stay stable."}`
+	requestBody := `{"messages":[` + system + `,{"role":"user","content":"sentenceunique"}]}`
+	if rec := do(server, "/v1/chat/completions", "parse", "task-9", "req-1", "", requestBody); rec.Code != http.StatusOK {
+		t.Fatal(rec.Code, rec.Body.String())
+	}
+	if rec := do(server, "/v1/chat/completions", "parse", "task-9", "req-2", "", requestBody); rec.Code != http.StatusOK {
+		t.Fatal(rec.Code, rec.Body.String())
+	}
+	if len(bodies) != 2 || !strings.Contains(bodies[0], system) || !strings.Contains(bodies[0], "SENTENCEUNIQUE") || !strings.Contains(bodies[0], "STEPPAGE") {
+		t.Fatalf("%v", bodies)
+	}
+	if strings.Index(bodies[0], system) > strings.Index(bodies[0], "SENTENCEUNIQUE") {
+		t.Fatal(bodies[0])
+	}
+	stored := readFile(t, journal.Path())
+	if strings.Contains(stored, "SENTENCEUNIQUE") || strings.Contains(stored, "STEPPAGE") {
+		t.Fatal(stored)
+	}
+	records, err := metrics.ReadJournal(journal.Path())
+	if err != nil {
+		t.Fatal(err)
+	}
+	summary := metrics.Summarize(records)
+	if summary.Memory.Lookups == 0 || summary.Memory.HitRate == nil || *summary.Memory.HitRate <= 0 {
+		t.Fatalf("%+v", summary.Memory)
+	}
 }
 
 func TestModelsAndUnknownClass(t *testing.T) {

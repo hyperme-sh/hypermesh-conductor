@@ -54,6 +54,8 @@ type StepRecord struct {
 	CostProxyLabel     *string  `json:"cost_proxy_label"`
 	Compacted          *bool    `json:"compacted,omitempty"`
 	PrefixCacheMatch   *bool    `json:"prefix_cache_match,omitempty"`
+	MemoryLookups      *int     `json:"memory_lookups,omitempty"`
+	MemoryHits         *int     `json:"memory_hits,omitempty"`
 }
 
 // Validate checks the row before it is written or summarized.
@@ -111,6 +113,8 @@ type wireRecord struct {
 	CostProxyLabel     *string   `json:"cost_proxy_label"`
 	Compacted          *bool     `json:"compacted,omitempty"`
 	PrefixCacheMatch   *bool     `json:"prefix_cache_match,omitempty"`
+	MemoryLookups      *int      `json:"memory_lookups,omitempty"`
+	MemoryHits         *int      `json:"memory_hits,omitempty"`
 	PeakContextTokens  *int      `json:"peak_context_tokens"`
 	CostPerStep        *float64  `json:"cost_per_step"`
 	Accuracy           *Accuracy `json:"accuracy"`
@@ -143,6 +147,8 @@ func (r StepRecord) Wire() wireRecord {
 		CostProxyLabel:     r.CostProxyLabel,
 		Compacted:          r.Compacted,
 		PrefixCacheMatch:   r.PrefixCacheMatch,
+		MemoryLookups:      r.MemoryLookups,
+		MemoryHits:         r.MemoryHits,
 		PeakContextTokens:  peak,
 		CostPerStep:        r.CostProxy,
 		Accuracy:           &Accuracy{},
@@ -261,6 +267,7 @@ func parseLine(line []byte, lineNo int) (StepRecord, error) {
 		LatencyMS: wire.LatencyMS, PrefixSHA256: wire.PrefixSHA256, UsageStatus: wire.UsageStatus,
 		Error: wire.Error, CostProxy: wire.CostProxy, CostProxyLabel: wire.CostProxyLabel,
 		Compacted: wire.Compacted, PrefixCacheMatch: wire.PrefixCacheMatch,
+		MemoryLookups: wire.MemoryLookups, MemoryHits: wire.MemoryHits,
 	}
 	if record.Tier != routing.Cheap && record.Tier != routing.Frontier {
 		return StepRecord{}, fmt.Errorf("journal line %d has an unknown tier", lineNo)
@@ -363,12 +370,20 @@ type TaskSummary struct {
 	Totals
 }
 
+// MemoryReport is the hot-cache hit rate. A null rate means nothing was looked up.
+type MemoryReport struct {
+	Lookups int      `json:"lookups"`
+	Hits    int      `json:"hits"`
+	HitRate *float64 `json:"hit_rate"`
+}
+
 // Summary is the efficiency scorecard.
 type Summary struct {
 	Schema        string        `json:"schema"`
 	NumbersPolicy string        `json:"numbers_policy"`
 	Tasks         []TaskSummary `json:"tasks"`
 	Totals        Totals        `json:"totals"`
+	Memory        MemoryReport  `json:"memory"`
 	Accuracy      Accuracy      `json:"accuracy"`
 }
 
@@ -391,8 +406,26 @@ func Summarize(records []StepRecord) Summary {
 		NumbersPolicy: NumbersPolicy,
 		Tasks:         tasks,
 		Totals:        totals(records),
+		Memory:        memoryReport(records),
 		Accuracy:      Accuracy{},
 	}
+}
+
+func memoryReport(records []StepRecord) MemoryReport {
+	var report MemoryReport
+	for _, row := range records {
+		if row.MemoryLookups != nil {
+			report.Lookups += *row.MemoryLookups
+		}
+		if row.MemoryHits != nil {
+			report.Hits += *row.MemoryHits
+		}
+	}
+	if report.Lookups > 0 {
+		rate := float64(report.Hits) / float64(report.Lookups)
+		report.HitRate = &rate
+	}
+	return report
 }
 
 func totals(rows []StepRecord) Totals {

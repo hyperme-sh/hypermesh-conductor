@@ -3,6 +3,7 @@ package cli
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -10,12 +11,14 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"path/filepath"
 	"strings"
 
 	"github.com/hyperme-sh/hypermesh-conductor/internal/aiuditor"
 	"github.com/hyperme-sh/hypermesh-conductor/internal/config"
 	"github.com/hyperme-sh/hypermesh-conductor/internal/history"
 	"github.com/hyperme-sh/hypermesh-conductor/internal/metrics"
+	"github.com/hyperme-sh/hypermesh-conductor/internal/notes"
 	"github.com/hyperme-sh/hypermesh-conductor/internal/proxy"
 	"github.com/hyperme-sh/hypermesh-conductor/internal/routing"
 	"github.com/hyperme-sh/hypermesh-conductor/internal/rules"
@@ -24,7 +27,7 @@ import (
 // Main runs one invocation. args do not include the program name.
 func Main(args []string, stdout, stderr io.Writer) int {
 	if len(args) == 0 {
-		fmt.Fprintln(stderr, "usage: conductor <route|run|summary|serve>")
+		fmt.Fprintln(stderr, "usage: conductor <route|run|summary|serve|index|primer|dream|rules>")
 		return 2
 	}
 	switch args[0] {
@@ -36,12 +39,16 @@ func Main(args []string, stdout, stderr io.Writer) int {
 		return serveCmd(args[1:], stdout, stderr)
 	case "run":
 		return runCmd(args[1:], stdout, stderr)
+	case "index":
+		return indexCmd(args[1:], stdout, stderr)
+	case "primer":
+		return primerCmd(args[1:], stdout, stderr)
 	case "dream":
 		return dreamCmd(args[1:], stdout, stderr)
 	case "rules":
 		return rulesCmd(args[1:], stdout, stderr)
 	case "-h", "--help", "help":
-		fmt.Fprintln(stdout, "usage: conductor <route|run|summary|serve|dream|rules>")
+		fmt.Fprintln(stdout, "usage: conductor <route|run|summary|serve|index|primer|dream|rules>")
 		return 0
 	default:
 		fmt.Fprintf(stderr, "unknown command %s\n", args[0])
@@ -151,6 +158,16 @@ func serveCmd(args []string, stdout, stderr io.Writer) int {
 		return 2
 	}
 	server := proxy.New(cfg, hop, journal)
+	if svc, store, err := openNotes(cfg); err != nil {
+		fmt.Fprintln(stderr, err.Error())
+		return 2
+	} else if svc != nil {
+		server.Notes = svc
+		defer store.Close()
+		if cfg.Notes.Watch {
+			go notes.Watch(context.Background(), cfg.Notes.Dir, store, cfg.Notes.WatchEvery)
+		}
+	}
 	server.Logf = func(format string, args ...any) {
 		fmt.Fprintf(stderr, format+"\n", args...)
 	}
@@ -303,6 +320,7 @@ func dreamCmd(args []string, stdout, stderr io.Writer) int {
 	rulesPath := fs.String("rules", "", "active rules file, if one exists")
 	proposals := fs.String("proposals", "rules/proposals", "directory for inactive proposals")
 	bodies := fs.Bool("bodies", false, "opt in to reading the history store")
+	notesDir := fs.String("notes", "", "notes directory for proposed markdown diffs")
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
@@ -344,7 +362,145 @@ func dreamCmd(args []string, stdout, stderr io.Writer) int {
 		return 2
 	}
 	fmt.Fprintf(stdout, "wrote inactive proposal %s version %d with %d evidence rows\n", path, proposal.Version, len(proposal.Evidence))
+	if *notesDir != "" {
+		diffPath := strings.TrimSuffix(path, ".json") + ".notes.diff"
+		if err := writeNoteDiff(*notesDir, diffPath); err != nil {
+			fmt.Fprintln(stderr, err.Error())
+			return 2
+		}
+		fmt.Fprintf(stdout, "wrote inactive note diff %s\n", diffPath)
+	}
 	return 0
+}
+
+func writeNoteDiff(dir, path string) error {
+	store, err := notes.Open(filepath.Join(dir, ".conductor", "index.db"))
+	if err != nil {
+		return err
+	}
+	defer store.Close()
+	if _, err := store.Sync(dir); err != nil {
+		return err
+	}
+	list, err := store.All()
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(path, []byte(notes.MarkdownDiffs(list)), 0o644)
+}
+
+func indexCmd(args []string, stdout, stderr io.Writer) int {
+	if len(args) == 0 {
+		fmt.Fprintln(stderr, "usage: conductor index <rebuild|status>")
+		return 2
+	}
+	fs := flag.NewFlagSet("index", flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	dir := fs.String("notes", "", "notes directory")
+	dbPath := fs.String("db", "", "sqlite index path")
+	if err := fs.Parse(args[1:]); err != nil {
+		return 2
+	}
+	if *dir == "" {
+		fmt.Fprintln(stderr, "notes directory is required")
+		return 2
+	}
+	if *dbPath == "" {
+		*dbPath = filepath.Join(*dir, ".conductor", "index.db")
+	}
+	store, err := notes.Open(*dbPath)
+	if err != nil {
+		fmt.Fprintln(stderr, err.Error())
+		return 2
+	}
+	defer store.Close()
+	switch args[0] {
+	case "rebuild":
+		stats, err := store.Rebuild(*dir)
+		if err != nil {
+			fmt.Fprintln(stderr, err.Error())
+			return 2
+		}
+		fmt.Fprintf(stdout, "notes %d updated %d removed %d links %d\n", stats.Notes, stats.Updated, stats.Removed, stats.Links)
+		for _, warning := range stats.Warnings {
+			fmt.Fprintln(stdout, warning)
+		}
+	case "status":
+		if _, err := store.Sync(*dir); err != nil {
+			fmt.Fprintln(stderr, err.Error())
+			return 2
+		}
+		status, err := store.Status()
+		if err != nil {
+			fmt.Fprintln(stderr, err.Error())
+			return 2
+		}
+		fmt.Fprintf(stdout, "notes %d links %d embedded %d\n", status.Notes, status.Links, status.Embedded)
+		for _, warning := range status.Warnings {
+			fmt.Fprintln(stdout, warning)
+		}
+	default:
+		fmt.Fprintf(stderr, "unknown index command %s\n", args[0])
+		return 2
+	}
+	return 0
+}
+
+func primerCmd(args []string, stdout, stderr io.Writer) int {
+	fs := flag.NewFlagSet("primer", flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	dir := fs.String("notes", "", "notes directory")
+	dbPath := fs.String("db", "", "sqlite index path")
+	if err := fs.Parse(args); err != nil {
+		return 2
+	}
+	if *dir == "" {
+		fmt.Fprintln(stderr, "notes directory is required")
+		return 2
+	}
+	if *dbPath == "" {
+		*dbPath = filepath.Join(*dir, ".conductor", "index.db")
+	}
+	store, err := notes.Open(*dbPath)
+	if err != nil {
+		fmt.Fprintln(stderr, err.Error())
+		return 2
+	}
+	defer store.Close()
+	if _, err := store.Sync(*dir); err != nil {
+		fmt.Fprintln(stderr, err.Error())
+		return 2
+	}
+	text, err := notes.Primer(store, 400)
+	if err != nil {
+		fmt.Fprintln(stderr, err.Error())
+		return 2
+	}
+	fmt.Fprintln(stdout, text)
+	return 0
+}
+
+func openNotes(cfg config.Config) (*notes.Service, *notes.Store, error) {
+	if cfg.Notes.Dir == "" {
+		return nil, nil, nil
+	}
+	dbPath := cfg.Notes.DB
+	if dbPath == "" {
+		dbPath = filepath.Join(cfg.Notes.Dir, ".conductor", "index.db")
+	}
+	store, err := notes.Open(dbPath)
+	if err != nil {
+		return nil, nil, err
+	}
+	if _, err := store.Sync(cfg.Notes.Dir); err != nil {
+		_ = store.Close()
+		return nil, nil, err
+	}
+	service := notes.NewService(store)
+	service.Hops = cfg.Notes.Hops
+	service.Budget = cfg.Notes.TokenBudget
+	service.Primer = cfg.Notes.Primer
+	return service, store, nil
 }
 
 func rulesCmd(args []string, stdout, stderr io.Writer) int {

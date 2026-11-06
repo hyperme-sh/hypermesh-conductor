@@ -26,6 +26,7 @@ import (
 	"github.com/hyperme-sh/hypermesh-conductor/internal/config"
 	"github.com/hyperme-sh/hypermesh-conductor/internal/jsonbody"
 	"github.com/hyperme-sh/hypermesh-conductor/internal/metrics"
+	"github.com/hyperme-sh/hypermesh-conductor/internal/notes"
 	"github.com/hyperme-sh/hypermesh-conductor/internal/prefix"
 	"github.com/hyperme-sh/hypermesh-conductor/internal/routing"
 	"github.com/hyperme-sh/hypermesh-conductor/internal/rules"
@@ -60,6 +61,7 @@ type Proxy struct {
 	Config  config.Config
 	Hop     aiuditor.Hop
 	Journal *metrics.Journal
+	Notes   *notes.Service
 	Logf    func(string, ...any)
 
 	transportOnce sync.Once
@@ -234,6 +236,25 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		prepared = next
 		yes := true
 		base.Compacted = &yes
+	}
+	beforeNotes := prepared
+	var memLookups, memHits int
+	if p.Notes != nil && p.Notes.Cache != nil {
+		memLookups, memHits = p.Notes.Cache.Snapshot()
+	}
+	if p.Notes != nil {
+		if updated, err := p.insertNotes(prepared, userQuery(prepared), taskID, stepID); err == nil {
+			prepared = updated
+		}
+		if p.Notes.Cache != nil {
+			afterL, afterH := p.Notes.Cache.Snapshot()
+			lookups, hits := afterL-memLookups, afterH-memHits
+			base.MemoryLookups = &lookups
+			base.MemoryHits = &hits
+		}
+	}
+	if didCompact || !bytes.Equal(beforeNotes, prepared) {
+		var halted bool
 		prepared, halted = p.applyReview(w, r, &base, proto, prepared, stream, decision, tier, base.PrefixSHA256)
 		if halted {
 			return
@@ -1028,6 +1049,38 @@ func stampRun(w http.ResponseWriter, record metrics.StepRecord) {
 	if record.StepID != "" {
 		w.Header().Set("X-Conductor-Step", record.StepID)
 	}
+}
+
+func (p *Proxy) insertNotes(body []byte, query, taskID, stepID string) ([]byte, error) {
+	result, err := p.Notes.Retrieve(query, taskID, stepID)
+	if err != nil || result.Block == "" {
+		return body, err
+	}
+	return notes.InsertAfterPrefix(body, result.Block)
+}
+
+func userQuery(body []byte) string {
+	var root map[string]any
+	if err := json.Unmarshal(body, &root); err != nil {
+		return ""
+	}
+	messages, _ := root["messages"].([]any)
+	var last string
+	for _, item := range messages {
+		msg, _ := item.(map[string]any)
+		if msg["role"] != "user" {
+			continue
+		}
+		if text, ok := msg["content"].(string); ok {
+			last = text
+		}
+	}
+	if last == "" {
+		if input, ok := root["input"].(string); ok {
+			last = input
+		}
+	}
+	return last
 }
 
 func writeJSON(w http.ResponseWriter, status int, payload any) {
