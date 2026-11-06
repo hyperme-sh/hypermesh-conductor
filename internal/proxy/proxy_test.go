@@ -1001,31 +1001,44 @@ func TestMessagesPrefixMatchUsesTheClientToolShape(t *testing.T) {
 	}
 }
 
-func TestTerminalSSEEventIncludesTheBlankLine(t *testing.T) {
-	for _, event := range []string{
-		"data: [DONE]\n",
-		"data: {\"type\":\"response.completed\",\"response\":{\"usage\":{\"input_tokens\":1,\"output_tokens\":1}}}\n",
+type splitTerminal struct {
+	parts  [][]byte
+	reads  atomic.Int32
+	closed chan struct{}
+	once   sync.Once
+}
+
+func (b *splitTerminal) Read(p []byte) (int, error) {
+	n := int(b.reads.Add(1))
+	if n <= len(b.parts) {
+		return copy(p, b.parts[n-1]), nil
+	}
+	<-b.closed
+	return 0, io.EOF
+}
+
+func (b *splitTerminal) Close() error {
+	b.once.Do(func() { close(b.closed) })
+	return nil
+}
+
+func TestTerminalEventKeepsItsBlankLine(t *testing.T) {
+	for _, parts := range [][][]byte{
+		{[]byte("data: [DONE]\n"), []byte("\n")},
+		{[]byte("data: [DONE]\n\n")},
 	} {
-		body := &scriptBody{events: []string{
-			"data: {\"choices\":[{\"delta\":{\"content\":\"yo\"}}]}\n\n",
-			event,
-			"\n",
-		}, closed: make(chan struct{})}
-		resp := &http.Response{Body: body, StatusCode: http.StatusOK, Header: http.Header{}}
+		upstream := &splitTerminal{parts: parts, closed: make(chan struct{})}
+		resp := &http.Response{Body: upstream, StatusCode: http.StatusOK, Header: http.Header{}}
 		req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
 		rec := httptest.NewRecorder()
 		New(config.Config{}, aiuditor.Stub{}, nil).stream(rec, req, resp, translate.Wire{Protocol: translate.ProtoChat}, time.Now(), nil, metrics.StepRecord{})
-		got := rec.Body.String()
-		if !strings.Contains(got, strings.TrimSuffix(event, "\n")+"\n\n") {
-			t.Fatalf("%q", got)
-		}
 		select {
-		case <-body.closed:
+		case <-upstream.closed:
 		case <-time.After(time.Second):
 			t.Fatal("upstream body stayed open")
 		}
-		if body.i != 2 {
-			t.Fatalf("reads %d", body.i)
+		if upstream.reads.Load() != 1 || !strings.HasSuffix(rec.Body.String(), "data: [DONE]\n\n") || strings.Contains(rec.Body.String(), "data: [DONE]\n\n\n") {
+			t.Fatalf("reads %d body %q", upstream.reads.Load(), rec.Body.String())
 		}
 	}
 }
@@ -2117,6 +2130,9 @@ func TestTerminalProviderEventsCloseOpenHTTPBody(t *testing.T) {
 		terminal string
 	}{
 		{"passthrough_done", config.ProviderOpenAICompatible, "data: [DONE]\n\n"},
+		{"split_done", config.ProviderOpenAICompatible, "data: [DONE]\n"},
+		{"split_completed", config.ProviderOpenAICompatible, "data: {\"type\":\"response.completed\"}\n"},
+		{"split_error", config.ProviderOpenAICompatible, "data: {\"error\":{\"message\":\"failed\"}}\n"},
 		{"passthrough_error", config.ProviderOpenAICompatible, "data: {\"error\":{\"message\":\"failed\"}}\n\n"},
 		{"translated_stop", config.ProviderAnthropic, "event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n"},
 		{"translated_error", config.ProviderAnthropic, "event: error\ndata: {\"type\":\"error\",\"error\":{\"message\":\"failed\"}}\n\n"},
@@ -2141,7 +2157,10 @@ func TestTerminalProviderEventsCloseOpenHTTPBody(t *testing.T) {
 			done := make(chan struct{})
 			go func() {
 				defer close(done)
-				do(p, "/v1/chat/completions", "parse", "terminal-task", tc.name, "", `{"messages":[{"role":"user","content":"hi"}],"stream":true}`)
+				rec := do(p, "/v1/chat/completions", "parse", "terminal-task", tc.name, "", `{"messages":[{"role":"user","content":"hi"}],"stream":true}`)
+				if !strings.HasSuffix(rec.Body.String(), "\n\n") {
+					t.Errorf("terminal frame missing delimiter: %q", rec.Body.String())
+				}
 			}()
 			select {
 			case <-done:
