@@ -20,6 +20,8 @@ import (
 	"github.com/hyperme-sh/hypermesh-conductor/internal/aiuditor"
 	"github.com/hyperme-sh/hypermesh-conductor/internal/config"
 	"github.com/hyperme-sh/hypermesh-conductor/internal/metrics"
+	"github.com/hyperme-sh/hypermesh-conductor/internal/prefix"
+	"github.com/hyperme-sh/hypermesh-conductor/internal/translate"
 )
 
 func TestRoutesTiersAndKeepsPrefixAndSecretsOutOfTheJournal(t *testing.T) {
@@ -831,6 +833,48 @@ func TestThresholdRuleEscalatesAndAHintDoesNot(t *testing.T) {
 	cheapHits, frontierHits = 0, 0
 	if rec := do(New(cfg, aiuditor.Stub{}, journal), "/v1/chat/completions", "code", "task-1", "code-2", "", `{"messages":[{"role":"user","content":"implement"}]}`); rec.Code != http.StatusOK || frontierHits != 1 || cheapHits != 0 {
 		t.Fatalf("hint code %d cheap %d frontier %d", rec.Code, cheapHits, frontierHits)
+	}
+}
+
+func TestMessagesPrefixMatchUsesTheClientToolShape(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"id":"msg_1","type":"message","role":"assistant","content":[{"type":"text","text":"yo"}],"stop_reason":"end_turn","usage":{"input_tokens":2,"output_tokens":1}}`))
+	}))
+	defer upstream.Close()
+	dir := t.TempDir()
+	cfg := loadTestConfig(t, dir, upstream.URL+"/v1", upstream.URL+"/v1", config.AuthPassthrough, config.ProviderAnthropic)
+	journal := openJournal(t, dir)
+	rec := do(New(cfg, aiuditor.Stub{}, journal), "/v1/messages", "parse", "task-1", "prefix-1", "", `{"messages":[{"role":"user","content":"hi"}]}`)
+	if rec.Code != http.StatusOK {
+		t.Fatal(rec.Code, rec.Body.String())
+	}
+	want, err := prefix.HashRequest(cfg.Prefix.System, translate.ClientTools(translate.ProtoMessages, cfg.Prefix.Tools))
+	if err != nil {
+		t.Fatal(err)
+	}
+	records, err := metrics.ReadJournal(journal.Path())
+	if err != nil || len(records) != 1 || records[0].PrefixCacheMatch == nil || !*records[0].PrefixCacheMatch || records[0].PrefixSHA256 != want {
+		t.Fatal(err, records)
+	}
+}
+
+func TestResponsesFailureIsUncertain(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = io.WriteString(w, "data: {\"type\":\"response.failed\",\"response\":{\"id\":\"resp_1\",\"status\":\"failed\",\"error\":{\"message\":\"server error\",\"code\":\"server_error\"},\"usage\":{\"input_tokens\":3,\"output_tokens\":1}}}\n\n")
+	}))
+	defer upstream.Close()
+	dir := t.TempDir()
+	t.Setenv("CONDUCTOR_CHEAP_API_KEY", "test-key-do-not-log")
+	cfg := loadTestConfig(t, dir, upstream.URL+"/v1", upstream.URL+"/v1", config.AuthEnv, config.ProviderOpenAICompatible)
+	journal := openJournal(t, dir)
+	rec := do(New(cfg, aiuditor.Stub{}, journal), "/v1/responses", "parse", "task-1", "fail-1", "", `{"stream":true,"input":"hello"}`)
+	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), "response.failed") {
+		t.Fatal(rec.Code, rec.Body.String())
+	}
+	records, err := metrics.ReadJournal(journal.Path())
+	if err != nil || len(records) != 1 || records[0].UsageStatus != metrics.StatusUncertain || records[0].InputTokens != nil || records[0].Error == nil {
+		t.Fatal(err, records)
 	}
 }
 

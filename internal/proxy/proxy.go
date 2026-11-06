@@ -193,7 +193,7 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	peak := compact.EstimateTokens(string(prepared))
 	clientHash, _ := hashBody(proto, prepared)
-	configHash, _ := p.Config.Prefix.SHA256()
+	configHash, _ := p.prefixHash(proto)
 	prefixMatch := clientHash != "" && clientHash == configHash
 	if suggest == "" {
 		suggest = rules.Suggest(policy, prefixMatch)
@@ -697,6 +697,13 @@ func forceModel(body []byte, model string) ([]byte, error) {
 	return obj.Marshal()
 }
 
+func (p *Proxy) prefixHash(proto string) (string, error) {
+	if proto != translate.ProtoMessages {
+		return p.Config.Prefix.SHA256()
+	}
+	return prefix.HashRequest(p.Config.Prefix.System, translate.ClientTools(proto, p.Config.Prefix.Tools))
+}
+
 func hashBody(proto string, body []byte) (string, error) {
 	var root map[string]any
 	if err := json.Unmarshal(body, &root); err != nil {
@@ -828,10 +835,21 @@ func providerError(payload []byte) bool {
 	if err := json.Unmarshal(payload, &obj); err != nil {
 		return false
 	}
-	if kind, _ := obj["type"].(string); kind == "error" {
+	kind, _ := obj["type"].(string)
+	if kind == "error" || kind == "response.failed" {
 		return true
 	}
-	_, ok := obj["error"].(map[string]any)
+	if _, ok := obj["error"].(map[string]any); ok {
+		return true
+	}
+	response, _ := obj["response"].(map[string]any)
+	if response == nil {
+		return false
+	}
+	if response["status"] == "failed" {
+		return true
+	}
+	_, ok := response["error"].(map[string]any)
 	return ok
 }
 
