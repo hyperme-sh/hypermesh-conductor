@@ -231,10 +231,45 @@ func responsesToAnthropic(body []byte, model string) ([]byte, error) {
 	if instructions, ok := req["instructions"].(string); ok && instructions != "" {
 		out["system"] = instructions
 	}
+	if tools, ok := req["tools"].([]any); ok && len(tools) > 0 {
+		converted, err := responsesToolsToAnthropic(tools)
+		if err != nil {
+			return nil, err
+		}
+		out["tools"] = converted
+	}
+	if err := applyToolChoice(out, req, true); err != nil {
+		return nil, err
+	}
 	if stream, ok := req["stream"].(bool); ok && stream {
 		out["stream"] = true
 	}
 	return json.Marshal(out)
+}
+
+func responsesToolsToAnthropic(tools []any) ([]any, error) {
+	out := make([]any, 0, len(tools))
+	for _, tool := range tools {
+		obj, ok := tool.(map[string]any)
+		if !ok {
+			return nil, fmt.Errorf("unsupported content for protocol translation")
+		}
+		if _, nested := obj["function"].(map[string]any); nested {
+			out = append(out, openaiToolsToAnthropic([]any{obj})...)
+			continue
+		}
+		name, _ := obj["name"].(string)
+		if obj["type"] != "function" || name == "" {
+			return nil, fmt.Errorf("unsupported content for protocol translation")
+		}
+		schema := obj["parameters"]
+		if schema == nil {
+			schema = map[string]any{"type": "object"}
+		}
+		desc, _ := obj["description"].(string)
+		out = append(out, map[string]any{"name": name, "description": desc, "input_schema": schema})
+	}
+	return out, nil
 }
 
 func splitChatMessages(messages []any) (string, []any, error) {
@@ -914,8 +949,11 @@ func openAIToolChoiceToAnthropic(value any) (any, error) {
 			return nil, fmt.Errorf("unsupported tool_choice %s for protocol translation", choice)
 		}
 	case map[string]any:
+		name, _ := choice["name"].(string)
 		fn, _ := choice["function"].(map[string]any)
-		name, _ := fn["name"].(string)
+		if name == "" {
+			name, _ = fn["name"].(string)
+		}
 		if choice["type"] == "function" && name != "" {
 			return map[string]any{"type": "tool", "name": name}, nil
 		}

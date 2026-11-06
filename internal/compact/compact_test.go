@@ -61,6 +61,17 @@ func TestAnthropicToolResultReachesTheSummary(t *testing.T) {
 	}
 }
 
+func TestRecentMessagesAreNotSummarizedAway(t *testing.T) {
+	raw := []byte(`[{"role":"user","content":"` + strings.Repeat("word ", 80) + `"}]`)
+	plan, err := PlanMessages(raw, 10, 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if plan.Needed {
+		t.Fatal("a single retained message must stay")
+	}
+}
+
 func TestShortTailIsLeftAlone(t *testing.T) {
 	raw := []byte(`[{"role":"user","content":"hi"}]`)
 	plan, err := PlanMessages(raw, 1000, 2)

@@ -163,6 +163,27 @@ func TestChatStreamKeepsToolCalls(t *testing.T) {
 	}
 }
 
+func TestResponsesToolsAndStreamLifecycle(t *testing.T) {
+	body := []byte(`{"tools":[{"type":"function","name":"weather","description":"Forecast","parameters":{"type":"object"}}],"tool_choice":"required","input":"hi"}`)
+	wire, err := Request(ProtoResponses, ProviderAnthropic, "frontier", body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(wire.Body)
+	if !strings.Contains(text, `"name":"weather"`) || !strings.Contains(text, `"input_schema"`) || !strings.Contains(text, `"tool_choice":{"type":"any"}`) {
+		t.Fatal(text)
+	}
+	stream := NewStream(ProtoResponses, ProtoMessages)
+	out := string(stream.Consume([]byte("event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"delta\":{\"type\":\"text_delta\",\"text\":\"yo\"}}\n\n")))
+	out += string(stream.Consume([]byte("event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n")))
+	if !strings.Contains(out, `"type":"response.output_item.added"`) || !strings.Contains(out, `"type":"response.content_part.added"`) || !strings.Contains(out, `"output_index":0`) {
+		t.Fatal(out)
+	}
+	if !strings.Contains(out, `"type":"response.completed"`) || !strings.Contains(out, `"text":"yo"`) || !strings.Contains(out, `"object":"response"`) {
+		t.Fatal(out)
+	}
+}
+
 func TestResponsesToolItemsBecomeAnthropicBlocks(t *testing.T) {
 	body := []byte(`{"input":[{"type":"function_call","call_id":"call_1","name":"lookup","arguments":"{\"q\":1}"},{"type":"function_call_output","call_id":"call_1","output":"balance is 930"}]}`)
 	wire, err := Request(ProtoResponses, ProviderAnthropic, "frontier", body)

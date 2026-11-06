@@ -74,11 +74,13 @@ func PlanMessages(raw json.RawMessage, maxTail, recent int) (Plan, error) {
 		split--
 	}
 	older := plan.TailRaw[:split]
-	plan.RecentRaw = plan.TailRaw[split:]
 	if len(older) == 0 {
-		older = plan.TailRaw
+		plan.Needed = false
 		plan.RecentRaw = nil
+		plan.SummaryInput = ""
+		return plan, nil
 	}
+	plan.RecentRaw = plan.TailRaw[split:]
 	plan.SummaryInput = textOfAll(older)
 	return plan, nil
 }

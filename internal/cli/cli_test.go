@@ -14,6 +14,38 @@ import (
 	"github.com/hyperme-sh/hypermesh-conductor/internal/metrics"
 )
 
+func TestRouteUsesActivePolicy(t *testing.T) {
+	dir := t.TempDir()
+	rulesPath := filepath.Join(dir, "active.json")
+	if err := os.WriteFile(rulesPath, []byte(`{"schema":"hypermesh.conductor.rules.v0","routing":{"class_tiers":{"parse":"frontier"}}}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	configPath := filepath.Join(dir, "endpoints.json")
+	raw := fmt.Sprintf(`{
+		"listen": "127.0.0.1:8787",
+		"rules_file": %q,
+		"tiers": {
+			"cheap": {"provider":"openai-compatible","base_url":"http://127.0.0.1:9/v1","model":"local-small","auth":"passthrough"},
+			"frontier": {"provider":"openai-compatible","base_url":"http://127.0.0.1:9/v1","model":"frontier","auth":"passthrough"}
+		},
+		"prefix": {"system":"You are Conductor.","tools":[]}
+	}`, rulesPath)
+	if err := os.WriteFile(configPath, []byte(raw), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	var stdout, stderr bytes.Buffer
+	if code := Main([]string{"route", "--config", configPath, "--class", "parse"}, &stdout, &stderr); code != 0 {
+		t.Fatal(code, stderr.String())
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(stdout.Bytes(), &payload); err != nil {
+		t.Fatal(err)
+	}
+	if payload["tier"] != "frontier" || payload["model_id"] != "frontier" {
+		t.Fatal(payload)
+	}
+}
+
 func TestRouteCommand(t *testing.T) {
 	var stdout, stderr bytes.Buffer
 	code := Main([]string{"route", "--config", filepath.Join("..", "..", "examples", "endpoints.json"), "--class", "index"}, &stdout, &stderr)

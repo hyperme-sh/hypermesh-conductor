@@ -21,6 +21,8 @@ type Stream struct {
 	nextTool    int
 	chatTools   map[int]int
 	nextContent int
+	respOpened  bool
+	respText    strings.Builder
 }
 
 // NewStream starts a bridge. Identical protocols copy bytes unchanged.
@@ -66,6 +68,9 @@ func (s *Stream) Finish() []byte {
 	s.done = true
 	if s.client == ProtoMessages {
 		return []byte("event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n")
+	}
+	if s.client == ProtoResponses && s.upstream == ProtoMessages {
+		return s.anthropicToResponses("message_stop", nil)
 	}
 	return []byte("data: [DONE]\n\n")
 }
@@ -274,17 +279,94 @@ func (s *Stream) chatToolCalls(calls []any) []byte {
 
 func (s *Stream) anthropicToResponses(kind string, obj map[string]any) []byte {
 	switch kind {
+	case "message_start":
+		if message, ok := obj["message"].(map[string]any); ok {
+			if id, ok := message["id"].(string); ok && id != "" {
+				s.id = id
+			}
+		}
+		return s.openResponses()
 	case "content_block_delta":
 		delta, _ := obj["delta"].(map[string]any)
-		if delta["type"] == "text_delta" {
-			text, _ := delta["text"].(string)
-			return sseData(map[string]any{"type": "response.output_text.delta", "delta": text})
+		if delta["type"] != "text_delta" {
+			return nil
 		}
+		text, _ := delta["text"].(string)
+		var out bytes.Buffer
+		if !s.respOpened {
+			out.Write(s.openResponses())
+		}
+		s.respText.WriteString(text)
+		out.Write(sseData(map[string]any{
+			"type":          "response.output_text.delta",
+			"output_index":  0,
+			"content_index": 0,
+			"delta":         text,
+		}))
+		return out.Bytes()
 	case "message_stop":
 		s.done = true
-		return sseData(map[string]any{"type": "response.completed"})
+		var out bytes.Buffer
+		if !s.respOpened {
+			out.Write(s.openResponses())
+		}
+		text := s.respText.String()
+		out.Write(sseData(map[string]any{
+			"type": "response.output_text.done", "output_index": 0, "content_index": 0, "text": text,
+		}))
+		out.Write(sseData(map[string]any{
+			"type": "response.content_part.done", "output_index": 0, "content_index": 0,
+			"part": map[string]any{"type": "output_text", "text": text},
+		}))
+		out.Write(sseData(map[string]any{
+			"type": "response.output_item.done", "output_index": 0,
+			"item": s.responsesMessage(text),
+		}))
+		out.Write(sseData(map[string]any{
+			"type":     "response.completed",
+			"response": s.responsesObject(text, "completed"),
+		}))
+		return out.Bytes()
 	}
 	return nil
+}
+
+func (s *Stream) openResponses() []byte {
+	if s.respOpened {
+		return nil
+	}
+	s.respOpened = true
+	if s.id == "" {
+		s.id = "resp"
+	}
+	var out bytes.Buffer
+	out.Write(sseData(map[string]any{
+		"type":     "response.created",
+		"response": s.responsesObject("", "in_progress"),
+	}))
+	out.Write(sseData(map[string]any{
+		"type": "response.output_item.added", "output_index": 0,
+		"item": map[string]any{"id": s.id, "type": "message", "role": "assistant", "content": []any{}},
+	}))
+	out.Write(sseData(map[string]any{
+		"type": "response.content_part.added", "output_index": 0, "content_index": 0,
+		"part": map[string]any{"type": "output_text", "text": ""},
+	}))
+	return out.Bytes()
+}
+
+func (s *Stream) responsesMessage(text string) map[string]any {
+	return map[string]any{
+		"id": s.id, "type": "message", "role": "assistant",
+		"content": []any{map[string]any{"type": "output_text", "text": text}},
+	}
+}
+
+func (s *Stream) responsesObject(text, status string) map[string]any {
+	return map[string]any{
+		"id": s.id, "object": "response", "status": status,
+		"output": []any{s.responsesMessage(text)},
+	}
 }
 
 func (s *Stream) toolSlot(obj map[string]any) int {

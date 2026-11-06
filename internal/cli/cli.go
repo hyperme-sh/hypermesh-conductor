@@ -66,7 +66,12 @@ func routeCmd(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintln(stderr, "class is required")
 		return 2
 	}
-	decision, err := routing.Route(*className, *suggest, cfg.ClassTiers)
+	policy, err := rules.Load(cfg.RulesFile)
+	if err != nil {
+		fmt.Fprintln(stderr, err.Error())
+		return 2
+	}
+	decision, err := routing.Route(*className, *suggest, rules.EffectiveClassTiers(cfg.ClassTiers, policy, *className, 0))
 	if err != nil {
 		fmt.Fprintln(stderr, err.Error())
 		return 2
