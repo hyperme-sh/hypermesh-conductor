@@ -1647,7 +1647,7 @@ func TestTaskIDDoesNotReadNotesWithoutProxyToken(t *testing.T) {
 	if err := os.MkdirAll(notesDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(notesDir, "secret.md"), []byte("---\nid: secret-note\ntype: note\nstatus: open\n---\n# Secret\nSECRETNOTEBODY\n"), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(notesDir, "secret.md"), []byte("---\nid: secret-note\ntype: fact\nstatus: open\n---\n# Secret\nSECRETNOTEBODY\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	store, err := notes.Open(filepath.Join(dir, "index.db"))
@@ -1665,6 +1665,12 @@ func TestTaskIDDoesNotReadNotesWithoutProxyToken(t *testing.T) {
 	requestBody := `{"messages":[{"role":"user","content":"hello"}]}`
 	if rec := do(server, "/v1/chat/completions", "parse", "secret-note", "secret-note", "", requestBody); rec.Code != http.StatusOK || strings.Contains(body, "SECRETNOTEBODY") {
 		t.Fatalf("code %d body %s", rec.Code, body)
+	}
+	// Text search and the primer must not bypass the same owner authorization.
+	server.Notes.Primer = true
+	searchBody := `{"messages":[{"role":"user","content":"SECRETNOTEBODY"}]}`
+	if rec := do(server, "/v1/chat/completions", "parse", "other", "other", "", searchBody); rec.Code != http.StatusOK || (strings.Contains(body, "# Secret") || strings.Contains(body, "Session primer")) {
+		t.Fatalf("unauthorized text search returned notes: code %d body %s", rec.Code, body)
 	}
 	t.Setenv(config.ProxyTokenEnv, "proxy-token-for-tests")
 	if rec := do(server, "/v1/chat/completions", "parse", "secret-note", "other", "", requestBody); rec.Code != http.StatusOK || !strings.Contains(body, "SECRETNOTEBODY") {

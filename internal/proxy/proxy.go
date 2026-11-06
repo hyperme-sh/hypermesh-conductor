@@ -238,7 +238,7 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		base.Compacted = &yes
 	}
 	beforeNotes := prepared
-	if p.Notes != nil && acceptsNotes(proto) {
+	if p.Notes != nil && acceptsNotes(proto) && authorizeProxy(r) == nil {
 		trustIDs := authorizeProxy(r) == nil
 		updated, got, err := p.insertNotes(prepared, userQuery(prepared), taskID, stepID, trustIDs)
 		memLookups += got.Lookups
