@@ -4,9 +4,9 @@ Budgeted, recoverable AI task runtime for Hypermesh: model and host selection, t
 
 ## Status
 
-**Early slice.** Tiered routing and per-task measurement are in the tree. Budgets, durable runs, retrieval, planning, the task tracker, and context compaction are still design. Nothing is released.
+**Early slice.** Conductor is a localhost proxy written in Go. It classifies a request, asks the AIuditor hop, and forwards it to a cheap or frontier endpoint. Budgets, durable runs, retrieval, planning, the task tracker, and context compaction are still design. Nothing is released.
 
-The library under `src/conductor` is Python 3.11+ and uses the standard library for HTTP. `python -m pytest` runs the tests after `pip install -r requirements-dev.txt`. Design notes: [docs/routing.md](docs/routing.md) and [docs/measurement.md](docs/measurement.md).
+`go test ./...` runs the tests. The binary is static. Design notes: [docs/routing.md](docs/routing.md), [docs/measurement.md](docs/measurement.md), and [docs/aiuditor.md](docs/aiuditor.md).
 
 ## What Conductor is
 
@@ -75,7 +75,7 @@ Conductor is designed to work without a language model. With rules alone it can 
 - A scoped tool bridge to Visor and the workspace, with the existing approval rules. Tool credentials and files stay off the model host.
 
 **External providers**
-- OpenAI-compatible endpoints are named in a local config file. API keys stay in the environment variables that file names. Sending private note bodies to an external provider still needs a separate review. The tests call a local fake server.
+- The proxy forwards to OpenAI, Anthropic, or any OpenAI-compatible endpoint, including a Hypermesh host or a local model. Client credentials for that provider are passed through. A configured environment variable supplies a key only when the client did not send one, or when the tier is set to `auth: env`. Sending private note bodies to an external provider still needs a separate review.
 
 **Security and safety**
 - Policy hooks, defenses against prompt and tool injection, controlled egress, and an audit trail, with integration points to AIuditor.
@@ -84,29 +84,35 @@ Conductor is designed to work without a language model. With rules alone it can 
 ## Non-goals
 
 - No custody of funds. Conductor does not hold or move money.
-- No bring-your-own-key product. A configured endpoint reads its key from the environment for this routing slice. Conductor does not store the key and does not bill for it.
+- No bring-your-own-key product and no billing path. Client credentials are forwarded to that client's provider and are kept out of the journal and the default log. A tier may also name an environment variable for a local or hosted key.
 - Not a replacement for Hypermesh billing or payment. Conductor reserves and meters against budgets; Hypermesh and its billing services own prices, charges and refunds.
 - Not a scheduler for compute. Hypermesh makes the host placement decision.
 
 ## Routing and measurement
 
-This slice classifies each step and records what the provider reports.
+Conductor listens on `127.0.0.1:8787` and exposes OpenAI-compatible `/v1/chat/completions`, `/v1/responses`, `/v1/embeddings`, and `/v1/models`, plus Anthropic-compatible `/v1/messages`. Streaming responses are server-sent events. A third-party client sets its base URL to this proxy.
+
+Each request is classified, reviewed by the [AIuditor hop](docs/aiuditor.md), then sent to one destination. A failed call stays on that tier.
 
 | Step | Tier |
 | --- | --- |
 | parse, extract, index, classify, embed, summarize, status | cheap (local is the same tier) |
 | plan, architecture, tradeoff, code, review | frontier |
 
-A suggestion that asks for a higher tier is rejected, and the policy tier is the one that is called. The system prompt and tool definitions stay a stable prefix ahead of the step text. Their hash is stored on every journal row.
+Set the class with `X-Conductor-Class` or a top-level `conductor_class` field (that field is removed before the destination). A suggestion in `X-Conductor-Suggest` that asks for a higher tier is rejected. With no class and no `default_class`, the proxy refuses the call.
 
-Each row records input tokens, output tokens, tier, model id, latency, and cache-hit tokens when the provider reports them. Missing usage stays null. `python -m conductor summary` reports tokens per task, the cheap versus frontier split, and the cache hit rate. Accuracy under compaction modes stays null; those scores belong to [hypermesh-bench#12](https://github.com/hyperme-sh/hypermesh-bench/issues/12). The summary does not publish a savings figure.
+When the client omits a system prompt, the configured prefix is inserted. Its canonical hash is stored on the journal row. Stable task and step ids can be sent as `X-Conductor-Task` and `X-Conductor-Step`.
+
+Each row records input tokens, output tokens, tier, model id, latency, and cache-hit tokens when the provider reports them. Missing usage stays null. Prompt bodies and API keys are not written to the journal or the default log. `conductor summary` reports tokens per task, the cheap versus frontier split, and the cache hit rate. Accuracy under compaction modes stays null; those scores belong to [hypermesh-bench#12](https://github.com/hyperme-sh/hypermesh-bench/issues/12). The summary does not publish a savings figure.
 
 ```bash
-python -m conductor route --config examples/endpoints.json --class parse
-python -m conductor summary --journal path/to/journal.jsonl
+go build -trimpath -ldflags '-s -w' -o conductor ./cmd/conductor
+./conductor route --config examples/endpoints.json --class parse
+./conductor serve --config examples/endpoints.json --journal runs/journal.jsonl
+./conductor summary --journal runs/journal.jsonl
 ```
 
-`examples/endpoints.json` points at local placeholders. Set `CONDUCTOR_CHEAP_API_KEY` and `CONDUCTOR_FRONTIER_API_KEY` before `run`.
+`examples/endpoints.json` names loopback and provider placeholders. Create the journal directory before `serve`. Set `CONDUCTOR_CHEAP_API_KEY` when the cheap tier must use an environment key.
 
 ## Contributing
 

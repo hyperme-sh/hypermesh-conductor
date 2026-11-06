@@ -1,0 +1,13 @@
+{
+  "deny_job_classes": {
+    "code": "rbac: example rule denies code on this stub"
+  },
+  "replace": [
+    {
+      "job_class": "parse",
+      "from": "SECRET",
+      "to": "[redacted]",
+      "reason": "plugin: example redact"
+    }
+  ]
+}

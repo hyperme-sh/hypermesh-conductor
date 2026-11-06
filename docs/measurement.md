@@ -28,7 +28,7 @@ Usage that is missing, partial, negative, or the wrong JSON type is `uncertain`.
 
 ## Summary
 
-`python -m conductor summary --journal <file>` prints:
+`conductor summary --journal <file>` prints:
 
 - tokens per task (`input_tokens`, `output_tokens`, `peak_context_tokens`)
 - `by_tier.cheap` and `by_tier.frontier` step counts and token totals

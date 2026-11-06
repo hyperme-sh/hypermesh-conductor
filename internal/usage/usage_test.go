@@ -1,0 +1,60 @@
+package usage
+
+import "testing"
+
+func TestOpenAICachePrefersCachedTokens(t *testing.T) {
+	parsed := ParseOpenAI([]byte(`{"usage":{"prompt_tokens":20,"completion_tokens":5,"prompt_tokens_details":{"cached_tokens":16},"prompt_cache_hit_tokens":1}}`), false)
+	if parsed.Status != Measured || *parsed.Input != 20 || *parsed.Output != 5 || *parsed.Cache != 16 {
+		t.Fatalf("%+v", parsed)
+	}
+}
+
+func TestCacheFallbackAndZero(t *testing.T) {
+	fallback := ParseOpenAI([]byte(`{"usage":{"prompt_tokens":10,"completion_tokens":2,"prompt_cache_hit_tokens":4}}`), false)
+	if fallback.Cache == nil || *fallback.Cache != 4 {
+		t.Fatal(fallback)
+	}
+	zero := ParseOpenAI([]byte(`{"usage":{"prompt_tokens":10,"completion_tokens":2,"prompt_tokens_details":{"cached_tokens":0}}}`), false)
+	if zero.Cache == nil || *zero.Cache != 0 {
+		t.Fatal(zero)
+	}
+}
+
+func TestMissingAndPartialStayNull(t *testing.T) {
+	missing := ParseOpenAI([]byte(`{"choices":[{"message":{"content":"ok"}}]}`), false)
+	if missing.Status != Uncertain || missing.Input != nil || missing.Cache != nil {
+		t.Fatal(missing)
+	}
+	partial := ParseOpenAI([]byte(`{"usage":{"prompt_tokens":12}}`), false)
+	if partial.Status != Uncertain || partial.Input != nil {
+		t.Fatal(partial)
+	}
+	bad := ParseOpenAI([]byte(`{"usage":{"prompt_tokens":"12","completion_tokens":1}}`), false)
+	if bad.Status != Uncertain {
+		t.Fatal(bad)
+	}
+	negative := ParseOpenAI([]byte(`{"usage":{"prompt_tokens":-1,"completion_tokens":1}}`), false)
+	if negative.Status != Uncertain {
+		t.Fatal(negative)
+	}
+}
+
+func TestEmbeddingsOmitCompletion(t *testing.T) {
+	parsed := ParseOpenAI([]byte(`{"usage":{"prompt_tokens":8,"total_tokens":8}}`), true)
+	if parsed.Status != Measured || *parsed.Input != 8 || *parsed.Output != 0 || parsed.Cache != nil {
+		t.Fatalf("%+v", parsed)
+	}
+}
+
+func TestAnthropicUsageAndStreamFold(t *testing.T) {
+	parsed := ParseAnthropic([]byte(`{"usage":{"input_tokens":3,"output_tokens":2,"cache_read_input_tokens":1}}`))
+	if parsed.Status != Measured || *parsed.Input != 3 || *parsed.Output != 2 || *parsed.Cache != 1 {
+		t.Fatalf("%+v", parsed)
+	}
+	acc := UncertainUsage()
+	Absorb(&acc, []byte(`{"type":"message_start","message":{"usage":{"input_tokens":3,"output_tokens":1}}}`), false)
+	Absorb(&acc, []byte(`{"type":"message_delta","usage":{"output_tokens":5}}`), false)
+	if acc.Status != Measured || *acc.Input != 3 || *acc.Output != 5 {
+		t.Fatalf("%+v", acc)
+	}
+}

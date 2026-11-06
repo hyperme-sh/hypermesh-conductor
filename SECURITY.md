@@ -4,4 +4,4 @@ Please report security vulnerabilities by email to **security@hyperme.sh**. Do n
 
 Report other bugs to **bugs@hyperme.sh**.
 
-This project has no release. The tree contains an unreleased routing and measurement library. Do not put API keys in config files or in the measurement journal.
+This project has no release. The tree contains an unreleased localhost proxy. Do not put API keys in config files. The proxy keeps keys and prompt bodies out of the measurement journal and the default log.

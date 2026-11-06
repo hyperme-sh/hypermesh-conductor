@@ -6,8 +6,9 @@ Rules choose the model tier for a step. A suggestion may agree with that choice.
 
 | Class | Default tier | Call |
 | --- | --- | --- |
-| parse, extract, index, classify, embed, summarize, status | cheap | chat completions, except embed |
-| plan, architecture, tradeoff, code, review | frontier | chat completions |
+| parse, extract, index, classify, summarize, status | cheap | the tier destination, in the client's protocol |
+| embed | cheap | embeddings on an OpenAI-compatible destination |
+| plan, architecture, tradeoff, code, review | frontier | the tier destination, in the client's protocol |
 
 `embed` uses the embeddings method on the cheap endpoint. `local` is another name for the cheap tier. `strong` is another name for the frontier tier. Labels such as `status update`, `code review`, and `code generation` map onto the classes above.
 
@@ -40,20 +41,33 @@ The preview does not include the endpoint URL or an API key.
 
 ## Endpoints
 
-`examples/endpoints.json` names an OpenAI-compatible API root and a model id for each tier. `base_url` is the API root, such as `http://127.0.0.1:8080/v1`. Keys are not written in the file. `api_key_env` names the environment variable that holds the key. Omit `api_key_env` only for an endpoint that does not require a key. A URL with userinfo is rejected.
+`examples/endpoints.json` names an API root and a model id for each tier. `provider` is `openai`, `anthropic`, or `openai-compatible`. `base_url` is the API root, such as `http://127.0.0.1:8080/v1` or `https://api.anthropic.com`. Keys are not written in the file. `api_key_env` names the environment variable that holds a key. A URL with userinfo is rejected.
 
 ## Prefix
 
-The system prompt and tool definitions in the config are the cacheable prefix. They are canonicalized (sorted tool names and sorted JSON keys) and hashed. Step text is sent after the system message. A step cannot supply its own system message. The hash is stored on every journal row. Tail compaction is not implemented.
+The system prompt and tool definitions are canonicalized (sorted tool names and sorted JSON keys) and hashed. When a client omits a system prompt, the configured prefix is inserted and the hash matches that prefix. When a client sends its own system prompt, that text is the prefix that is hashed. Step text stays outside the hash. Tail compaction is not implemented.
+
+## Proxy
+
+`conductor serve` binds the `listen` address. That address must be loopback. The paths are `/v1/chat/completions`, `/v1/responses`, `/v1/embeddings`, `/v1/models`, and `/v1/messages`.
+
+`X-Conductor-Class` or `conductor_class` selects the job class. `X-Conductor-Suggest` is a suggestion. `X-Conductor-Task` and `X-Conductor-Step` are optional stable ids. Conductor fields are removed before the destination sees the body. The policy model replaces the client's model.
+
+`auth` on a tier is `passthrough`, `env`, or `passthrough_or_env` (the default). Passthrough forwards the client's `Authorization` header to an OpenAI-compatible destination, or `x-api-key` to Anthropic. It does not forward a client key to the other provider. `env` uses only `api_key_env`. When the client protocol and the destination protocol differ, Conductor translates text, tool definitions, and the common stream events.
+
+`/v1/models` lists the configured tier models. It does not call upstream.
+
+A provider error is journaled as uncertain usage. The other tier is not called.
 
 ## Commands
 
 ```bash
-python -m conductor route --config examples/endpoints.json --class parse
-python -m conductor route --config examples/endpoints.json --class parse --suggest frontier
-python -m conductor run --config examples/endpoints.json --journal runs/journal.jsonl \
+conductor route --config examples/endpoints.json --class parse
+conductor route --config examples/endpoints.json --class parse --suggest frontier
+conductor serve --config examples/endpoints.json --journal runs/journal.jsonl
+conductor run --config examples/endpoints.json --journal runs/journal.jsonl \
   --task task-1 --step step-1 --class summarize --message "Summarize the note."
-python -m conductor summary --journal runs/journal.jsonl
+conductor summary --journal runs/journal.jsonl
 ```
 
-Exit status is 0 when the command finishes, 1 when the provider call fails after a journal row is written, and 2 when the config, class, or journal is not usable.
+Exit status is 0 when the command finishes, 1 when the provider call or a denied hop finishes after a journal row is written, and 2 when the config, class, or journal is not usable.

@@ -9,14 +9,43 @@ jobs:
   test:
     runs-on: ubuntu-24.04
     container:
-      image: python:3.12-slim-bookworm
+      image: golang:1.22-bookworm
     steps:
       - name: Install git
         run: apt-get update && apt-get install -y --no-install-recommends git && rm -rf /var/lib/apt/lists/*
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           persist-credentials: false
-      - name: Install test runner
-        run: pip install --no-cache-dir -r requirements-dev.txt
-      - name: Run tests
-        run: python -m pytest
+      - name: Test
+        run: go test ./...
+      - name: Static linux binary
+        run: |
+          CGO_ENABLED=0 go build -trimpath -ldflags='-s -w' -o conductor ./cmd/conductor
+          ldd conductor 2>&1 | grep -q 'not a dynamic executable'
+
+  release-build:
+    runs-on: ubuntu-24.04
+    container:
+      image: golang:1.22-bookworm
+    strategy:
+      fail-fast: false
+      matrix:
+        goos: [linux, windows, darwin]
+        goarch: [amd64, arm64]
+    steps:
+      - name: Install git
+        run: apt-get update && apt-get install -y --no-install-recommends git && rm -rf /var/lib/apt/lists/*
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - name: Cross-compile
+        env:
+          CGO_ENABLED: "0"
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+        run: |
+          ext=""
+          if [ "$GOOS" = "windows" ]; then ext=".exe"; fi
+          mkdir -p dist
+          go build -trimpath -ldflags='-s -w' -o "dist/conductor-${GOOS}-${GOARCH}${ext}" ./cmd/conductor
+          ls -l "dist/conductor-${GOOS}-${GOARCH}${ext}"

@@ -1,0 +1,39 @@
+# Snapshot build of the static conductor binary.
+# CI compiles the same targets. This file does not publish a release or a tag.
+version: 2
+
+project_name: conductor
+
+builds:
+  - id: conductor
+    main: ./cmd/conductor
+    binary: conductor
+    env:
+      - CGO_ENABLED=0
+    flags:
+      - -trimpath
+    ldflags:
+      - -s -w
+    goos:
+      - linux
+      - windows
+      - darwin
+    goarch:
+      - amd64
+      - arm64
+
+archives:
+  - formats: [binary]
+    name_template: "{{ .ProjectName }}_{{ .Os }}_{{ .Arch }}"
+
+checksum:
+  name_template: checksums.txt
+
+snapshot:
+  version_template: "snapshot"
+
+changelog:
+  disable: true
+
+release:
+  disable: true
