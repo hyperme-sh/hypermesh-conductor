@@ -91,7 +91,8 @@ func applyPartial(dst *Usage, usage map[string]any, embeddings bool) {
 		return
 	}
 	cache, cacheOK, badCache := cacheCount(usage)
-	if badCache {
+	input, inputOK, badInput := expandAnthropicInput(usage, input, inputOK)
+	if badCache || badInput {
 		return
 	}
 	if embeddings && !outputOK && inputOK {
@@ -122,7 +123,8 @@ func fromUsageObject(usage map[string]any, embeddings bool) Usage {
 	input, inputOK := firstCount(usage, "prompt_tokens", "input_tokens")
 	output, outputOK := firstCount(usage, "completion_tokens", "output_tokens")
 	cache, cacheOK, badCache := cacheCount(usage)
-	if badCache || (!inputOK && keyPresent(usage, "prompt_tokens", "input_tokens")) || (!outputOK && keyPresent(usage, "completion_tokens", "output_tokens")) {
+	input, inputOK, badInput := expandAnthropicInput(usage, input, inputOK)
+	if badCache || badInput || (!inputOK && keyPresent(usage, "prompt_tokens", "input_tokens")) || (!outputOK && keyPresent(usage, "completion_tokens", "output_tokens")) {
 		return UncertainUsage()
 	}
 	if embeddings && !outputOK && inputOK {
@@ -162,6 +164,35 @@ func keyPresent(obj map[string]any, keys ...string) bool {
 		}
 	}
 	return false
+}
+
+// expandAnthropicInput adds cache read and cache creation to Anthropic's
+// uncached input_tokens. OpenAI prompt_tokens already includes cached input.
+func expandAnthropicInput(usage map[string]any, input *int, inputOK bool) (*int, bool, bool) {
+	if _, ok := usage["prompt_tokens"]; ok {
+		return input, inputOK, false
+	}
+	if keyPresent(usage, "input_tokens") && !inputOK {
+		return nil, false, true
+	}
+	if !keyPresent(usage, "input_tokens", "cache_read_input_tokens", "cache_creation_input_tokens") {
+		return input, inputOK, false
+	}
+	total := 0
+	if inputOK && input != nil {
+		total = *input
+	}
+	for _, key := range []string{"cache_read_input_tokens", "cache_creation_input_tokens"} {
+		if !keyPresent(usage, key) {
+			continue
+		}
+		count, ok := firstCount(usage, key)
+		if !ok {
+			return nil, false, true
+		}
+		total += *count
+	}
+	return &total, true, false
 }
 
 func cacheCount(usage map[string]any) (*int, bool, bool) {

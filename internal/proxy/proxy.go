@@ -7,12 +7,15 @@ package proxy
 import (
 	"bytes"
 	"crypto/rand"
+	"crypto/subtle"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net"
 	"net/http"
+	"os"
 	"regexp"
 	"strings"
 	"time"
@@ -194,7 +197,12 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	secrets, authReq, err := p.upstreamRequest(r, tier, wire, stream)
 	if err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]any{"error": map[string]any{"message": err.Error()}})
+		status := http.StatusBadRequest
+		var denied proxyAuthError
+		if errors.As(err, &denied) {
+			status = http.StatusUnauthorized
+		}
+		writeJSON(w, status, map[string]any{"error": map[string]any{"message": err.Error()}})
 		return
 	}
 	p.forward(w, r, authReq, tier, wire, stream, secrets, base)
@@ -277,6 +285,7 @@ func (p *Proxy) stream(w http.ResponseWriter, client *http.Request, resp *http.R
 	buf := make([]byte, 32*1024)
 	var pending []byte
 	var readErr error
+	failed := false
 	for {
 		n, err := resp.Body.Read(buf)
 		if n > 0 {
@@ -291,6 +300,9 @@ func (p *Proxy) stream(w http.ResponseWriter, client *http.Request, resp *http.R
 				pending = pending[i+1:]
 				payload := ssePayload(line)
 				if payload != nil {
+					if providerError(payload) {
+						failed = true
+					}
 					usage.Absorb(&acc, payload, wire.Protocol == translate.ProtoEmbeddings)
 				}
 			}
@@ -309,6 +321,9 @@ func (p *Proxy) stream(w http.ResponseWriter, client *http.Request, resp *http.R
 	}
 	if len(pending) > 0 {
 		if payload := ssePayload(pending); payload != nil {
+			if providerError(payload) {
+				failed = true
+			}
 			usage.Absorb(&acc, payload, wire.Protocol == translate.ProtoEmbeddings)
 		}
 	}
@@ -318,7 +333,7 @@ func (p *Proxy) stream(w http.ResponseWriter, client *http.Request, resp *http.R
 	}
 	ms := elapsedMS(start)
 	record.LatencyMS = &ms
-	if readErr != nil {
+	if readErr != nil || failed {
 		msg := "provider request failed"
 		record.Error = &msg
 		record.UsageStatus = metrics.StatusUncertain
@@ -435,12 +450,12 @@ func (p *Proxy) injectPrefix(obj *jsonbody.Object, proto string) {
 		}
 	}
 	if len(obj.Values["tools"]) == 0 && len(p.Config.Prefix.Tools) > 0 && proto != translate.ProtoResponses {
-		_ = obj.Set("tools", p.Config.Prefix.Tools)
+		_ = obj.Set("tools", translate.ClientTools(proto, p.Config.Prefix.Tools))
 	}
 }
 
 func (p *Proxy) upstreamRequest(client *http.Request, tier config.Tier, wire translate.Wire, stream bool) ([]string, *http.Request, error) {
-	if tier.IncludeUsage && stream && (wire.Protocol == translate.ProtoChat || wire.Protocol == translate.ProtoResponses) && tier.Provider == config.ProviderOpenAI {
+	if tier.IncludeUsage && stream && wire.Protocol == translate.ProtoChat && tier.Provider == config.ProviderOpenAI {
 		obj, err := jsonbody.Parse(wire.Body)
 		if err == nil {
 			_ = obj.Set("stream_options", map[string]any{"include_usage": true})
@@ -476,6 +491,9 @@ func applyAuth(dst, src *http.Request, tier config.Tier) ([]string, error) {
 	var err error
 	needEnv := tier.Auth == config.AuthEnv || (tier.Auth == config.AuthPassthroughOrEnv && clientKey == "")
 	if needEnv {
+		if err = authorizeProxy(src); err != nil {
+			return nil, err
+		}
 		envKey, err = tier.Key()
 		if err != nil {
 			return nil, err
@@ -582,7 +600,11 @@ func hashBody(proto string, body []byte) (string, error) {
 	var tools []any
 	switch proto {
 	case translate.ProtoMessages:
-		system, _ = root["system"].(string)
+		text, err := translate.SystemText(root["system"])
+		if err != nil {
+			return "", err
+		}
+		system = text
 		tools, _ = root["tools"].([]any)
 	case translate.ProtoResponses:
 		system, _ = root["instructions"].(string)
@@ -677,6 +699,34 @@ func newID(prefix string) string {
 
 func elapsedMS(start time.Time) int {
 	return int((time.Since(start) + time.Millisecond/2) / time.Millisecond)
+}
+
+type proxyAuthError struct{ msg string }
+
+func (e proxyAuthError) Error() string { return e.msg }
+
+func authorizeProxy(src *http.Request) error {
+	want := strings.TrimSpace(os.Getenv(config.ProxyTokenEnv))
+	if want == "" {
+		return proxyAuthError{config.ProxyTokenEnv + " is required when a tier uses an environment key"}
+	}
+	got := strings.TrimSpace(src.Header.Get(config.ProxyTokenHeader))
+	if subtle.ConstantTimeCompare([]byte(got), []byte(want)) != 1 {
+		return proxyAuthError{"proxy token is required to use the configured provider key"}
+	}
+	return nil
+}
+
+func providerError(payload []byte) bool {
+	var obj map[string]any
+	if err := json.Unmarshal(payload, &obj); err != nil {
+		return false
+	}
+	if kind, _ := obj["type"].(string); kind == "error" {
+		return true
+	}
+	_, ok := obj["error"].(map[string]any)
+	return ok
 }
 
 func ssePayload(line []byte) []byte {

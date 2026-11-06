@@ -113,7 +113,7 @@ mkdir -p runs
 ./conductor summary --journal runs/journal.jsonl
 ```
 
-`examples/endpoints.json` names loopback and provider placeholders. `serve` and `run` check that the journal directory exists before a provider call. Set `CONDUCTOR_CHEAP_API_KEY` when the cheap tier must use an environment key.
+`examples/endpoints.json` names loopback and provider placeholders. `serve` and `run` check that the journal directory exists before a provider call. Set `CONDUCTOR_CHEAP_API_KEY` when the cheap tier must use an environment key. Set `CONDUCTOR_PROXY_TOKEN` as well, and send it as `X-Conductor-Token` on any call that should use that key. A client that sends its own provider credential does not send the proxy token.
 
 Tails longer than `compaction.max_tail_tokens` are summarized on the cheap tier. The original tail is stored in `history.jsonl` next to the metrics journal. The system prompt and tools stay the prefix that is hashed.
 

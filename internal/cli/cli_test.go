@@ -113,6 +113,39 @@ func TestRunStopsBeforeTheProviderWhenTheJournalDirectoryIsMissing(t *testing.T)
 	}
 }
 
+func TestRunRefusesEnvKeyWithoutProxyToken(t *testing.T) {
+	hits := 0
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits++
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer upstream.Close()
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "endpoints.json")
+	raw := fmt.Sprintf(`{
+		"listen": "127.0.0.1:8787",
+		"tiers": {
+			"cheap": {"provider":"openai-compatible","base_url":%q,"model":"local-small","auth":"env","api_key_env":"CONDUCTOR_CHEAP_API_KEY","timeout_seconds":1},
+			"frontier": {"provider":"openai-compatible","base_url":%q,"model":"frontier","auth":"passthrough","timeout_seconds":1}
+		},
+		"prefix": {"system":"You are Conductor.","tools":[]},
+		"aiuditor": {"mode":"stub","fail_closed":true}
+	}`, upstream.URL+"/v1", upstream.URL+"/v1")
+	if err := os.WriteFile(configPath, []byte(raw), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("CONDUCTOR_CHEAP_API_KEY", "test-key-do-not-log")
+	t.Setenv("CONDUCTOR_PROXY_TOKEN", "")
+	var stdout, stderr bytes.Buffer
+	code := Main([]string{
+		"run", "--config", configPath, "--journal", filepath.Join(dir, "journal.jsonl"),
+		"--class", "parse", "--task", "task-1", "--step", "step-1", "--message", "hello",
+	}, &stdout, &stderr)
+	if code != 2 || hits != 0 || !strings.Contains(stderr.String(), "CONDUCTOR_PROXY_TOKEN") {
+		t.Fatalf("code %d hits %d stderr %s", code, hits, stderr.String())
+	}
+}
+
 func TestHelpHasNoKeyFlag(t *testing.T) {
 	var stdout, stderr bytes.Buffer
 	if code := Main([]string{"--help"}, &stdout, &stderr); code != 0 {

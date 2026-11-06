@@ -48,13 +48,23 @@ func TestEmbeddingsOmitCompletion(t *testing.T) {
 
 func TestAnthropicUsageAndStreamFold(t *testing.T) {
 	parsed := ParseAnthropic([]byte(`{"usage":{"input_tokens":3,"output_tokens":2,"cache_read_input_tokens":1}}`))
-	if parsed.Status != Measured || *parsed.Input != 3 || *parsed.Output != 2 || *parsed.Cache != 1 {
+	if parsed.Status != Measured || *parsed.Input != 4 || *parsed.Output != 2 || *parsed.Cache != 1 {
 		t.Fatalf("%+v", parsed)
+	}
+	cached := ParseAnthropic([]byte(`{"usage":{"input_tokens":10,"output_tokens":2,"cache_read_input_tokens":90,"cache_creation_input_tokens":20}}`))
+	if cached.Status != Measured || *cached.Input != 120 || *cached.Output != 2 || *cached.Cache != 90 {
+		t.Fatalf("%+v", cached)
 	}
 	acc := UncertainUsage()
 	Absorb(&acc, []byte(`{"type":"message_start","message":{"usage":{"input_tokens":3,"output_tokens":1}}}`), false)
 	Absorb(&acc, []byte(`{"type":"message_delta","usage":{"output_tokens":5}}`), false)
 	if acc.Status != Measured || *acc.Input != 3 || *acc.Output != 5 {
 		t.Fatalf("%+v", acc)
+	}
+	folded := UncertainUsage()
+	Absorb(&folded, []byte(`{"type":"message_start","message":{"usage":{"input_tokens":10,"output_tokens":1,"cache_read_input_tokens":90,"cache_creation_input_tokens":20}}}`), false)
+	Absorb(&folded, []byte(`{"type":"message_delta","usage":{"output_tokens":2}}`), false)
+	if folded.Status != Measured || *folded.Input != 120 || *folded.Output != 2 || *folded.Cache != 90 {
+		t.Fatalf("%+v", folded)
 	}
 }

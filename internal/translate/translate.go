@@ -165,7 +165,11 @@ func anthropicToChat(body []byte, model string) ([]byte, error) {
 		return nil, fmt.Errorf("request body is not JSON")
 	}
 	messages := []any{}
-	if system, ok := req["system"].(string); ok && system != "" {
+	system, err := SystemText(req["system"])
+	if err != nil {
+		return nil, err
+	}
+	if system != "" {
 		messages = append(messages, map[string]any{"role": "system", "content": system})
 	}
 	rawMessages, _ := req["messages"].([]any)
@@ -610,7 +614,7 @@ func chatResponseToAnthropic(body []byte) ([]byte, error) {
 		"type":        "message",
 		"role":        "assistant",
 		"content":     content,
-		"stop_reason": "end_turn",
+		"stop_reason": mapStopToAnthropic(finishReason(msg)),
 		"model":       msg["model"],
 	}
 	if usage, ok := msg["usage"].(map[string]any); ok {
@@ -673,10 +677,17 @@ func anthropicToolCalls(content any) []any {
 
 func usageToOpenAI(usage map[string]any) map[string]any {
 	out := map[string]any{}
-	if n, ok := asInt(usage["input_tokens"]); ok {
-		out["prompt_tokens"] = n
-	}
-	if n, ok := asInt(usage["prompt_tokens"]); ok {
+	if _, hasPrompt := usage["prompt_tokens"]; hasPrompt {
+		if n, ok := asInt(usage["prompt_tokens"]); ok {
+			out["prompt_tokens"] = n
+		}
+	} else if n, ok := asInt(usage["input_tokens"]); ok {
+		if read, ok := asInt(usage["cache_read_input_tokens"]); ok {
+			n += read
+		}
+		if created, ok := asInt(usage["cache_creation_input_tokens"]); ok {
+			n += created
+		}
 		out["prompt_tokens"] = n
 	}
 	if n, ok := asInt(usage["output_tokens"]); ok {
@@ -730,9 +741,74 @@ func mapStop(reason string) string {
 		return "length"
 	case "tool_use":
 		return "tool_calls"
+	case "refusal":
+		return "content_filter"
 	default:
 		return reason
 	}
+}
+
+func mapStopToAnthropic(reason string) string {
+	switch reason {
+	case "tool_calls", "tool_use":
+		return "tool_use"
+	case "length", "max_tokens":
+		return "max_tokens"
+	case "content_filter", "refusal":
+		return "refusal"
+	case "stop", "end_turn", "stop_sequence", "":
+		return "end_turn"
+	default:
+		return "end_turn"
+	}
+}
+
+func finishReason(msg map[string]any) string {
+	choices, _ := msg["choices"].([]any)
+	if len(choices) == 0 {
+		return ""
+	}
+	choice, _ := choices[0].(map[string]any)
+	reason, _ := choice["finish_reason"].(string)
+	return reason
+}
+
+// SystemText reads an Anthropic system prompt. A string is kept. A block
+// array contributes its text blocks. Any other block is refused.
+func SystemText(system any) (string, error) {
+	switch value := system.(type) {
+	case nil:
+		return "", nil
+	case string:
+		return value, nil
+	case []any:
+		var parts []string
+		for _, part := range value {
+			obj, ok := part.(map[string]any)
+			if !ok {
+				return "", fmt.Errorf("unsupported content for protocol translation")
+			}
+			kind, _ := obj["type"].(string)
+			if kind != "" && kind != "text" {
+				return "", fmt.Errorf("unsupported content for protocol translation")
+			}
+			text, _ := obj["text"].(string)
+			if text != "" {
+				parts = append(parts, text)
+			}
+		}
+		return strings.Join(parts, ""), nil
+	default:
+		return "", fmt.Errorf("unsupported content for protocol translation")
+	}
+}
+
+// ClientTools converts configured OpenAI function tools into the client protocol.
+func ClientTools(proto string, tools []any) []any {
+	if proto == ProtoMessages {
+		return openaiToolsToAnthropic(tools)
+	}
+	return tools
 }
 
 func stringField(obj map[string]any, key string) string {

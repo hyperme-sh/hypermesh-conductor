@@ -4,4 +4,4 @@ Please report security vulnerabilities by email to **security@hyperme.sh**. Do n
 
 Report other bugs to **bugs@hyperme.sh**.
 
-This project has no release. The tree contains an unreleased localhost proxy. Do not put API keys in config files. The proxy keeps keys and prompt bodies out of the measurement journal and the default log.
+This project has no release. The tree contains an unreleased localhost proxy. Do not put API keys in config files. The proxy keeps keys and prompt bodies out of the measurement journal and the default log. Loopback reachability does not authorize use of an environment provider key: set `CONDUCTOR_PROXY_TOKEN` and send it as `X-Conductor-Token` before that key is attached.

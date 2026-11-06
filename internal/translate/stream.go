@@ -9,13 +9,16 @@ import (
 // Stream converts upstream SSE into the client protocol.
 // Same-protocol streams are copied through.
 type Stream struct {
-	client   string
-	upstream string
-	buf      []byte
-	event    string
-	id       string
-	opened   bool
-	done     bool
+	client    string
+	upstream  string
+	buf       []byte
+	event     string
+	id        string
+	opened    bool
+	done      bool
+	failed    bool
+	toolSlots map[int]int
+	nextTool  int
 }
 
 // NewStream starts a bridge. Identical protocols copy bytes unchanged.
@@ -55,7 +58,7 @@ func (s *Stream) Consume(chunk []byte) []byte {
 
 // Finish flushes a closing event when the upstream ended quietly.
 func (s *Stream) Finish() []byte {
-	if s.passthrough() || s.done {
+	if s.passthrough() || s.done || s.failed {
 		return nil
 	}
 	s.done = true
@@ -92,6 +95,11 @@ func (s *Stream) onLine(line string) []byte {
 	if kind == "" {
 		kind = s.event
 	}
+	if kind == "error" || errorObject(obj) {
+		s.failed = true
+		s.done = true
+		return s.clientError(obj)
+	}
 	switch {
 	case s.upstream == ProtoMessages && s.client == ProtoChat:
 		return s.anthropicToChat(kind, obj)
@@ -126,7 +134,7 @@ func (s *Stream) anthropicToChat(kind string, obj map[string]any) []byte {
 			partial, _ := delta["partial_json"].(string)
 			return sseData(chatChunk(s.id, map[string]any{
 				"tool_calls": []any{map[string]any{
-					"index":    0,
+					"index":    s.toolSlot(obj),
 					"function": map[string]any{"arguments": partial},
 				}},
 			}, nil, nil))
@@ -136,7 +144,7 @@ func (s *Stream) anthropicToChat(kind string, obj map[string]any) []byte {
 		if block["type"] == "tool_use" {
 			return sseData(chatChunk(s.id, map[string]any{
 				"tool_calls": []any{map[string]any{
-					"index": 0,
+					"index": s.toolSlot(obj),
 					"id":    block["id"],
 					"type":  "function",
 					"function": map[string]any{
@@ -204,7 +212,7 @@ func (s *Stream) chatToAnthropic(obj map[string]any) []byte {
 		out.WriteString("event: message_delta\n")
 		out.Write(sseData(map[string]any{
 			"type":  "message_delta",
-			"delta": map[string]any{"stop_reason": "end_turn"},
+			"delta": map[string]any{"stop_reason": mapStopToAnthropic(finish)},
 			"usage": map[string]any{},
 		}))
 		out.WriteString("event: message_stop\n")
@@ -227,6 +235,58 @@ func (s *Stream) anthropicToResponses(kind string, obj map[string]any) []byte {
 		return sseData(map[string]any{"type": "response.completed"})
 	}
 	return nil
+}
+
+func (s *Stream) toolSlot(obj map[string]any) int {
+	index, ok := eventIndex(obj["index"])
+	if !ok {
+		index = s.nextTool
+	}
+	if s.toolSlots == nil {
+		s.toolSlots = map[int]int{}
+	}
+	if slot, exists := s.toolSlots[index]; exists {
+		return slot
+	}
+	slot := s.nextTool
+	s.nextTool++
+	s.toolSlots[index] = slot
+	return slot
+}
+
+func eventIndex(value any) (int, bool) {
+	switch n := value.(type) {
+	case float64:
+		return int(n), true
+	case int:
+		return n, true
+	default:
+		return 0, false
+	}
+}
+
+func errorObject(obj map[string]any) bool {
+	_, ok := obj["error"].(map[string]any)
+	return ok
+}
+
+func (s *Stream) clientError(obj map[string]any) []byte {
+	message := "provider request failed"
+	if errObj, ok := obj["error"].(map[string]any); ok {
+		if text, ok := errObj["message"].(string); ok && text != "" {
+			message = text
+		}
+	}
+	if s.client == ProtoMessages {
+		return append([]byte("event: error\n"), sseData(map[string]any{
+			"type":  "error",
+			"error": map[string]any{"type": "api_error", "message": message},
+		})...)
+	}
+	if s.client == ProtoResponses {
+		return sseData(map[string]any{"type": "error", "error": map[string]any{"message": message}})
+	}
+	return sseData(map[string]any{"error": map[string]any{"message": message, "type": "server_error"}})
 }
 
 func chatChunk(id string, delta map[string]any, finish any, usage any) map[string]any {

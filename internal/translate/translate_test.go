@@ -53,6 +53,51 @@ func TestToolCallsSurviveTranslation(t *testing.T) {
 	}
 }
 
+func TestSystemBlocksAndStopReasons(t *testing.T) {
+	wire, err := Request(ProtoMessages, ProviderOpenAI, "frontier", []byte(`{"system":[{"type":"text","text":"be brief"}],"messages":[{"role":"user","content":"hi"}]}`))
+	if err != nil || !strings.Contains(string(wire.Body), `"role":"system"`) || !strings.Contains(string(wire.Body), "be brief") {
+		t.Fatal(err, string(wire.Body))
+	}
+	if _, err := Request(ProtoMessages, ProviderOpenAI, "frontier", []byte(`{"system":[{"type":"image","source":{}}],"messages":[{"role":"user","content":"hi"}]}`)); err == nil {
+		t.Fatal("image system block was accepted")
+	}
+	tool, err := Response(ProtoMessages, ProtoChat, []byte(`{"id":"c1","model":"frontier","choices":[{"finish_reason":"tool_calls","message":{"role":"assistant","content":null,"tool_calls":[{"id":"call_1","type":"function","function":{"name":"lookup","arguments":"{}"}}]}}]}`))
+	if err != nil || !strings.Contains(string(tool), `"stop_reason":"tool_use"`) {
+		t.Fatal(err, string(tool))
+	}
+	length, err := Response(ProtoMessages, ProtoChat, []byte(`{"id":"c1","model":"frontier","choices":[{"finish_reason":"length","message":{"role":"assistant","content":"partial"}}]}`))
+	if err != nil || !strings.Contains(string(length), `"stop_reason":"max_tokens"`) {
+		t.Fatal(err, string(length))
+	}
+}
+
+func TestStreamToolIndexesAndErrorEvent(t *testing.T) {
+	stream := NewStream(ProtoChat, ProtoMessages)
+	var out string
+	chunks := []string{
+		"event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\n",
+		"event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":1,\"content_block\":{\"type\":\"tool_use\",\"id\":\"call_a\",\"name\":\"one\"}}\n\n",
+		"event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":1,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"{\\\"x\\\":1}\"}}\n\n",
+		"event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":2,\"content_block\":{\"type\":\"tool_use\",\"id\":\"call_b\",\"name\":\"two\"}}\n\n",
+		"event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":2,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"{\\\"y\\\":2}\"}}\n\n",
+	}
+	for _, chunk := range chunks {
+		out += string(stream.Consume([]byte(chunk)))
+	}
+	if !strings.Contains(out, `"id":"call_a"`) || !strings.Contains(out, `"id":"call_b"`) || strings.Count(out, `"index":1`) != 2 {
+		t.Fatal(out)
+	}
+	if strings.Contains(out, `"id":"call_b"`) && !strings.Contains(out, `"index":1`) {
+		t.Fatal(out)
+	}
+	errStream := NewStream(ProtoChat, ProtoMessages)
+	_ = errStream.Consume([]byte("event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"m1\",\"usage\":{\"input_tokens\":1,\"output_tokens\":1}}}\n\n"))
+	failed := string(errStream.Consume([]byte("event: error\ndata: {\"type\":\"error\",\"error\":{\"type\":\"api_error\",\"message\":\"overloaded\"}}\n\n")))
+	if !strings.Contains(failed, `"message":"overloaded"`) || len(errStream.Finish()) != 0 {
+		t.Fatal(failed)
+	}
+}
+
 func TestSameProtocolPreservesNestedBytes(t *testing.T) {
 	body := []byte(`{"messages":[{"role":"user","content":"a & b"}],"stream":false}`)
 	wire, err := Request(ProtoChat, ProviderOpenAICompatible, "local-small", body)

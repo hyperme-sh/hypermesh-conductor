@@ -136,6 +136,10 @@ func serveCmd(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintln(stderr, err.Error())
 		return 2
 	}
+	if err := cfg.RequireProxyToken(); err != nil {
+		fmt.Fprintln(stderr, err.Error())
+		return 2
+	}
 	hop, err := hopFrom(cfg)
 	if err != nil {
 		fmt.Fprintln(stderr, err.Error())
@@ -180,6 +184,10 @@ func runCmd(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintln(stderr, err.Error())
 		return 2
 	}
+	if err := cfg.RequireProxyToken(); err != nil {
+		fmt.Fprintln(stderr, err.Error())
+		return 2
+	}
 	hop, err := hopFrom(cfg)
 	if err != nil {
 		fmt.Fprintln(stderr, err.Error())
@@ -208,6 +216,9 @@ func runCmd(args []string, stdout, stderr io.Writer) int {
 	req.Header.Set("X-Conductor-Step", *stepID)
 	if *suggest != "" {
 		req.Header.Set("X-Conductor-Suggest", *suggest)
+	}
+	if token := strings.TrimSpace(os.Getenv(config.ProxyTokenEnv)); token != "" {
+		req.Header.Set(config.ProxyTokenHeader, token)
 	}
 	rec := httptest.NewRecorder()
 	proxy.New(cfg, hop, journal).ServeHTTP(rec, req)

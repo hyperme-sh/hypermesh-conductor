@@ -28,7 +28,9 @@ const (
 	AIUModeStub = "stub"
 	AIUModeHTTP = "http"
 
-	DefaultListen = "127.0.0.1:8787"
+	DefaultListen    = "127.0.0.1:8787"
+	ProxyTokenEnv    = "CONDUCTOR_PROXY_TOKEN"
+	ProxyTokenHeader = "X-Conductor-Token"
 )
 
 var forbiddenKeys = map[string]struct{}{
@@ -46,6 +48,26 @@ type Tier struct {
 	Timeout      time.Duration
 	Auth         string
 	IncludeUsage bool
+}
+
+// UsesEnvKey reports whether this tier can attach an environment key.
+func (t Tier) UsesEnvKey() bool {
+	if t.APIKeyEnv == "" {
+		return false
+	}
+	return t.Auth == AuthEnv || t.Auth == AuthPassthroughOrEnv
+}
+
+// RequireProxyToken fails when an environment key can be attached and the
+// caller token is not configured. The token is not read from the config file.
+func (c Config) RequireProxyToken() error {
+	if !c.Cheap.UsesEnvKey() && !c.Frontier.UsesEnvKey() {
+		return nil
+	}
+	if strings.TrimSpace(os.Getenv(ProxyTokenEnv)) == "" {
+		return fmt.Errorf("%s is required when a tier uses an environment key", ProxyTokenEnv)
+	}
+	return nil
 }
 
 // Key returns the environment key when this tier is configured to read one.

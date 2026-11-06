@@ -531,6 +531,101 @@ func TestThresholdRuleEscalatesAndAHintDoesNot(t *testing.T) {
 	}
 }
 
+func TestMessagesPrefixToolsUseAnthropicShape(t *testing.T) {
+	var body string
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		raw, _ := io.ReadAll(r.Body)
+		body = string(raw)
+		_, _ = w.Write([]byte(`{"id":"msg_1","type":"message","role":"assistant","content":[{"type":"text","text":"yo"}],"stop_reason":"end_turn","usage":{"input_tokens":2,"output_tokens":1}}`))
+	}))
+	defer upstream.Close()
+	dir := t.TempDir()
+	cfg := loadTestConfig(t, dir, upstream.URL+"/v1", upstream.URL+"/v1", config.AuthPassthrough, config.ProviderAnthropic)
+	journal := openJournal(t, dir)
+	rec := do(New(cfg, aiuditor.Stub{}, journal), "/v1/messages", "parse", "task-1", "tools-1", "", `{"messages":[{"role":"user","content":"hi"}]}`)
+	if rec.Code != http.StatusOK || !strings.Contains(body, `"input_schema"`) || !strings.Contains(body, `"name":"record_status"`) || strings.Contains(body, `"type":"function"`) {
+		t.Fatalf("code %d body %s", rec.Code, body)
+	}
+}
+
+func TestEnvKeyRequiresProxyToken(t *testing.T) {
+	hits := 0
+	var auth, proxyHeader string
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits++
+		auth = r.Header.Get("Authorization")
+		proxyHeader = r.Header.Get(config.ProxyTokenHeader)
+		_, _ = w.Write([]byte(`{"usage":{"prompt_tokens":1,"completion_tokens":1}}`))
+	}))
+	defer upstream.Close()
+	dir := t.TempDir()
+	t.Setenv("CONDUCTOR_CHEAP_API_KEY", "test-key-do-not-log")
+	t.Setenv(config.ProxyTokenEnv, "proxy-token-for-tests")
+	cfg := loadTestConfig(t, dir, upstream.URL+"/v1", upstream.URL+"/v1", config.AuthEnv, config.ProviderOpenAICompatible)
+	journal := openJournal(t, dir)
+	server := New(cfg, aiuditor.Stub{}, journal)
+	bare := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{"messages":[{"role":"user","content":"hi"}]}`))
+	bare.Header.Set("X-Conductor-Class", "parse")
+	bare.Header.Set("X-Conductor-Task", "task-1")
+	bare.Header.Set("X-Conductor-Step", "no-token")
+	denied := httptest.NewRecorder()
+	server.ServeHTTP(denied, bare)
+	if denied.Code != http.StatusUnauthorized || hits != 0 {
+		t.Fatalf("code %d hits %d body %s", denied.Code, hits, denied.Body.String())
+	}
+	allowed := do(server, "/v1/chat/completions", "parse", "task-1", "with-token", "", `{"messages":[{"role":"user","content":"hi"}]}`)
+	if allowed.Code != http.StatusOK || hits != 1 || auth != "Bearer test-key-do-not-log" || proxyHeader != "" {
+		t.Fatalf("code %d hits %d auth %s proxy %s", allowed.Code, hits, auth, proxyHeader)
+	}
+}
+
+func TestIncludeUsageStaysOnChatCompletions(t *testing.T) {
+	var bodies []string
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		raw, _ := io.ReadAll(r.Body)
+		bodies = append(bodies, string(raw))
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = io.WriteString(w, "data: {\"usage\":{\"prompt_tokens\":2,\"completion_tokens\":1}}\n\ndata: [DONE]\n\n")
+	}))
+	defer upstream.Close()
+	dir := t.TempDir()
+	t.Setenv("CONDUCTOR_CHEAP_API_KEY", "test-key-do-not-log")
+	cfg := loadTestConfig(t, dir, upstream.URL+"/v1", upstream.URL+"/v1", config.AuthEnv, config.ProviderOpenAI)
+	cfg.Cheap.IncludeUsage = true
+	cfg.Frontier.IncludeUsage = true
+	journal := openJournal(t, dir)
+	server := New(cfg, aiuditor.Stub{}, journal)
+	if rec := do(server, "/v1/responses", "parse", "task-1", "resp-stream", "", `{"stream":true,"input":"hello"}`); rec.Code != http.StatusOK {
+		t.Fatal(rec.Code, rec.Body.String())
+	}
+	if rec := do(server, "/v1/chat/completions", "parse", "task-1", "chat-stream", "", `{"stream":true,"messages":[{"role":"user","content":"hello"}]}`); rec.Code != http.StatusOK {
+		t.Fatal(rec.Code, rec.Body.String())
+	}
+	if len(bodies) != 2 || strings.Contains(bodies[0], "stream_options") || !strings.Contains(bodies[1], `"include_usage":true`) {
+		t.Fatal(bodies)
+	}
+}
+
+func TestStreamErrorIsUncertain(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = io.WriteString(w, "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"m1\",\"usage\":{\"input_tokens\":4,\"output_tokens\":1}}}\n\n")
+		_, _ = io.WriteString(w, "event: error\ndata: {\"type\":\"error\",\"error\":{\"type\":\"api_error\",\"message\":\"overloaded\"}}\n\n")
+	}))
+	defer upstream.Close()
+	dir := t.TempDir()
+	cfg := loadTestConfig(t, dir, upstream.URL+"/v1", upstream.URL+"/v1", config.AuthPassthrough, config.ProviderAnthropic)
+	journal := openJournal(t, dir)
+	rec := do(New(cfg, aiuditor.Stub{}, journal), "/v1/chat/completions", "summarize", "task-1", "err-stream", "", `{"stream":true,"messages":[{"role":"user","content":"hi"}]}`)
+	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), "overloaded") || strings.Contains(rec.Body.String(), "[DONE]") {
+		t.Fatal(rec.Code, rec.Body.String())
+	}
+	records, err := metrics.ReadJournal(journal.Path())
+	if err != nil || len(records) != 1 || records[0].UsageStatus != metrics.StatusUncertain || records[0].InputTokens != nil || records[0].Error == nil {
+		t.Fatal(err, records)
+	}
+}
+
 func TestModelsAndUnknownClass(t *testing.T) {
 	dir := t.TempDir()
 	cfg := loadTestConfig(t, dir, "http://127.0.0.1:9/v1", "http://127.0.0.1:9/v1", config.AuthPassthrough, config.ProviderOpenAICompatible)
@@ -618,6 +713,9 @@ func request(path, className, taskID, stepID, suggest, body string) *http.Reques
 	if suggest != "" {
 		req.Header.Set("X-Conductor-Suggest", suggest)
 	}
+	if token := os.Getenv(config.ProxyTokenEnv); token != "" {
+		req.Header.Set(config.ProxyTokenHeader, token)
+	}
 	return req
 }
 
@@ -653,6 +751,7 @@ func loadTestConfig(t *testing.T, dir, cheapURL, frontierURL, auth, provider str
 	if err != nil {
 		t.Fatal(err)
 	}
+	t.Setenv(config.ProxyTokenEnv, "proxy-token-for-tests")
 	return cfg
 }
 
