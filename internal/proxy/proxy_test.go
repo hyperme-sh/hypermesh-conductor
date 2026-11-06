@@ -1264,6 +1264,7 @@ func TestModelsAndUnknownClass(t *testing.T) {
 	dir := t.TempDir()
 	cfg := loadTestConfig(t, dir, "http://127.0.0.1:9/v1", "http://127.0.0.1:9/v1", config.AuthPassthrough, config.ProviderOpenAICompatible)
 	req := httptest.NewRequest(http.MethodGet, "/v1/models", nil)
+	req.Header.Set(config.ProxyTokenHeader, os.Getenv(config.ProxyTokenEnv))
 	rec := httptest.NewRecorder()
 	New(cfg, aiuditor.Stub{}, nil).ServeHTTP(rec, req)
 	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), "local-small") || !strings.Contains(rec.Body.String(), "frontier") {
@@ -1272,6 +1273,45 @@ func TestModelsAndUnknownClass(t *testing.T) {
 	missing := do(New(cfg, aiuditor.Stub{}, nil), "/v1/chat/completions", "", "task-1", "step-1", "", `{"messages":[{"role":"user","content":"hi"}]}`)
 	if missing.Code != http.StatusBadRequest {
 		t.Fatal(missing.Code, missing.Body.String())
+	}
+	bare := httptest.NewRequest(http.MethodGet, "/v1/models", nil)
+	denied := httptest.NewRecorder()
+	New(cfg, aiuditor.Stub{}, nil).ServeHTTP(denied, bare)
+	if denied.Code != http.StatusUnauthorized {
+		t.Fatal(denied.Code, denied.Body.String())
+	}
+}
+
+type deadlineRec struct {
+	hdr      http.Header
+	deadline time.Time
+}
+
+func (d *deadlineRec) Header() http.Header {
+	if d.hdr == nil {
+		d.hdr = http.Header{}
+	}
+	return d.hdr
+}
+
+func (d *deadlineRec) Write(p []byte) (int, error) { return len(p), nil }
+
+func (d *deadlineRec) WriteHeader(int) {}
+
+func (d *deadlineRec) SetWriteDeadline(t time.Time) error {
+	d.deadline = t
+	return nil
+}
+
+func TestEachResponseWriteHasAnIdleDeadline(t *testing.T) {
+	rec := &deadlineRec{}
+	w := deadlineWriter{ResponseWriter: rec, idle: 50 * time.Millisecond}
+	before := time.Now()
+	if _, err := w.Write([]byte("hi")); err != nil {
+		t.Fatal(err)
+	}
+	if rec.deadline.Before(before.Add(40*time.Millisecond)) || rec.deadline.After(time.Now().Add(time.Second)) {
+		t.Fatal(rec.deadline)
 	}
 }
 

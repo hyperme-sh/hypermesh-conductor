@@ -78,6 +78,7 @@ const (
 	readHeaderTimeout = 10 * time.Second
 	readTimeout       = 60 * time.Second
 	idleTimeout       = 120 * time.Second
+	writeIdle         = 30 * time.Second
 	maxConns          = 128
 )
 
@@ -136,13 +137,14 @@ func (c *trackedConn) Close() error {
 
 // ServeHTTP implements the local API.
 func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	w = deadlineWriter{ResponseWriter: w, idle: writeIdle}
 	proto, ok := protocolOf(r.Method, r.URL.Path)
 	if !ok {
 		writeJSON(w, http.StatusNotFound, map[string]any{"error": map[string]any{"message": "unknown path"}})
 		return
 	}
 	if proto == translate.ProtoModels {
-		p.serveModels(w)
+		p.serveModels(w, r)
 		return
 	}
 	body, err := readRequestBody(r.Body)
@@ -484,7 +486,13 @@ func (p *Proxy) logRecord(client *http.Request, record metrics.StepRecord) {
 	p.Logf("path=%s class=%s tier=%s status=%s input_tokens=%s output_tokens=%s", client.URL.Path, record.JobClass, record.Tier, record.UsageStatus, in, out)
 }
 
-func (p *Proxy) serveModels(w http.ResponseWriter) {
+func (p *Proxy) serveModels(w http.ResponseWriter, r *http.Request) {
+	if strings.TrimSpace(os.Getenv(config.ProxyTokenEnv)) != "" {
+		if err := authorizeProxy(r); err != nil {
+			writeJSON(w, http.StatusUnauthorized, map[string]any{"error": map[string]any{"message": err.Error()}})
+			return
+		}
+	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"object": "list",
 		"data": []any{
@@ -1038,6 +1046,32 @@ func replaceReservation(oldN, newN int) bool {
 	}
 	bodyUsed = used + newN
 	return true
+}
+
+// deadlineWriter bounds each response write. A client that stops reading
+// cannot hold a connection slot for the rest of a long stream.
+type deadlineWriter struct {
+	http.ResponseWriter
+	idle time.Duration
+}
+
+func (d deadlineWriter) Write(p []byte) (int, error) {
+	d.arm()
+	return d.ResponseWriter.Write(p)
+}
+
+func (d deadlineWriter) Flush() {
+	d.arm()
+	if f, ok := d.ResponseWriter.(http.Flusher); ok {
+		f.Flush()
+	}
+}
+
+func (d deadlineWriter) arm() {
+	if d.idle <= 0 {
+		return
+	}
+	_ = http.NewResponseController(d.ResponseWriter).SetWriteDeadline(time.Now().Add(d.idle))
 }
 
 func flush(w http.ResponseWriter) {

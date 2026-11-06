@@ -117,6 +117,8 @@ func (s *Stream) failLarge(out *bytes.Buffer) []byte {
 	s.buf = nil
 	s.respText.Reset()
 	s.respCalls = nil
+	s.toolSlots = nil
+	s.chatTools = nil
 	out.Write(s.clientError(map[string]any{
 		"error": map[string]any{"message": "provider stream event is too large"},
 	}))
@@ -222,9 +224,13 @@ func (s *Stream) anthropicToChat(kind string, obj map[string]any) []byte {
 		}
 		if dtype == "input_json_delta" {
 			partial, _ := delta["partial_json"].(string)
+			slot, ok := s.noteToolSlot(obj, "", "")
+			if !ok {
+				return s.failLarge(&bytes.Buffer{})
+			}
 			return sseData(chatChunk(s.id, map[string]any{
 				"tool_calls": []any{map[string]any{
-					"index":    s.toolSlot(obj),
+					"index":    slot,
 					"function": map[string]any{"arguments": partial},
 				}},
 			}, nil, nil))
@@ -232,13 +238,19 @@ func (s *Stream) anthropicToChat(kind string, obj map[string]any) []byte {
 	case "content_block_start":
 		block, _ := obj["content_block"].(map[string]any)
 		if block["type"] == "tool_use" {
+			id, _ := block["id"].(string)
+			name, _ := block["name"].(string)
+			slot, ok := s.noteToolSlot(obj, id, name)
+			if !ok {
+				return s.failLarge(&bytes.Buffer{})
+			}
 			return sseData(chatChunk(s.id, map[string]any{
 				"tool_calls": []any{map[string]any{
-					"index": s.toolSlot(obj),
-					"id":    block["id"],
+					"index": slot,
+					"id":    id,
 					"type":  "function",
 					"function": map[string]any{
-						"name":      block["name"],
+						"name":      name,
 						"arguments": "",
 					},
 				}},
@@ -373,11 +385,14 @@ func (s *Stream) chatToolCalls(calls []any) []byte {
 		block, started := s.chatTools[index]
 		fn, _ := call["function"].(map[string]any)
 		if !started {
+			name, _ := fn["name"].(string)
+			id, _ := call["id"].(string)
+			if !s.noteTranslated(len(id) + len(name) + callMetaBytes) {
+				return s.failLarge(&out)
+			}
 			block = s.nextContent
 			s.nextContent++
 			s.chatTools[index] = block
-			name, _ := fn["name"].(string)
-			id, _ := call["id"].(string)
 			out.WriteString("event: content_block_start\n")
 			out.Write(sseData(map[string]any{
 				"type": "content_block_start", "index": block,
@@ -643,7 +658,7 @@ func functionCallItem(id, name, args, status string) map[string]any {
 	}
 }
 
-func (s *Stream) toolSlot(obj map[string]any) int {
+func (s *Stream) noteToolSlot(obj map[string]any, id, name string) (int, bool) {
 	index, ok := eventIndex(obj["index"])
 	if !ok {
 		index = s.nextTool
@@ -652,12 +667,15 @@ func (s *Stream) toolSlot(obj map[string]any) int {
 		s.toolSlots = map[int]int{}
 	}
 	if slot, exists := s.toolSlots[index]; exists {
-		return slot
+		return slot, true
+	}
+	if !s.noteTranslated(len(id) + len(name) + callMetaBytes) {
+		return 0, false
 	}
 	slot := s.nextTool
 	s.nextTool++
 	s.toolSlots[index] = slot
-	return slot
+	return slot, true
 }
 
 func eventIndex(value any) (int, bool) {

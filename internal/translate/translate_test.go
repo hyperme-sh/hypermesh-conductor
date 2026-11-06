@@ -202,6 +202,28 @@ func TestTranslatedStreamCapsTotalText(t *testing.T) {
 	}
 }
 
+func TestCrossProtocolToolStateHitsTheCap(t *testing.T) {
+	previous := maxEventBytes
+	maxEventBytes = 300
+	t.Cleanup(func() { maxEventBytes = previous })
+	chat := NewStream(ProtoChat, ProtoMessages)
+	var chatOut string
+	for i := 1; i <= 6; i++ {
+		chatOut += string(chat.Consume([]byte("event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":" + string(rune('0'+i)) + ",\"content_block\":{\"type\":\"tool_use\",\"id\":\"ab\",\"name\":\"n\"}}\n\n")))
+	}
+	if !chat.TooLarge() || chat.toolSlots != nil || !strings.Contains(chatOut, "too large") {
+		t.Fatalf("chat too %v slots %v out %s", chat.TooLarge(), chat.toolSlots != nil, chatOut)
+	}
+	messages := NewStream(ProtoMessages, ProtoChat)
+	var msgOut string
+	for i := 1; i <= 6; i++ {
+		msgOut += string(messages.Consume([]byte("data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":" + string(rune('0'+i)) + ",\"id\":\"ab\",\"type\":\"function\",\"function\":{\"name\":\"n\",\"arguments\":\"\"}}]}}]}\n\n")))
+	}
+	if !messages.TooLarge() || messages.chatTools != nil || !strings.Contains(msgOut, "too large") {
+		t.Fatalf("messages too %v tools %v out %s", messages.TooLarge(), messages.chatTools != nil, msgOut)
+	}
+}
+
 func TestToolStartsCountTowardTheStreamCap(t *testing.T) {
 	previous := maxEventBytes
 	maxEventBytes = 200
