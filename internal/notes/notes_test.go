@@ -859,3 +859,35 @@ func TestSyncSwappedExplicitIDs(t *testing.T) {
 		}
 	}
 }
+
+func TestRootedNoteReadRejectsSwappedSymlinksAndParentEscape(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("symlinks")
+	}
+	dir := t.TempDir()
+	outside := t.TempDir()
+	if err := os.WriteFile(filepath.Join(outside, "secret.md"), []byte("outside secret"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	root, err := os.OpenRoot(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer root.Close()
+	for _, name := range []string{"direct.md", "parent"} {
+		target := outside
+		if name == "direct.md" {
+			target = filepath.Join(outside, "secret.md")
+		}
+		if err := os.Symlink(target, filepath.Join(dir, name)); err != nil {
+			t.Fatal(err)
+		}
+		path := filepath.Join(dir, name)
+		if name == "parent" {
+			path = filepath.Join(path, "secret.md")
+		}
+		if raw, err := readRootNote(root, dir, path); err == nil {
+			t.Fatalf("escaped root: %q", raw)
+		}
+	}
+}

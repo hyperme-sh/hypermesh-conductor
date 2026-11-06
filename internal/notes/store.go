@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -296,6 +297,11 @@ func (e idCollision) Error() string {
 }
 
 func readNotes(dir string, files []string) ([]Note, []string, error) {
+	root, err := os.OpenRoot(dir)
+	if err != nil {
+		return nil, nil, err
+	}
+	defer root.Close()
 	incoming := make([]Note, 0, len(files))
 	counts := map[string]int{}
 	for _, path := range files {
@@ -306,7 +312,7 @@ func readNotes(dir string, files []string) ([]Note, []string, error) {
 		if info.Mode()&os.ModeSymlink != 0 {
 			continue
 		}
-		data, err := os.ReadFile(path)
+		data, err := readRootNote(root, dir, path)
 		if err != nil {
 			return nil, nil, err
 		}
@@ -329,6 +335,28 @@ func readNotes(dir string, files []string) ([]Note, []string, error) {
 		incoming[i].ID = next
 	}
 	return incoming, warnings, nil
+}
+
+// Open under a directory handle: renaming a parent or swapping in a symlink
+// cannot redirect the read outside the configured notes root.
+func readRootNote(root *os.Root, dir, path string) ([]byte, error) {
+	relative, err := filepath.Rel(dir, path)
+	if err != nil {
+		return nil, err
+	}
+	file, err := root.Open(relative)
+	if err != nil {
+		return nil, err
+	}
+	defer file.Close()
+	info, err := file.Stat()
+	if err != nil {
+		return nil, err
+	}
+	if !info.Mode().IsRegular() {
+		return nil, fmt.Errorf("note is not a regular file")
+	}
+	return io.ReadAll(file)
 }
 
 func relativeNoteID(dir, path string) string {
