@@ -108,11 +108,12 @@ Each row records input tokens, output tokens, tier, model id, latency, and cache
 ```bash
 go build -trimpath -ldflags '-s -w' -o conductor ./cmd/conductor
 ./conductor route --config examples/endpoints.json --class parse
+mkdir -p runs
 ./conductor serve --config examples/endpoints.json --journal runs/journal.jsonl
 ./conductor summary --journal runs/journal.jsonl
 ```
 
-`examples/endpoints.json` names loopback and provider placeholders. Create the journal directory before `serve`. Set `CONDUCTOR_CHEAP_API_KEY` when the cheap tier must use an environment key.
+`examples/endpoints.json` names loopback and provider placeholders. `serve` and `run` check that the journal directory exists before a provider call. Set `CONDUCTOR_CHEAP_API_KEY` when the cheap tier must use an environment key.
 
 ## Contributing
 

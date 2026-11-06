@@ -154,6 +154,39 @@ func TestCostProxyAndPrefixReuse(t *testing.T) {
 	}
 }
 
+func TestCacheOverInputIsRejectedPerStep(t *testing.T) {
+	badIn, badCache := 10, 11
+	okIn, okCache := 100, 0
+	summary := Summarize([]StepRecord{
+		row(func(r *StepRecord) {
+			r.InputTokens = &badIn
+			r.CacheHitTokens = &badCache
+		}),
+		row(func(r *StepRecord) {
+			r.StepID = "s2"
+			r.Tier = routing.Frontier
+			r.JobClass = "code"
+			r.ModelID = "frontier"
+			r.InputTokens = &okIn
+			r.CacheHitTokens = &okCache
+		}),
+	})
+	if summary.Totals.CacheReportComplete || summary.Totals.CacheHitRate != nil || summary.Totals.CacheHitTokens != nil || summary.Totals.MeasuredCacheHitTokens != nil {
+		t.Fatalf("totals %+v", summary.Totals.Block)
+	}
+	if *summary.Totals.InputTokens != 110 {
+		t.Fatal(*summary.Totals.InputTokens)
+	}
+	cheap := summary.Totals.ByTier[routing.Cheap]
+	if cheap.CacheReportComplete || cheap.CacheHitRate != nil {
+		t.Fatalf("cheap %+v", cheap)
+	}
+	frontier := summary.Totals.ByTier[routing.Frontier]
+	if !frontier.CacheReportComplete || frontier.CacheHitRate == nil || *frontier.CacheHitRate != 0 {
+		t.Fatalf("frontier %+v", frontier)
+	}
+}
+
 func TestEmptyJournalAndRoundTrip(t *testing.T) {
 	empty := Summarize(nil)
 	if len(empty.Tasks) != 0 || empty.Totals.Steps != 0 || empty.Totals.InputTokens != nil || empty.Totals.ByTier[routing.Frontier].InputTokens != nil {

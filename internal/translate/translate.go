@@ -169,18 +169,11 @@ func anthropicToChat(body []byte, model string) ([]byte, error) {
 		messages = append(messages, map[string]any{"role": "system", "content": system})
 	}
 	rawMessages, _ := req["messages"].([]any)
-	for _, item := range rawMessages {
-		msg, ok := item.(map[string]any)
-		if !ok {
-			return nil, fmt.Errorf("unsupported content for protocol translation")
-		}
-		role, _ := msg["role"].(string)
-		content, err := anthropicContentToText(msg["content"])
-		if err != nil {
-			return nil, err
-		}
-		messages = append(messages, map[string]any{"role": role, "content": content})
+	converted, err := anthropicMessagesToOpenAI(rawMessages)
+	if err != nil {
+		return nil, err
 	}
+	messages = append(messages, converted...)
 	out := map[string]any{"model": model, "messages": messages}
 	if max, ok := asInt(req["max_tokens"]); ok {
 		out["max_tokens"] = max
@@ -301,6 +294,129 @@ func splitChatMessages(messages []any) (string, []any, error) {
 		}
 	}
 	return strings.Join(systemParts, "\n"), out, nil
+}
+
+func anthropicMessagesToOpenAI(rawMessages []any) ([]any, error) {
+	out := []any{}
+	for _, item := range rawMessages {
+		msg, ok := item.(map[string]any)
+		if !ok {
+			return nil, fmt.Errorf("unsupported content for protocol translation")
+		}
+		role, _ := msg["role"].(string)
+		switch content := msg["content"].(type) {
+		case string:
+			out = append(out, map[string]any{"role": role, "content": content})
+		case nil:
+			if role == "assistant" {
+				out = append(out, map[string]any{"role": "assistant", "content": nil})
+				continue
+			}
+			out = append(out, map[string]any{"role": role, "content": ""})
+		case []any:
+			if role == "assistant" {
+				message, err := assistantBlocksToOpenAI(content)
+				if err != nil {
+					return nil, err
+				}
+				out = append(out, message)
+				continue
+			}
+			pieces, err := userBlocksToOpenAI(content)
+			if err != nil {
+				return nil, err
+			}
+			out = append(out, pieces...)
+		default:
+			return nil, fmt.Errorf("unsupported content for protocol translation")
+		}
+	}
+	return out, nil
+}
+
+func assistantBlocksToOpenAI(blocks []any) (map[string]any, error) {
+	var texts []string
+	var calls []any
+	for _, part := range blocks {
+		obj, ok := part.(map[string]any)
+		if !ok {
+			return nil, fmt.Errorf("unsupported content for protocol translation")
+		}
+		kind, _ := obj["type"].(string)
+		switch kind {
+		case "text":
+			text, _ := obj["text"].(string)
+			texts = append(texts, text)
+		case "tool_use":
+			raw, err := json.Marshal(obj["input"])
+			if err != nil {
+				return nil, err
+			}
+			if obj["input"] == nil {
+				raw = []byte("{}")
+			}
+			id, _ := obj["id"].(string)
+			name, _ := obj["name"].(string)
+			calls = append(calls, map[string]any{
+				"id":   id,
+				"type": "function",
+				"function": map[string]any{
+					"name":      name,
+					"arguments": string(raw),
+				},
+			})
+		default:
+			return nil, fmt.Errorf("unsupported content for protocol translation")
+		}
+	}
+	text := strings.Join(texts, "")
+	message := map[string]any{"role": "assistant", "content": text}
+	if len(calls) > 0 {
+		message["tool_calls"] = calls
+		if text == "" {
+			message["content"] = nil
+		}
+	}
+	return message, nil
+}
+
+func userBlocksToOpenAI(blocks []any) ([]any, error) {
+	var texts []string
+	out := []any{}
+	flush := func() {
+		if len(texts) == 0 {
+			return
+		}
+		out = append(out, map[string]any{"role": "user", "content": strings.Join(texts, "")})
+		texts = nil
+	}
+	for _, part := range blocks {
+		obj, ok := part.(map[string]any)
+		if !ok {
+			return nil, fmt.Errorf("unsupported content for protocol translation")
+		}
+		kind, _ := obj["type"].(string)
+		switch kind {
+		case "text":
+			text, _ := obj["text"].(string)
+			texts = append(texts, text)
+		case "tool_result":
+			flush()
+			text, err := contentToText(obj["content"])
+			if err != nil {
+				return nil, err
+			}
+			id, _ := obj["tool_use_id"].(string)
+			out = append(out, map[string]any{"role": "tool", "tool_call_id": id, "content": text})
+		default:
+			return nil, fmt.Errorf("unsupported content for protocol translation")
+		}
+	}
+	flush()
+	if len(out) == 0 {
+		out = append(out, map[string]any{"role": "user", "content": ""})
+	}
+	return out, nil
 }
 
 func contentToText(content any) (string, error) {

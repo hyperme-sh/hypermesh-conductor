@@ -20,7 +20,7 @@ jobs:
         run: go test ./...
       - name: Static linux binary
         run: |
-          CGO_ENABLED=0 go build -trimpath -ldflags='-s -w' -o conductor ./cmd/conductor
+          CGO_ENABLED=0 go build -buildvcs=false -trimpath -ldflags='-s -w' -o conductor ./cmd/conductor
           ldd conductor 2>&1 | grep -q 'not a dynamic executable'
 
   release-build:
@@ -47,5 +47,5 @@ jobs:
           ext=""
           if [ "$GOOS" = "windows" ]; then ext=".exe"; fi
           mkdir -p dist
-          go build -trimpath -ldflags='-s -w' -o "dist/conductor-${GOOS}-${GOARCH}${ext}" ./cmd/conductor
+          go build -buildvcs=false -trimpath -ldflags='-s -w' -o "dist/conductor-${GOOS}-${GOARCH}${ext}" ./cmd/conductor
           ls -l "dist/conductor-${GOOS}-${GOARCH}${ext}"

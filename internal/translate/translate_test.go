@@ -32,6 +32,27 @@ func TestAnthropicStreamBecomesChatChunks(t *testing.T) {
 	}
 }
 
+func TestToolCallsSurviveTranslation(t *testing.T) {
+	chat := []byte(`{"messages":[{"role":"assistant","content":null,"tool_calls":[{"id":"call_1","type":"function","function":{"name":"lookup","arguments":"{\"q\":1}"}}]},{"role":"tool","tool_call_id":"call_1","content":"ok"}]}`)
+	wire, err := Request(ProtoChat, ProviderAnthropic, "frontier", chat)
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(wire.Body)
+	if !strings.Contains(text, `"type":"tool_use"`) || !strings.Contains(text, `"id":"call_1"`) || !strings.Contains(text, `"tool_use_id":"call_1"`) {
+		t.Fatal(text)
+	}
+	anthropic := []byte(`{"system":"be brief","messages":[{"role":"assistant","content":[{"type":"tool_use","id":"call_1","name":"lookup","input":{"q":1}}]},{"role":"user","content":[{"type":"tool_result","tool_use_id":"call_1","content":"ok"}]}]}`)
+	back, err := Request(ProtoMessages, ProviderOpenAI, "frontier", anthropic)
+	if err != nil {
+		t.Fatal(err)
+	}
+	text = string(back.Body)
+	if !strings.Contains(text, `"tool_calls"`) || !strings.Contains(text, `"id":"call_1"`) || !strings.Contains(text, `"tool_call_id":"call_1"`) || !strings.Contains(text, `"content":null`) {
+		t.Fatal(text)
+	}
+}
+
 func TestSameProtocolPreservesNestedBytes(t *testing.T) {
 	body := []byte(`{"messages":[{"role":"user","content":"a & b"}],"stream":false}`)
 	wire, err := Request(ProtoChat, ProviderOpenAICompatible, "local-small", body)

@@ -250,6 +250,7 @@ func (p *Proxy) stream(w http.ResponseWriter, client *http.Request, resp *http.R
 	acc := usage.UncertainUsage()
 	buf := make([]byte, 32*1024)
 	var pending []byte
+	var readErr error
 	for {
 		n, err := resp.Body.Read(buf)
 		if n > 0 {
@@ -274,6 +275,9 @@ func (p *Proxy) stream(w http.ResponseWriter, client *http.Request, resp *http.R
 			}
 		}
 		if err != nil {
+			if err != io.EOF {
+				readErr = err
+			}
 			break
 		}
 	}
@@ -288,7 +292,18 @@ func (p *Proxy) stream(w http.ResponseWriter, client *http.Request, resp *http.R
 	}
 	ms := elapsedMS(start)
 	record.LatencyMS = &ms
-	applyUsage(&record, acc, p.Config, record.Tier)
+	if readErr != nil {
+		msg := "provider request failed"
+		record.Error = &msg
+		record.UsageStatus = metrics.StatusUncertain
+		record.InputTokens = nil
+		record.OutputTokens = nil
+		record.CacheHitTokens = nil
+		record.CostProxy = nil
+		record.CostProxyLabel = nil
+	} else {
+		applyUsage(&record, acc, p.Config, record.Tier)
+	}
 	p.journal(record)
 	p.logRecord(client, record)
 }

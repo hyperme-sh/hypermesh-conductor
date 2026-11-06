@@ -3,7 +3,12 @@ package cli
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
+	"net/http"
+	"net/http/httptest"
+	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/hyperme-sh/hypermesh-conductor/internal/metrics"
@@ -73,6 +78,38 @@ func TestSummaryCommand(t *testing.T) {
 	byTier := totals["by_tier"].(map[string]any)
 	if byTier["frontier"].(map[string]any)["steps"].(float64) != 0 {
 		t.Fatal(byTier)
+	}
+}
+
+func TestRunStopsBeforeTheProviderWhenTheJournalDirectoryIsMissing(t *testing.T) {
+	hits := 0
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits++
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer upstream.Close()
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "endpoints.json")
+	raw := fmt.Sprintf(`{
+		"listen": "127.0.0.1:8787",
+		"tiers": {
+			"cheap": {"provider":"openai-compatible","base_url":%q,"model":"local-small","auth":"passthrough","timeout_seconds":1},
+			"frontier": {"provider":"openai-compatible","base_url":%q,"model":"frontier","auth":"passthrough","timeout_seconds":1}
+		},
+		"prefix": {"system":"You are Conductor.","tools":[]},
+		"aiuditor": {"mode":"stub","fail_closed":true}
+	}`, upstream.URL+"/v1", upstream.URL+"/v1")
+	if err := os.WriteFile(configPath, []byte(raw), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	var stdout, stderr bytes.Buffer
+	code := Main([]string{
+		"run", "--config", configPath,
+		"--journal", filepath.Join(dir, "missing", "journal.jsonl"),
+		"--class", "parse", "--task", "task-1", "--step", "step-1", "--message", "hello",
+	}, &stdout, &stderr)
+	if code != 2 || hits != 0 || !strings.Contains(stderr.String(), "journal directory does not exist") {
+		t.Fatalf("code %d hits %d stderr %s", code, hits, stderr.String())
 	}
 }
 

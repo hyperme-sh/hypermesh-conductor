@@ -462,11 +462,16 @@ func measure(rows []StepRecord) Block {
 	cacheComplete := uncertain == 0 && len(eligible) > 0 && len(reported) == len(eligible)
 	cacheTokens := 0
 	cacheInputs := 0
+	over := false
+	for _, row := range measured {
+		if row.CacheHitTokens != nil && row.InputTokens != nil && *row.CacheHitTokens > *row.InputTokens {
+			over = true
+		}
+	}
 	for _, row := range reported {
 		cacheTokens += *row.CacheHitTokens
 		cacheInputs += *row.InputTokens
 	}
-	over := len(reported) > 0 && cacheTokens > cacheInputs
 	block.CacheReportComplete = cacheComplete && !over
 	if len(reported) > 0 && !over {
 		block.MeasuredCacheHitTokens = intPtr(cacheTokens)

@@ -32,7 +32,7 @@ Usage that is missing, partial, negative, or the wrong JSON type is `uncertain`.
 
 - tokens per task (`input_tokens`, `output_tokens`, `peak_context_tokens`)
 - `by_tier.cheap` and `by_tier.frontier` step counts and token totals
-- `cache_hit_rate` (cache-hit tokens divided by input tokens) when every step with input tokens reported a cache figure
+- `cache_hit_rate` (cache-hit tokens divided by input tokens) when every step with input tokens reported a cache figure, and no measured step reports more cache-hit tokens than input tokens. One step's extra input cannot hide another step's report.
 - `prefix_reuse_rate`, the fraction of steps that share the most common prefix hash, when the task has at least two steps
 - `cost_per_step`, the mean labeled proxy, when every step has one
 - `accuracy` left null

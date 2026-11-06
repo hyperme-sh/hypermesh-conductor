@@ -2,7 +2,9 @@ package proxy
 
 import (
 	"encoding/json"
+	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -319,6 +321,114 @@ func TestResponsesAndEmbeddingsUseTheirPaths(t *testing.T) {
 	if len(paths) != 2 || paths[0] != "/v1/responses" || paths[1] != "/v1/embeddings" {
 		t.Fatal(paths)
 	}
+}
+
+func TestPrefixKeepsToolCallFields(t *testing.T) {
+	var body string
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		raw, _ := io.ReadAll(r.Body)
+		body = string(raw)
+		_, _ = w.Write([]byte(`{"choices":[{"message":{"role":"assistant","content":"done"}}],"usage":{"prompt_tokens":3,"completion_tokens":1}}`))
+	}))
+	defer upstream.Close()
+	dir := t.TempDir()
+	t.Setenv("CONDUCTOR_CHEAP_API_KEY", "test-key-do-not-log")
+	cfg := loadTestConfig(t, dir, upstream.URL+"/v1", upstream.URL+"/v1", config.AuthEnv, config.ProviderOpenAICompatible)
+	journal := openJournal(t, dir)
+	payload := `{"messages":[{"role":"assistant","content":null,"tool_calls":[{"id":"call_1","type":"function","function":{"name":"lookup","arguments":"{}"}}]},{"role":"tool","tool_call_id":"call_1","content":"ok"}]}`
+	rec := do(New(cfg, aiuditor.Stub{}, journal), "/v1/chat/completions", "parse", "task-1", "tool-1", "", payload)
+	if rec.Code != http.StatusOK {
+		t.Fatal(rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(body, `"tool_calls"`) || !strings.Contains(body, `"id":"call_1"`) || !strings.Contains(body, `"tool_call_id":"call_1"`) || !strings.Contains(body, `"content":null`) {
+		t.Fatal(body)
+	}
+}
+
+func TestAuthorizationDoesNotFollowRedirect(t *testing.T) {
+	otherHits := 0
+	var leaked string
+	other := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		otherHits++
+		leaked = r.Header.Get("Authorization")
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer other.Close()
+	originHits := 0
+	origin := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		originHits++
+		if r.Header.Get("Authorization") == "" {
+			t.Errorf("origin did not receive authorization")
+		}
+		http.Redirect(w, r, other.URL+"/v1/chat/completions", http.StatusFound)
+	}))
+	defer origin.Close()
+	dir := t.TempDir()
+	t.Setenv("CONDUCTOR_CHEAP_API_KEY", "test-key-do-not-log")
+	cfg := loadTestConfig(t, dir, origin.URL+"/v1", origin.URL+"/v1", config.AuthEnv, config.ProviderOpenAICompatible)
+	journal := openJournal(t, dir)
+	rec := do(New(cfg, aiuditor.Stub{}, journal), "/v1/chat/completions", "parse", "task-1", "redir-1", "", `{"messages":[{"role":"user","content":"hi"}]}`)
+	if originHits != 1 || otherHits != 0 || leaked != "" {
+		t.Fatalf("origin %d other %d leaked %q code %d", originHits, otherHits, leaked, rec.Code)
+	}
+}
+
+func TestTruncatedProviderBodyIsUncertain(t *testing.T) {
+	base := truncatedServer(t, "200 OK", "application/json", `{"usage":`)
+	dir := t.TempDir()
+	t.Setenv("CONDUCTOR_CHEAP_API_KEY", "test-key-do-not-log")
+	cfg := loadTestConfig(t, dir, base, base, config.AuthEnv, config.ProviderOpenAICompatible)
+	journal := openJournal(t, dir)
+	rec := do(New(cfg, aiuditor.Stub{}, journal), "/v1/chat/completions", "parse", "task-1", "short-1", "", `{"messages":[{"role":"user","content":"hi"}]}`)
+	if rec.Code != http.StatusBadGateway {
+		t.Fatal(rec.Code, rec.Body.String())
+	}
+	records, err := metrics.ReadJournal(journal.Path())
+	if err != nil || len(records) != 1 || records[0].UsageStatus != metrics.StatusUncertain || records[0].InputTokens != nil || records[0].Error == nil {
+		t.Fatal(err, records)
+	}
+}
+
+func TestTruncatedStreamIsUncertain(t *testing.T) {
+	payload := "data: {\"usage\":{\"prompt_tokens\":6,\"completion_tokens\":1}}\n\n"
+	base := truncatedServer(t, "200 OK", "text/event-stream", payload)
+	dir := t.TempDir()
+	t.Setenv("CONDUCTOR_CHEAP_API_KEY", "test-key-do-not-log")
+	cfg := loadTestConfig(t, dir, base, base, config.AuthEnv, config.ProviderOpenAICompatible)
+	journal := openJournal(t, dir)
+	rec := do(New(cfg, aiuditor.Stub{}, journal), "/v1/chat/completions", "summarize", "task-1", "stream-short", "", `{"stream":true,"messages":[{"role":"user","content":"hi"}]}`)
+	if rec.Code != http.StatusOK {
+		t.Fatal(rec.Code, rec.Body.String())
+	}
+	records, err := metrics.ReadJournal(journal.Path())
+	if err != nil || len(records) != 1 || records[0].UsageStatus != metrics.StatusUncertain || records[0].InputTokens != nil || records[0].Error == nil {
+		t.Fatal(err, records)
+	}
+}
+
+func truncatedServer(t *testing.T, status, contentType, body string) string {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = ln.Close() })
+	go func() {
+		for {
+			conn, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			go func(conn net.Conn) {
+				defer conn.Close()
+				buf := make([]byte, 64*1024)
+				_, _ = conn.Read(buf)
+				header := fmt.Sprintf("HTTP/1.1 %s\r\nContent-Type: %s\r\nContent-Length: %d\r\nConnection: close\r\n\r\n", status, contentType, len(body)+40)
+				_, _ = conn.Write([]byte(header + body))
+			}(conn)
+		}
+	}()
+	return "http://" + ln.Addr().String() + "/v1"
 }
 
 func TestModelsAndUnknownClass(t *testing.T) {

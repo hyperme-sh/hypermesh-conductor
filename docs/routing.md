@@ -53,7 +53,7 @@ The system prompt and tool definitions are canonicalized (sorted tool names and 
 
 `X-Conductor-Class` or `conductor_class` selects the job class. `X-Conductor-Suggest` is a suggestion. `X-Conductor-Task` and `X-Conductor-Step` are optional stable ids. Conductor fields are removed before the destination sees the body. The policy model replaces the client's model.
 
-`auth` on a tier is `passthrough`, `env`, or `passthrough_or_env` (the default). Passthrough forwards the client's `Authorization` header to an OpenAI-compatible destination, or `x-api-key` to Anthropic. It does not forward a client key to the other provider. `env` uses only `api_key_env`. When the client protocol and the destination protocol differ, Conductor translates text, tool definitions, and the common stream events.
+`auth` on a tier is `passthrough`, `env`, or `passthrough_or_env` (the default). Passthrough forwards the client's `Authorization` header to an OpenAI-compatible destination, or `x-api-key` to Anthropic. It does not forward a client key to the other provider. `env` uses only `api_key_env`. A redirect from the destination is not followed, so that credential stays on the configured origin. When the client protocol and the destination protocol differ, Conductor translates text, tool definitions, tool calls, and the common stream events.
 
 `/v1/models` lists the configured tier models. It does not call upstream.
 
@@ -70,4 +70,4 @@ conductor run --config examples/endpoints.json --journal runs/journal.jsonl \
 conductor summary --journal runs/journal.jsonl
 ```
 
-Exit status is 0 when the command finishes, 1 when the provider call or a denied hop finishes after a journal row is written, and 2 when the config, class, or journal is not usable.
+The journal directory must exist before `serve` or `run`. Exit status is 0 when the command finishes, 1 when the provider call or a denied hop finishes after a journal row is written, and 2 when the config, class, or journal is not usable.
