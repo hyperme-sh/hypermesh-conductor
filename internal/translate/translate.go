@@ -215,6 +215,9 @@ func responsesToAnthropic(body []byte, model string) ([]byte, error) {
 	if prior, ok := req["previous_response_id"].(string); ok && strings.TrimSpace(prior) != "" {
 		return nil, fmt.Errorf("previous_response_id cannot be translated")
 	}
+	if err := rejectResponsesFormat(req); err != nil {
+		return nil, err
+	}
 	var systemParts []string
 	if instructions, ok := req["instructions"].(string); ok && instructions != "" {
 		systemParts = append(systemParts, instructions)
@@ -297,6 +300,26 @@ func responsesToolsToAnthropic(tools []any) ([]any, error) {
 		out = append(out, map[string]any{"name": name, "description": desc, "input_schema": schema})
 	}
 	return out, nil
+}
+
+func rejectResponsesFormat(req map[string]any) error {
+	text, ok := req["text"].(map[string]any)
+	if !ok || text == nil {
+		return nil
+	}
+	format, ok := text["format"]
+	if !ok || format == nil {
+		return nil
+	}
+	spec, ok := format.(map[string]any)
+	if !ok {
+		return fmt.Errorf("unsupported text.format for protocol translation")
+	}
+	kind, _ := spec["type"].(string)
+	if kind == "" || kind == "text" {
+		return nil
+	}
+	return fmt.Errorf("unsupported text.format %s for protocol translation", kind)
 }
 
 func rejectResponseFormat(req map[string]any) error {

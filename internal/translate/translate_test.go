@@ -6,6 +6,20 @@ import (
 	"testing"
 )
 
+func TestResponsesSchemaIsNotSilentlyDropped(t *testing.T) {
+	_, err := Request(ProtoResponses, ProviderAnthropic, "frontier", []byte(`{"text":{"format":{"type":"json_schema","name":"out","schema":{"type":"object"},"strict":true}},"input":"hi"}`))
+	if err == nil || !strings.Contains(err.Error(), "text.format") {
+		t.Fatal(err)
+	}
+	wire, err := Request(ProtoResponses, ProviderAnthropic, "frontier", []byte(`{"text":{"format":{"type":"text"}},"input":"hi"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(wire.Body), "json_schema") {
+		t.Fatal(string(wire.Body))
+	}
+}
+
 func TestStructuredOutputIsNotSilentlyDropped(t *testing.T) {
 	_, err := Request(ProtoChat, ProviderAnthropic, "frontier", []byte(`{"response_format":{"type":"json_schema","json_schema":{"name":"out","schema":{"type":"object"}}},"messages":[{"role":"user","content":"hi"}]}`))
 	if err == nil || !strings.Contains(err.Error(), "response_format") {
