@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"net/http"
 	"strings"
 	"time"
@@ -188,8 +187,13 @@ func (p *Proxy) cheapSummary(ctx context.Context, client *http.Request, tail str
 		return "", usage.UncertainUsage(), elapsedMS(start), err
 	}
 	defer resp.Body.Close()
-	body, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	body, heldResp, err := readReserved(resp.Body, 1<<20)
+	defer releaseBody(heldResp)
 	latency := elapsedMS(start)
+	if errors.Is(err, errBodyBudget) {
+		_ = resp.Body.Close()
+		return "", usage.UncertainUsage(), latency, err
+	}
 	if err != nil || resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		if err == nil {
 			err = fmt.Errorf("provider HTTP %d", resp.StatusCode)

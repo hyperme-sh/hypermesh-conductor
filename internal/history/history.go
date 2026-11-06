@@ -15,6 +15,13 @@ import (
 
 const Schema = "hypermesh.conductor.history.v0"
 
+// maxHistoryBytes is the total size of history.jsonl. maxTaskHistoryBytes
+// is the portion one task id may occupy. Both are quotas, not per-append caps.
+var (
+	maxHistoryBytes     = 32 << 20
+	maxTaskHistoryBytes = 8 << 20
+)
+
 // Record is one original tail.
 type Record struct {
 	Schema       string          `json:"schema"`
@@ -45,15 +52,24 @@ func Open(path string) (*Store, error) {
 	return &Store{path: path}, nil
 }
 
-// Append writes one original tail.
+// Append writes one original tail. The file stays within the global quota
+// by dropping the oldest rows, and within the per-task quota the same way.
+// A single row larger than either quota is refused and nothing is written.
 func (s *Store) Append(record Record) error {
 	record.Schema = Schema
 	raw, err := json.Marshal(record)
 	if err != nil {
 		return err
 	}
+	need := len(raw) + 1
+	if need > maxHistoryBytes || need > maxTaskHistoryBytes {
+		return fmt.Errorf("history record exceeds the quota")
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if err := s.makeRoom(record.TaskID, need); err != nil {
+		return err
+	}
 	file, err := os.OpenFile(s.path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600)
 	if err != nil {
 		return err
@@ -66,6 +82,99 @@ func (s *Store) Append(record Record) error {
 		return err
 	}
 	return file.Sync()
+}
+
+func (s *Store) makeRoom(task string, need int) error {
+	existing, err := os.ReadFile(s.path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return err
+	}
+	var lines [][]byte
+	start := 0
+	for i := 0; i <= len(existing); i++ {
+		if i == len(existing) || existing[i] == '\n' {
+			if i > start {
+				lines = append(lines, append([]byte(nil), existing[start:i]...))
+			}
+			start = i + 1
+		}
+	}
+	total := 0
+	taskTotal := 0
+	tasks := make([]string, len(lines))
+	sizes := make([]int, len(lines))
+	for i, line := range lines {
+		sizes[i] = len(line) + 1
+		tasks[i] = taskIDOf(line)
+		total += sizes[i]
+		if tasks[i] == task {
+			taskTotal += sizes[i]
+		}
+	}
+	drop := 0
+	for drop < len(lines) && (total+need > maxHistoryBytes || taskTotal+need > maxTaskHistoryBytes) {
+		total -= sizes[drop]
+		if tasks[drop] == task {
+			taskTotal -= sizes[drop]
+		}
+		drop++
+	}
+	if total+need > maxHistoryBytes || taskTotal+need > maxTaskHistoryBytes {
+		return fmt.Errorf("history record exceeds the quota")
+	}
+	if drop == 0 {
+		return nil
+	}
+	return s.rewrite(lines[drop:])
+}
+
+func taskIDOf(line []byte) string {
+	var row struct {
+		TaskID string `json:"task_id"`
+	}
+	if err := json.Unmarshal(line, &row); err != nil {
+		return ""
+	}
+	return row.TaskID
+}
+
+func (s *Store) rewrite(lines [][]byte) error {
+	tmp, err := os.CreateTemp(filepath.Dir(s.path), ".history-*.jsonl")
+	if err != nil {
+		return err
+	}
+	tmpName := tmp.Name()
+	ok := false
+	defer func() {
+		if !ok {
+			_ = os.Remove(tmpName)
+		}
+	}()
+	for _, line := range lines {
+		if _, err := tmp.Write(append(line, '\n')); err != nil {
+			_ = tmp.Close()
+			return err
+		}
+	}
+	if err := tmp.Chmod(0o600); err != nil {
+		_ = tmp.Close()
+		return err
+	}
+	if err := tmp.Sync(); err != nil {
+		_ = tmp.Close()
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	if err := os.Rename(tmpName, s.path); err != nil {
+		return err
+	}
+	ok = true
+	return ensureOwnerOnly(s.path)
 }
 
 // ensureOwnerOnly keeps prompt tails unreadable by other accounts.
