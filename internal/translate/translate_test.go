@@ -207,6 +207,23 @@ func TestToolChoiceCrossesTheProtocolBoundary(t *testing.T) {
 	if _, err := Request(ProtoMessages, ProviderOpenAI, "frontier", []byte(`{"tool_choice":{"type":"auto","disable_parallel_tool_use":true},"messages":[{"role":"user","content":"hi"}]}`)); err == nil {
 		t.Fatal("parallel tool constraint was dropped")
 	}
+	for _, body := range [][]byte{
+		[]byte(`{"parallel_tool_calls":false,"tool_choice":"auto","messages":[{"role":"user","content":"hi"}]}`),
+		[]byte(`{"parallel_tool_calls":false,"messages":[{"role":"user","content":"hi"}]}`),
+	} {
+		wire, err := Request(ProtoChat, ProviderAnthropic, "frontier", body)
+		if err != nil || !strings.Contains(string(wire.Body), `"disable_parallel_tool_use":true`) || !strings.Contains(string(wire.Body), `"type":"auto"`) {
+			t.Fatal(err, string(wire.Body))
+		}
+	}
+	responses, err := Request(ProtoResponses, ProviderAnthropic, "frontier", []byte(`{"parallel_tool_calls":false,"input":"hi"}`))
+	if err != nil || !strings.Contains(string(responses.Body), `"disable_parallel_tool_use":true`) {
+		t.Fatal(err, string(responses.Body))
+	}
+	plain, err := Request(ProtoChat, ProviderAnthropic, "frontier", []byte(`{"tool_choice":"auto","messages":[{"role":"user","content":"hi"}]}`))
+	if err != nil || strings.Contains(string(plain.Body), "disable_parallel_tool_use") {
+		t.Fatal(err, string(plain.Body))
+	}
 }
 
 func TestChatStreamClosesContentBlocks(t *testing.T) {

@@ -1142,48 +1142,58 @@ func copyStop(dst map[string]any, value any) error {
 }
 
 func applyToolChoice(dst, src map[string]any, toAnthropic bool) error {
-	value, ok := src["tool_choice"]
-	parallel, hasParallel := src["parallel_tool_calls"]
-	if toAnthropic && hasParallel {
-		if _, valid := parallel.(bool); !valid {
-			return fmt.Errorf("parallel_tool_calls must be a boolean")
+	if toAnthropic {
+		choice, err := openAIToolChoiceToAnthropic(src["tool_choice"], parallelDisabled(src))
+		if err != nil {
+			return err
 		}
-		if !ok || value == nil {
-			value = "auto"
+		if choice != nil {
+			dst["tool_choice"] = choice
 		}
-	} else if !ok || value == nil {
 		return nil
 	}
-	var choice any
-	var err error
-	if toAnthropic {
-		choice, err = openAIToolChoiceToAnthropic(value)
-	} else {
-		choice, err = anthropicToolChoiceToOpenAI(value)
+	value, ok := src["tool_choice"]
+	if !ok || value == nil {
+		return nil
 	}
+	choice, err := anthropicToolChoiceToOpenAI(value)
 	if err != nil {
 		return err
-	}
-	if toAnthropic && hasParallel {
-		choice.(map[string]any)["disable_parallel_tool_use"] = !parallel.(bool)
 	}
 	dst["tool_choice"] = choice
 	return nil
 }
 
-func openAIToolChoiceToAnthropic(value any) (any, error) {
+func parallelDisabled(src map[string]any) bool {
+	disabled, ok := src["parallel_tool_calls"].(bool)
+	return ok && !disabled
+}
+
+func openAIToolChoiceToAnthropic(value any, disableParallel bool) (any, error) {
+	if value == nil {
+		if !disableParallel {
+			return nil, nil
+		}
+		return map[string]any{"type": "auto", "disable_parallel_tool_use": true}, nil
+	}
 	switch choice := value.(type) {
 	case string:
+		var kind string
 		switch choice {
 		case "none":
-			return map[string]any{"type": "none"}, nil
+			kind = "none"
 		case "auto":
-			return map[string]any{"type": "auto"}, nil
+			kind = "auto"
 		case "required":
-			return map[string]any{"type": "any"}, nil
+			kind = "any"
 		default:
 			return nil, fmt.Errorf("unsupported tool_choice %s for protocol translation", choice)
 		}
+		out := map[string]any{"type": kind}
+		if disableParallel && kind != "none" {
+			out["disable_parallel_tool_use"] = true
+		}
+		return out, nil
 	case map[string]any:
 		name, _ := choice["name"].(string)
 		fn, _ := choice["function"].(map[string]any)
@@ -1191,7 +1201,11 @@ func openAIToolChoiceToAnthropic(value any) (any, error) {
 			name, _ = fn["name"].(string)
 		}
 		if choice["type"] == "function" && name != "" {
-			return map[string]any{"type": "tool", "name": name}, nil
+			out := map[string]any{"type": "tool", "name": name}
+			if disableParallel {
+				out["disable_parallel_tool_use"] = true
+			}
+			return out, nil
 		}
 	}
 	return nil, fmt.Errorf("unsupported tool_choice for protocol translation")

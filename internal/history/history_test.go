@@ -96,6 +96,66 @@ func TestHistoryStaysInsideTheQuota(t *testing.T) {
 	}
 }
 
+func TestHistoryUpdatesAreSerializedAcrossStores(t *testing.T) {
+	previous, previousTask := maxHistoryBytes, maxTaskHistoryBytes
+	maxHistoryBytes = 8000
+	maxTaskHistoryBytes = 8000
+	t.Cleanup(func() {
+		maxHistoryBytes = previous
+		maxTaskHistoryBytes = previousTask
+	})
+	dir := t.TempDir()
+	path := filepath.Join(dir, "history.jsonl")
+	store, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	old := strings.Repeat("o", 180)
+	for i := 0; i < 30; i++ {
+		if err := store.Append(Record{TaskID: "old", StepID: fmt.Sprintf("o%d", i), OriginalTail: json.RawMessage(`"` + old + `"`)}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	var wg sync.WaitGroup
+	errs := make(chan error, 20)
+	for i := 0; i < 20; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			next, err := Open(path)
+			if err != nil {
+				errs <- err
+				return
+			}
+			errs <- next.Append(Record{TaskID: "new", StepID: fmt.Sprintf("n%d", i), OriginalTail: json.RawMessage(`"row"`)})
+		}(i)
+	}
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	rows, err := Read(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	found := map[string]bool{}
+	for _, row := range rows {
+		if row.TaskID == "new" {
+			found[row.StepID] = true
+		}
+	}
+	if len(found) != 20 {
+		t.Fatalf("kept %d of 20 new rows", len(found))
+	}
+	info, err := os.Stat(path)
+	if err != nil || info.Size() > int64(maxHistoryBytes) {
+		t.Fatal(err, info.Size())
+	}
+}
+
 func TestConcurrentStoresPreserveAppendsDuringEviction(t *testing.T) {
 	oldTotal, oldTask := maxHistoryBytes, maxTaskHistoryBytes
 	maxHistoryBytes, maxTaskHistoryBytes = 10000, 10000

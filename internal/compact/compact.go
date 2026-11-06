@@ -161,9 +161,19 @@ func contentHasType(content any, kind string) bool {
 	return false
 }
 
-func roleOf(raw json.RawMessage) string {
+func decodeObject(raw []byte) (map[string]any, error) {
+	dec := json.NewDecoder(bytes.NewReader(raw))
+	dec.UseNumber()
 	var obj map[string]any
-	if err := json.Unmarshal(raw, &obj); err != nil {
+	if err := dec.Decode(&obj); err != nil {
+		return nil, err
+	}
+	return obj, nil
+}
+
+func roleOf(raw json.RawMessage) string {
+	obj, err := decodeObject(raw)
+	if err != nil {
 		return ""
 	}
 	role, _ := obj["role"].(string)
@@ -173,10 +183,8 @@ func roleOf(raw json.RawMessage) string {
 func textOfAll(items []json.RawMessage) string {
 	var buf bytes.Buffer
 	for _, item := range items {
-		var obj map[string]any
-		decoder := json.NewDecoder(bytes.NewReader(item))
-		decoder.UseNumber()
-		if err := decoder.Decode(&obj); err != nil {
+		obj, err := decodeObject(item)
+		if err != nil {
 			continue
 		}
 		if calls, ok := obj["tool_calls"].([]any); ok {
@@ -196,8 +204,8 @@ func textOfAll(items []json.RawMessage) string {
 
 func containsUnsummarized(items []json.RawMessage) bool {
 	for _, item := range items {
-		var obj map[string]any
-		if err := json.Unmarshal(item, &obj); err != nil {
+		obj, err := decodeObject(item)
+		if err != nil {
 			return true
 		}
 		if _, audio := obj["audio"]; audio || contentUnsummarized(obj["content"]) {
