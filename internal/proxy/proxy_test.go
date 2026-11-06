@@ -1000,6 +1000,48 @@ func TestMessagesPrefixMatchUsesTheClientToolShape(t *testing.T) {
 	}
 }
 
+type splitTerminal struct {
+	parts  [][]byte
+	reads  atomic.Int32
+	closed chan struct{}
+	once   sync.Once
+}
+
+func (b *splitTerminal) Read(p []byte) (int, error) {
+	n := int(b.reads.Add(1))
+	if n <= len(b.parts) {
+		return copy(p, b.parts[n-1]), nil
+	}
+	<-b.closed
+	return 0, io.EOF
+}
+
+func (b *splitTerminal) Close() error {
+	b.once.Do(func() { close(b.closed) })
+	return nil
+}
+
+func TestTerminalEventKeepsItsBlankLine(t *testing.T) {
+	for _, parts := range [][][]byte{
+		{[]byte("data: [DONE]\n"), []byte("\n")},
+		{[]byte("data: [DONE]\n\n")},
+	} {
+		upstream := &splitTerminal{parts: parts, closed: make(chan struct{})}
+		resp := &http.Response{Body: upstream, StatusCode: http.StatusOK, Header: http.Header{}}
+		req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+		rec := httptest.NewRecorder()
+		New(config.Config{}, aiuditor.Stub{}, nil).stream(rec, req, resp, translate.Wire{Protocol: translate.ProtoChat}, time.Now(), nil, metrics.StepRecord{})
+		select {
+		case <-upstream.closed:
+		case <-time.After(time.Second):
+			t.Fatal("upstream body stayed open")
+		}
+		if upstream.reads.Load() != 1 || !strings.HasSuffix(rec.Body.String(), "data: [DONE]\n\n") || strings.Contains(rec.Body.String(), "data: [DONE]\n\n\n") {
+			t.Fatalf("reads %d body %q", upstream.reads.Load(), rec.Body.String())
+		}
+	}
+}
+
 func TestTerminalStreamClosesTheProviderBody(t *testing.T) {
 	for _, tc := range []struct {
 		path, provider, payload, want string
