@@ -468,3 +468,45 @@ func read(t *testing.T, path string) string {
 	}
 	return string(data)
 }
+
+func TestSyncUpdatesDerivedIDsWhenCollisionAppears(t *testing.T) {
+	dir := t.TempDir()
+	writeNote(t, dir, "a/index.md", "# Alpha\nALPHAONLY\n")
+	store := openTestStore(t, dir)
+	if _, err := store.Rebuild(dir); err != nil {
+		t.Fatal(err)
+	}
+	writeNote(t, dir, "b/index.md", "# Beta\n[[a/index]]\n")
+	if _, err := store.Sync(dir); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok, err := store.Get("a/index"); err != nil || !ok {
+		t.Fatal(err, ok)
+	}
+	if _, ok, err := store.Get("index"); err != nil || ok {
+		t.Fatal(err, ok)
+	}
+	neighbors, err := store.Neighbors("b/index")
+	if err != nil || len(neighbors) != 1 || neighbors[0] != "a/index" {
+		t.Fatal(err, neighbors)
+	}
+}
+
+func TestExactIDWinsOverTitleWhenResolvingLinks(t *testing.T) {
+	dir := t.TempDir()
+	writeNote(t, dir, "a.md", "---\nid: alpha\ntype: note\n---\n# beta\nWrong target\n")
+	writeNote(t, dir, "b.md", "---\nid: beta\ntype: steps\nstatus: open\n---\n# Actual step\n")
+	writeNote(t, dir, "goal.md", "---\nid: goal\ntype: goal\nstatus: done\n---\n# Goal\n[[beta]]\n")
+	store := openTestStore(t, dir)
+	if _, err := store.Rebuild(dir); err != nil {
+		t.Fatal(err)
+	}
+	neighbors, err := store.Neighbors("goal")
+	if err != nil || len(neighbors) != 1 || neighbors[0] != "beta" {
+		t.Fatal(err, neighbors)
+	}
+	violations, err := store.Violations()
+	if err != nil || len(violations) != 1 {
+		t.Fatal(err, violations)
+	}
+}
