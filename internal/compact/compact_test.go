@@ -21,6 +21,33 @@ func TestLeadingDeveloperMessageStaysInThePrefix(t *testing.T) {
 	}
 }
 
+func TestImageContentIsNotCompactedAway(t *testing.T) {
+	image := `{"role":"user","content":[{"type":"image_url","image_url":{"url":"data:image/png;base64,AAAA"}},{"type":"text","text":"diagram"}]}`
+	raw := []byte(`[` + image + `,{"role":"user","content":"` + strings.Repeat("word ", 80) + `"}]`)
+	plan, err := PlanMessages(raw, 10, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if plan.Needed || plan.SummaryInput != "" {
+		t.Fatal(plan.Needed, plan.SummaryInput)
+	}
+	anthropic := `{"role":"user","content":[{"type":"image","source":{"type":"base64","media_type":"image/png","data":"AAAA"}}]}`
+	raw = []byte(`[` + anthropic + `,{"role":"user","content":"` + strings.Repeat("word ", 80) + `"}]`)
+	plan, err = PlanMessages(raw, 10, 0)
+	if err != nil || plan.Needed {
+		t.Fatal(err, plan.Needed)
+	}
+	kept := `[{"role":"user","content":"` + strings.Repeat("word ", 80) + `"},` + image + `]`
+	plan, err = PlanMessages([]byte(kept), 10, 1)
+	if err != nil || !plan.Needed {
+		t.Fatal(err, plan.Needed)
+	}
+	out, err := ApplyMessages(plan, "goals")
+	if err != nil || !strings.Contains(string(out), "image_url") || strings.Contains(plan.SummaryInput, "AAAA") {
+		t.Fatal(err, plan.SummaryInput, string(out))
+	}
+}
+
 func TestPrefixMessagesStayByteStable(t *testing.T) {
 	system := `{"role":"system","name":"keep","content":"Stay stable."}`
 	raw := []byte(`[` + system + `,{"role":"user","content":"` + strings.Repeat("word ", 80) + `"}]`)
@@ -96,5 +123,45 @@ func TestShortTailIsLeftAlone(t *testing.T) {
 	}
 	if plan.Needed {
 		t.Fatal("short tail should stay")
+	}
+}
+func TestUnsupportedOlderContentPreventsCompaction(t *testing.T) {
+	for _, block := range []string{
+		`{"type":"image_url","image_url":{"url":"https://example.invalid/image"}}`,
+		`{"type":"image","source":{"type":"base64","data":"image"}}`,
+		`{"type":"tool_result","tool_use_id":"tool","content":[{"type":"image","source":{}}]}`,
+		`{"type":"unknown","text":"caption"}`,
+	} {
+		raw := []byte(`[{"role":"user","content":[{"type":"text","text":"` + strings.Repeat("long ", 80) + `"},` + block + `]},{"role":"user","content":"What was in the image?"}]`)
+		plan, err := PlanMessages(raw, 10, 1)
+		if err != nil || plan.Needed {
+			t.Fatal(err, plan.Needed, block)
+		}
+	}
+}
+
+func TestUnsupportedRecentContentIsRetained(t *testing.T) {
+	image := `{"role":"user","content":[{"type":"image_url","image_url":{"url":"https://example.invalid/image"}}]}`
+	raw := []byte(`[{"role":"user","content":"` + strings.Repeat("long ", 80) + `"},` + image + `]`)
+	plan, err := PlanMessages(raw, 10, 1)
+	if err != nil || !plan.Needed {
+		t.Fatal(err, plan.Needed)
+	}
+	result, err := ApplyMessages(plan, "summary")
+	if err != nil || !strings.Contains(string(result), image) {
+		t.Fatal(err, string(result))
+	}
+}
+
+func TestTopLevelAudioAndOpaqueContentPreventCompaction(t *testing.T) {
+	for _, message := range []string{
+		`{"role":"assistant","content":"spoken words","audio":{"id":"audio-1"}}`,
+		`{"role":"user","content":{"image":"opaque"}}`,
+	} {
+		raw := []byte(`[` + message + `,{"role":"user","content":"` + strings.Repeat("question ", 80) + `"}]`)
+		plan, err := PlanMessages(raw, 10, 1)
+		if err != nil || plan.Needed {
+			t.Fatal(err, plan.Needed)
+		}
 	}
 }

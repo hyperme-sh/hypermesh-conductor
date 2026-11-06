@@ -738,6 +738,43 @@ func TestStreamFlushFailureClosesUpstream(t *testing.T) {
 	}
 }
 
+type unexpectedEOFBody struct {
+	sent bool
+}
+
+func (b *unexpectedEOFBody) Read(p []byte) (int, error) {
+	if b.sent {
+		return 0, io.EOF
+	}
+	b.sent = true
+	msg := []byte("data: {\"usage\":{\"prompt_tokens\":3,\"completion_tokens\":1}}\n\n")
+	n := copy(p, msg)
+	return n, io.ErrUnexpectedEOF
+}
+
+func (b *unexpectedEOFBody) Close() error { return nil }
+
+func TestPassthroughReadErrorStaysUncertain(t *testing.T) {
+	dir := t.TempDir()
+	journal := openJournal(t, dir)
+	cfg := loadTestConfig(t, dir, "http://127.0.0.1:9/v1", "http://127.0.0.1:9/v1", config.AuthPassthrough, config.ProviderOpenAICompatible)
+	resp := &http.Response{Body: &unexpectedEOFBody{}, StatusCode: http.StatusOK, Header: http.Header{}}
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+	rec := httptest.NewRecorder()
+	record := metrics.StepRecord{
+		TaskID: "task-1", StepID: "trunc-1", JobClass: "parse", Tier: "cheap", ModelID: "local-small",
+		PrefixSHA256: strings.Repeat("a", 64), UsageStatus: metrics.StatusUncertain,
+	}
+	New(cfg, aiuditor.Stub{}, journal).stream(rec, req, resp, translate.Wire{Protocol: translate.ProtoChat}, time.Now(), nil, record)
+	if !strings.Contains(rec.Body.String(), "provider request failed") {
+		t.Fatal(rec.Body.String())
+	}
+	rows, err := metrics.ReadJournal(journal.Path())
+	if err != nil || len(rows) != 1 || rows[0].Error == nil || rows[0].UsageStatus != metrics.StatusUncertain || rows[0].InputTokens != nil {
+		t.Fatal(err, rows)
+	}
+}
+
 func TestStreamWriteFailureClosesUpstream(t *testing.T) {
 	events := make([]string, 100)
 	for i := range events {
