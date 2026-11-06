@@ -983,6 +983,9 @@ func (p *Proxy) applyReview(w http.ResponseWriter, r *http.Request, base *metric
 	if hopErr != nil {
 		if p.Config.AIU.FailClosed || errors.Is(hopErr, aiuditor.ErrResponseBudget) {
 			msg := "aiuditor unreachable"
+			if errors.Is(hopErr, aiuditor.ErrResponseBudget) {
+				msg = "request body budget exceeded"
+			}
 			base.Error = &msg
 			base.UsageStatus = metrics.StatusUncertain
 			p.finish(w, r, http.StatusServiceUnavailable, nil, *base, nil, false)

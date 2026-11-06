@@ -445,6 +445,40 @@ func TestPaddedStreamReleasesTheRawBodyBudget(t *testing.T) {
 	}
 }
 
+func TestAIUVerdictIsReservedWhileItIsRead(t *testing.T) {
+	previous := bodyLimit
+	bodyLimit = 4096
+	t.Cleanup(func() {
+		bodyMu.Lock()
+		bodyUsed = 0
+		bodyLimit = previous
+		bodyMu.Unlock()
+	})
+	var upstreamHits int
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		upstreamHits++
+		_, _ = w.Write([]byte(`{"usage":{"prompt_tokens":1,"completion_tokens":1}}`))
+	}))
+	defer upstream.Close()
+	verdict := `{"action":"modify","reason":"grow","body":{"messages":[{"role":"user","content":"` + strings.Repeat("y", 6000) + `"}]}}`
+	var hopHits int
+	hop := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hopHits++
+		_, _ = io.WriteString(w, verdict)
+	}))
+	defer hop.Close()
+	dir := t.TempDir()
+	cfg := loadTestConfig(t, dir, upstream.URL+"/v1", upstream.URL+"/v1", config.AuthPassthrough, config.ProviderOpenAICompatible)
+	cfg.AIU.FailClosed = false
+	rec := do(New(cfg, aiuditor.HTTP{URL: hop.URL, Timeout: time.Second}, openJournal(t, dir)), "/v1/chat/completions", "parse", "task-1", "hop-budget", "", `{"messages":[{"role":"user","content":"hi"}]}`)
+	bodyMu.Lock()
+	used := bodyUsed
+	bodyMu.Unlock()
+	if rec.Code != http.StatusServiceUnavailable || hopHits != 1 || upstreamHits != 0 || used != 0 || !strings.Contains(rec.Body.String(), "budget") {
+		t.Fatalf("code %d hop %d upstream %d used %d body %s", rec.Code, hopHits, upstreamHits, used, rec.Body.String())
+	}
+}
+
 func TestProviderResponsesShareTheBodyBudget(t *testing.T) {
 	previous := bodyLimit
 	bodyLimit = 2500
