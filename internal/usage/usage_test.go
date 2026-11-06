@@ -39,6 +39,18 @@ func TestMissingAndPartialStayNull(t *testing.T) {
 	}
 }
 
+func TestResponsesUsageDetailsCachedTokens(t *testing.T) {
+	parsed := ParseOpenAI([]byte(`{"usage":{"input_tokens":100,"output_tokens":5,"input_tokens_details":{"cached_tokens":80}}}`), false)
+	if parsed.Status != Measured || *parsed.Input != 100 || *parsed.Output != 5 || parsed.Cache == nil || *parsed.Cache != 80 {
+		t.Fatalf("%+v", parsed)
+	}
+	acc := UncertainUsage()
+	Absorb(&acc, []byte(`{"type":"response.completed","response":{"usage":{"input_tokens":100,"output_tokens":5,"input_tokens_details":{"cached_tokens":80}}}}`), false)
+	if acc.Status != Measured || *acc.Input != 100 || *acc.Output != 5 || acc.Cache == nil || *acc.Cache != 80 {
+		t.Fatalf("%+v", acc)
+	}
+}
+
 func TestEmbeddingsOmitCompletion(t *testing.T) {
 	parsed := ParseOpenAI([]byte(`{"usage":{"prompt_tokens":8,"total_tokens":8}}`), true)
 	if parsed.Status != Measured || *parsed.Input != 8 || *parsed.Output != 0 || parsed.Cache != nil {

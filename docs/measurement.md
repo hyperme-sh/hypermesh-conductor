@@ -20,7 +20,7 @@ Schema for `conductor summary`: `hypermesh.conductor.efficiency.v0`.
 | `cost_proxy`, `cost_proxy_label`, `cost_per_step` | Labeled proxy, or null |
 | `accuracy` | Always null here |
 
-Cache-hit tokens are read from `usage.prompt_tokens_details.cached_tokens` when that field is present, otherwise from `usage.prompt_cache_hit_tokens`, otherwise from Anthropic `cache_read_input_tokens`. A missing field stays null. A reported zero stays zero. Anthropic `input_tokens` counts only uncached input, so the journal adds `cache_read_input_tokens` and `cache_creation_input_tokens` to that input total. OpenAI `prompt_tokens` is already the total.
+Cache-hit tokens are read from `usage.prompt_tokens_details.cached_tokens` when that field is present, otherwise from Responses `usage.input_tokens_details.cached_tokens`, otherwise from `usage.prompt_cache_hit_tokens`, otherwise from Anthropic `cache_read_input_tokens`. A missing field stays null. A reported zero stays zero. Anthropic `input_tokens` counts only uncached input, so the journal adds `cache_read_input_tokens` and `cache_creation_input_tokens` to that input total. OpenAI `prompt_tokens` is already the total.
 
 Usage that is missing, partial, negative, or the wrong JSON type is `uncertain`. Token counts and the cost proxy on that row are null.
 

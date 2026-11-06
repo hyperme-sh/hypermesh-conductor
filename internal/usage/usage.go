@@ -196,14 +196,20 @@ func expandAnthropicInput(usage map[string]any, input *int, inputOK bool) (*int,
 }
 
 func cacheCount(usage map[string]any) (*int, bool, bool) {
-	if details, ok := usage["prompt_tokens_details"].(map[string]any); ok {
-		if value, ok := details["cached_tokens"]; ok && value != nil {
-			count, good := nonNegInt(value)
-			if !good {
-				return nil, false, true
-			}
-			return &count, true, false
+	for _, key := range []string{"prompt_tokens_details", "input_tokens_details"} {
+		details, ok := usage[key].(map[string]any)
+		if !ok {
+			continue
 		}
+		value, ok := details["cached_tokens"]
+		if !ok || value == nil {
+			continue
+		}
+		count, good := nonNegInt(value)
+		if !good {
+			return nil, false, true
+		}
+		return &count, true, false
 	}
 	if value, ok := usage["prompt_cache_hit_tokens"]; ok && value != nil {
 		count, good := nonNegInt(value)
