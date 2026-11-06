@@ -157,7 +157,8 @@ func (s *Stream) Consume(chunk []byte) []byte {
 		line := strings.TrimRight(string(s.buf[:i]), "\r")
 		s.buf = s.buf[i+1:]
 		out.Write(s.onLine(line))
-		if s.failed {
+		if s.done || s.failed {
+			s.Close()
 			break
 		}
 		needed := s.retainedSize()

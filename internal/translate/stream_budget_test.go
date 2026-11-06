@@ -71,3 +71,17 @@ func TestProviderMetadataRemainsCharged(t *testing.T) {
 		t.Fatalf("event retained backing bytes: %d", used)
 	}
 }
+
+func TestTerminalEventReleasesWithoutTransportEOF(t *testing.T) {
+	for _, terminal := range []string{"data: {\"type\":\"message_stop\"}\n\n", "data: [DONE]\n\n", "data: {\"type\":\"error\",\"error\":{\"message\":\"failed\"}}\n\n"} {
+		s := NewStream(ProtoResponses, ProtoMessages)
+		s.Consume([]byte("data: {\"type\":\"content_block_delta\",\"delta\":{\"type\":\"text_delta\",\"text\":\"retained text\"}}\n\n"))
+		out := s.Consume([]byte(terminal))
+		if len(out) == 0 || !s.closed || retainedStreamBytes.Load() != 0 {
+			t.Fatalf("terminal failed to release: closed=%v held=%d", s.closed, retainedStreamBytes.Load())
+		}
+		if len(s.Consume([]byte("data: ignored\n\n"))) != 0 {
+			t.Fatal("processed bytes after terminal event")
+		}
+	}
+}
