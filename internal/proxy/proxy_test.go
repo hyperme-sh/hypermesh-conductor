@@ -1001,6 +1001,35 @@ func TestMessagesPrefixMatchUsesTheClientToolShape(t *testing.T) {
 	}
 }
 
+func TestTerminalSSEEventIncludesTheBlankLine(t *testing.T) {
+	for _, event := range []string{
+		"data: [DONE]\n",
+		"data: {\"type\":\"response.completed\",\"response\":{\"usage\":{\"input_tokens\":1,\"output_tokens\":1}}}\n",
+	} {
+		body := &scriptBody{events: []string{
+			"data: {\"choices\":[{\"delta\":{\"content\":\"yo\"}}]}\n\n",
+			event,
+			"\n",
+		}, closed: make(chan struct{})}
+		resp := &http.Response{Body: body, StatusCode: http.StatusOK, Header: http.Header{}}
+		req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+		rec := httptest.NewRecorder()
+		New(config.Config{}, aiuditor.Stub{}, nil).stream(rec, req, resp, translate.Wire{Protocol: translate.ProtoChat}, time.Now(), nil, metrics.StepRecord{})
+		got := rec.Body.String()
+		if !strings.Contains(got, strings.TrimSuffix(event, "\n")+"\n\n") {
+			t.Fatalf("%q", got)
+		}
+		select {
+		case <-body.closed:
+		case <-time.After(time.Second):
+			t.Fatal("upstream body stayed open")
+		}
+		if body.i != 2 {
+			t.Fatalf("reads %d", body.i)
+		}
+	}
+}
+
 func TestTerminalStreamClosesTheProviderBody(t *testing.T) {
 	for _, tc := range []struct {
 		path, provider, payload, want string

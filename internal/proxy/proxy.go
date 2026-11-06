@@ -455,6 +455,9 @@ func (p *Proxy) stream(w http.ResponseWriter, client *http.Request, resp *http.R
 				break
 			}
 			if passthrough {
+				if terminal && !sseEventClosed(ready) {
+					ready = append(ready, '\n')
+				}
 				if !writeClient(ready) {
 					break
 				}
@@ -906,6 +909,10 @@ func authorizeProxy(src *http.Request) error {
 		return proxyAuthError{"proxy token is required to use the configured provider key"}
 	}
 	return nil
+}
+
+func sseEventClosed(ready []byte) bool {
+	return bytes.HasSuffix(ready, []byte("\n\n")) || bytes.HasSuffix(ready, []byte("\n\r\n"))
 }
 
 func streamDone(line []byte) bool {
