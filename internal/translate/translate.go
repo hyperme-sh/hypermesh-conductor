@@ -4,6 +4,7 @@
 package translate
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"strings"
@@ -134,7 +135,7 @@ func setModelPreserve(body []byte, model string) ([]byte, error) {
 
 func chatToAnthropic(body []byte, model string) ([]byte, error) {
 	var req map[string]any
-	if err := json.Unmarshal(body, &req); err != nil {
+	if err := decodeJSON(body, &req); err != nil {
 		return nil, fmt.Errorf("request body is not JSON")
 	}
 	messages, _ := req["messages"].([]any)
@@ -167,7 +168,7 @@ func chatToAnthropic(body []byte, model string) ([]byte, error) {
 
 func anthropicToChat(body []byte, model string) ([]byte, error) {
 	var req map[string]any
-	if err := json.Unmarshal(body, &req); err != nil {
+	if err := decodeJSON(body, &req); err != nil {
 		return nil, fmt.Errorf("request body is not JSON")
 	}
 	messages := []any{}
@@ -205,7 +206,7 @@ func anthropicToChat(body []byte, model string) ([]byte, error) {
 
 func responsesToAnthropic(body []byte, model string) ([]byte, error) {
 	var req map[string]any
-	if err := json.Unmarshal(body, &req); err != nil {
+	if err := decodeJSON(body, &req); err != nil {
 		return nil, fmt.Errorf("request body is not JSON")
 	}
 	if prior, ok := req["previous_response_id"].(string); ok && strings.TrimSpace(prior) != "" {
@@ -332,7 +333,7 @@ func splitChatMessages(messages []any) (string, []any, error) {
 					name, _ := fn["name"].(string)
 					args, _ := fn["arguments"].(string)
 					var parsed any
-					if args != "" && json.Unmarshal([]byte(args), &parsed) == nil {
+					if args != "" && decodeJSON([]byte(args), &parsed) == nil {
 						// parsed object
 					} else {
 						parsed = map[string]any{}
@@ -562,7 +563,7 @@ func responsesArguments(value any) (any, error) {
 			return map[string]any{}, nil
 		}
 		var parsed any
-		if err := json.Unmarshal([]byte(args), &parsed); err != nil {
+		if err := decodeJSON([]byte(args), &parsed); err != nil {
 			return nil, fmt.Errorf("unsupported content for protocol translation")
 		}
 		if _, ok := parsed.(map[string]any); !ok {
@@ -714,7 +715,7 @@ func anthropicToolsToOpenAI(tools []any) []any {
 
 func anthropicResponseToChat(body []byte) ([]byte, error) {
 	var msg map[string]any
-	if err := json.Unmarshal(body, &msg); err != nil {
+	if err := decodeJSON(body, &msg); err != nil {
 		return nil, fmt.Errorf("provider response was not JSON")
 	}
 	text, err := anthropicContentToText(msg["content"])
@@ -745,7 +746,7 @@ func anthropicResponseToChat(body []byte) ([]byte, error) {
 
 func chatResponseToAnthropic(body []byte) ([]byte, error) {
 	var msg map[string]any
-	if err := json.Unmarshal(body, &msg); err != nil {
+	if err := decodeJSON(body, &msg); err != nil {
 		return nil, fmt.Errorf("provider response was not JSON")
 	}
 	text := ""
@@ -761,7 +762,7 @@ func chatResponseToAnthropic(body []byte) ([]byte, error) {
 				args, _ := fn["arguments"].(string)
 				var parsed any = map[string]any{}
 				if args != "" {
-					_ = json.Unmarshal([]byte(args), &parsed)
+					_ = decodeJSON([]byte(args), &parsed)
 				}
 				toolBlocks = append(toolBlocks, map[string]any{
 					"type":  "tool_use",
@@ -793,7 +794,7 @@ func chatResponseToAnthropic(body []byte) ([]byte, error) {
 
 func anthropicResponseToResponses(body []byte) ([]byte, error) {
 	var msg map[string]any
-	if err := json.Unmarshal(body, &msg); err != nil {
+	if err := decodeJSON(body, &msg); err != nil {
 		return nil, fmt.Errorf("provider response was not JSON")
 	}
 	output, err := anthropicContentToResponsesOutput(msg["content"])
@@ -1260,6 +1261,12 @@ func ClientTools(proto string, tools []any) []any {
 		return openaiToolsToAnthropic(tools)
 	}
 	return tools
+}
+
+func decodeJSON(raw []byte, dest any) error {
+	dec := json.NewDecoder(bytes.NewReader(raw))
+	dec.UseNumber()
+	return dec.Decode(dest)
 }
 
 func stringField(obj map[string]any, key string) string {

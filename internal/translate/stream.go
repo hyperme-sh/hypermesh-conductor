@@ -9,28 +9,30 @@ import (
 // Stream converts upstream SSE into the client protocol.
 // Same-protocol streams are copied through.
 type Stream struct {
-	client      string
-	upstream    string
-	buf         []byte
-	event       string
-	id          string
-	opened      bool
-	done        bool
-	failed      bool
-	toolSlots   map[int]int
-	nextTool    int
-	chatTools   map[int]int
-	chatUsage   map[string]any
-	nextContent int
-	respOpened  bool
-	respText    strings.Builder
-	textOpen    bool
-	textIndex   int
-	nextOut     int
-	respCalls   []responseCall
-	respStop    string
-	translated  int
-	tooLarge    bool
+	client       string
+	upstream     string
+	buf          []byte
+	event        string
+	id           string
+	opened       bool
+	done         bool
+	failed       bool
+	toolSlots    map[int]int
+	nextTool     int
+	chatTools    map[int]int
+	chatUsage    map[string]any
+	nextContent  int
+	respOpened   bool
+	respText     strings.Builder
+	textOpen     bool
+	textIndex    int
+	nextOut      int
+	respCalls    []responseCall
+	respStop     string
+	finishSeen   bool
+	finishReason string
+	translated   int
+	tooLarge     bool
 }
 
 type responseCall struct {
@@ -134,6 +136,9 @@ func (s *Stream) Finish() []byte {
 	if s.passthrough() || s.done || s.failed {
 		return nil
 	}
+	if s.client == ProtoMessages && s.upstream == ProtoChat {
+		return s.closeAnthropic()
+	}
 	s.done = true
 	if s.client == ProtoMessages {
 		return []byte("event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n")
@@ -157,6 +162,9 @@ func (s *Stream) onLine(line string) []byte {
 	}
 	data := strings.TrimSpace(strings.TrimPrefix(line, "data:"))
 	if data == "[DONE]" {
+		if s.client == ProtoMessages && s.upstream == ProtoChat && !s.done {
+			return s.closeAnthropic()
+		}
 		s.done = true
 		if s.client == ProtoMessages {
 			return []byte("event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n")
@@ -164,7 +172,7 @@ func (s *Stream) onLine(line string) []byte {
 		return []byte("data: [DONE]\n\n")
 	}
 	var obj map[string]any
-	if err := json.Unmarshal([]byte(data), &obj); err != nil {
+	if err := decodeJSON([]byte(data), &obj); err != nil {
 		return nil
 	}
 	kind, _ := obj["type"].(string)
@@ -278,8 +286,14 @@ func (s *Stream) chatToAnthropic(obj map[string]any) []byte {
 		}))
 		s.nextContent = 1
 	}
+	if usage, ok := obj["usage"].(map[string]any); ok && len(usage) > 0 {
+		s.chatUsage = mergeUsage(s.chatUsage, usage)
+	}
 	choices, _ := obj["choices"].([]any)
 	if len(choices) == 0 {
+		if s.finishSeen && len(s.chatUsage) > 0 {
+			out.Write(s.closeAnthropic())
+		}
 		return out.Bytes()
 	}
 	choice, _ := choices[0].(map[string]any)
@@ -295,21 +309,47 @@ func (s *Stream) chatToAnthropic(obj map[string]any) []byte {
 		out.Write(s.chatToolCalls(calls))
 	}
 	if finish, ok := choice["finish_reason"].(string); ok && finish != "" {
+		s.finishSeen = true
+		s.finishReason = finish
 		for i := 0; i < s.nextContent; i++ {
 			out.WriteString("event: content_block_stop\n")
 			out.Write(sseData(map[string]any{"type": "content_block_stop", "index": i}))
 		}
 		s.nextContent = 0
-		out.WriteString("event: message_delta\n")
-		out.Write(sseData(map[string]any{
-			"type":  "message_delta",
-			"delta": map[string]any{"stop_reason": mapStopToAnthropic(finish)},
-			"usage": map[string]any{},
-		}))
-		out.WriteString("event: message_stop\n")
-		out.Write(sseData(map[string]any{"type": "message_stop"}))
-		s.done = true
+		if len(s.chatUsage) > 0 {
+			out.Write(s.closeAnthropic())
+		}
 	}
+	return out.Bytes()
+}
+
+func (s *Stream) closeAnthropic() []byte {
+	if s.done {
+		return nil
+	}
+	var out bytes.Buffer
+	for i := 0; i < s.nextContent; i++ {
+		out.WriteString("event: content_block_stop\n")
+		out.Write(sseData(map[string]any{"type": "content_block_stop", "index": i}))
+	}
+	s.nextContent = 0
+	reason := s.finishReason
+	if reason == "" {
+		reason = "stop"
+	}
+	usage := map[string]any{}
+	if len(s.chatUsage) > 0 {
+		usage = usageToAnthropic(s.chatUsage)
+	}
+	out.WriteString("event: message_delta\n")
+	out.Write(sseData(map[string]any{
+		"type":  "message_delta",
+		"delta": map[string]any{"stop_reason": mapStopToAnthropic(reason)},
+		"usage": usage,
+	}))
+	out.WriteString("event: message_stop\n")
+	out.Write(sseData(map[string]any{"type": "message_stop"}))
+	s.done = true
 	return out.Bytes()
 }
 
@@ -614,6 +654,9 @@ func eventIndex(value any) (int, bool) {
 		return int(n), true
 	case int:
 		return n, true
+	case json.Number:
+		i, err := n.Int64()
+		return int(i), err == nil
 	default:
 		return 0, false
 	}

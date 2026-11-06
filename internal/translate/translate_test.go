@@ -179,7 +179,7 @@ func TestToolChoiceCrossesTheProtocolBoundary(t *testing.T) {
 func TestChatStreamClosesContentBlocks(t *testing.T) {
 	stream := NewStream(ProtoMessages, ProtoChat)
 	chunk := "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_w\",\"type\":\"function\",\"function\":{\"name\":\"weather\",\"arguments\":\"\"}}]},\"finish_reason\":\"tool_calls\"}]}\n\n"
-	out := string(stream.Consume([]byte(chunk)))
+	out := string(stream.Consume([]byte(chunk))) + string(stream.Finish())
 	if !strings.Contains(out, `"type":"content_block_stop"`) || strings.Index(out, "content_block_stop") > strings.Index(out, "message_delta") {
 		t.Fatal(out)
 	}
@@ -228,6 +228,37 @@ func TestStreamDropsAnOversizedLine(t *testing.T) {
 	out := stream.Consume([]byte(strings.Repeat("a", 40)))
 	if !stream.TooLarge() || len(stream.buf) != 0 || !strings.Contains(string(out), "too large") {
 		t.Fatalf("large %v buf %d out %s", stream.TooLarge(), len(stream.buf), out)
+	}
+}
+
+func TestChatStreamUsageReachesMessages(t *testing.T) {
+	stream := NewStream(ProtoMessages, ProtoChat)
+	finish := "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n"
+	usage := "data: {\"choices\":[],\"usage\":{\"prompt_tokens\":100,\"completion_tokens\":5,\"prompt_tokens_details\":{\"cached_tokens\":80}}}\n\n"
+	out := string(stream.Consume([]byte(finish))) + string(stream.Consume([]byte(usage)))
+	if strings.Contains(out, `"usage":{}`) || !strings.Contains(out, `"input_tokens":20`) || !strings.Contains(out, `"cache_read_input_tokens":80`) || !strings.Contains(out, `"output_tokens":5`) {
+		t.Fatal(out)
+	}
+}
+
+func TestLargeToolIntegersStayExact(t *testing.T) {
+	body := []byte(`{"messages":[{"role":"assistant","content":[{"type":"tool_use","id":"call_1","name":"lookup","input":{"record_id":9007199254740993}}]}]}`)
+	wire, err := Request(ProtoMessages, ProviderOpenAI, "frontier", body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(wire.Body)
+	if !strings.Contains(text, "9007199254740993") || strings.Contains(text, "9007199254740992") {
+		t.Fatal(text)
+	}
+	back := []byte(`{"messages":[{"role":"assistant","tool_calls":[{"id":"call_1","type":"function","function":{"name":"lookup","arguments":"{\"record_id\":9007199254740993}"}}]}]}`)
+	returned, err := Request(ProtoChat, ProviderAnthropic, "frontier", back)
+	if err != nil {
+		t.Fatal(err)
+	}
+	text = string(returned.Body)
+	if !strings.Contains(text, "9007199254740993") || strings.Contains(text, "9007199254740992") {
+		t.Fatal(text)
 	}
 }
 

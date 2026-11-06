@@ -198,9 +198,14 @@ func runCmd(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintln(stderr, err.Error())
 		return 2
 	}
+	class, err := routing.CanonicalClass(*className)
+	if err != nil {
+		fmt.Fprintln(stderr, err.Error())
+		return 2
+	}
 	body := map[string]any{}
 	path := "/v1/chat/completions"
-	if *className == "embed" || *className == "embeddings" {
+	if class == "embed" {
 		if *input == "" {
 			fmt.Fprintln(stderr, "embed steps need input text")
 			return 2
@@ -216,7 +221,7 @@ func runCmd(args []string, stdout, stderr io.Writer) int {
 	}
 	raw, _ := json.Marshal(body)
 	req := httptest.NewRequest(http.MethodPost, path, bytes.NewReader(raw))
-	req.Header.Set("X-Conductor-Class", *className)
+	req.Header.Set("X-Conductor-Class", class)
 	req.Header.Set("X-Conductor-Task", *taskID)
 	req.Header.Set("X-Conductor-Step", *stepID)
 	if *suggest != "" {

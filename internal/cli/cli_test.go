@@ -145,6 +145,37 @@ func TestRunStopsBeforeTheProviderWhenTheJournalDirectoryIsMissing(t *testing.T)
 	}
 }
 
+func TestRunEmbeddingAliasUsesTheEmbeddingsEndpoint(t *testing.T) {
+	var path string
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		path = r.URL.Path
+		_, _ = w.Write([]byte(`{"data":[{"embedding":[0.1]}],"usage":{"prompt_tokens":1,"total_tokens":1}}`))
+	}))
+	defer upstream.Close()
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "endpoints.json")
+	raw := fmt.Sprintf(`{
+		"listen": "127.0.0.1:8787",
+		"tiers": {
+			"cheap": {"provider":"openai-compatible","base_url":%q,"model":"local-small","auth":"passthrough","timeout_seconds":1},
+			"frontier": {"provider":"openai-compatible","base_url":%q,"model":"frontier","auth":"passthrough","timeout_seconds":1}
+		},
+		"prefix": {"system":"You are Conductor.","tools":[]},
+		"aiuditor": {"mode":"stub","fail_closed":true}
+	}`, upstream.URL+"/v1", upstream.URL+"/v1")
+	if err := os.WriteFile(configPath, []byte(raw), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	var stdout, stderr bytes.Buffer
+	code := Main([]string{
+		"run", "--config", configPath, "--journal", filepath.Join(dir, "journal.jsonl"),
+		"--class", "embedding", "--task", "task-1", "--step", "step-1", "--input", "test",
+	}, &stdout, &stderr)
+	if code != 0 || path != "/v1/embeddings" || strings.Contains(stderr.String(), "a chat step needs a message") {
+		t.Fatalf("code %d path %s stderr %s stdout %s", code, path, stderr.String(), stdout.String())
+	}
+}
+
 func TestRunRefusesEnvKeyWithoutProxyToken(t *testing.T) {
 	hits := 0
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

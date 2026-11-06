@@ -5,6 +5,22 @@ import (
 	"testing"
 )
 
+func TestLeadingDeveloperMessageStaysInThePrefix(t *testing.T) {
+	dev := `{"role":"developer","content":"Follow these rules"}`
+	raw := []byte(`[` + dev + `,{"role":"user","content":"` + strings.Repeat("word ", 80) + `"}]`)
+	plan, err := PlanMessages(raw, 10, 0)
+	if err != nil || !plan.Needed {
+		t.Fatal(err, plan.Needed)
+	}
+	if len(plan.PrefixRaw) != 1 || !strings.Contains(string(plan.PrefixRaw[0]), "Follow these rules") || strings.Contains(plan.SummaryInput, "Follow these rules") {
+		t.Fatal(string(plan.PrefixRaw[0]), plan.SummaryInput)
+	}
+	out, err := ApplyMessages(plan, "goals and facts")
+	if err != nil || !strings.Contains(string(out), `"role":"developer"`) || !strings.Contains(string(out), "Follow these rules") {
+		t.Fatal(err, string(out))
+	}
+}
+
 func TestPrefixMessagesStayByteStable(t *testing.T) {
 	system := `{"role":"system","name":"keep","content":"Stay stable."}`
 	raw := []byte(`[` + system + `,{"role":"user","content":"` + strings.Repeat("word ", 80) + `"}]`)

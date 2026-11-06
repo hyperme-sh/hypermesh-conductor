@@ -45,7 +45,7 @@ func PlanMessages(raw json.RawMessage, maxTail, recent int) (Plan, error) {
 	seenUser := false
 	for _, item := range items {
 		role := roleOf(item)
-		if role == "system" && !seenUser {
+		if (role == "system" || role == "developer") && !seenUser {
 			plan.PrefixRaw = append(plan.PrefixRaw, item)
 			continue
 		}
