@@ -48,6 +48,9 @@ type Proxy struct {
 	Hop     aiuditor.Hop
 	Journal *metrics.Journal
 	Logf    func(string, ...any)
+
+	transportOnce sync.Once
+	transport     *http.Transport
 }
 
 // New builds a proxy. A nil hop is replaced with an allow-all stub.
@@ -236,21 +239,7 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 func (p *Proxy) forward(w http.ResponseWriter, client *http.Request, upstream *http.Request, tier config.Tier, wire translate.Wire, stream bool, secrets []string, record metrics.StepRecord) {
 	start := time.Now()
-	httpClient := &http.Client{
-		CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
-		Transport: &http.Transport{
-			Proxy:                 nil,
-			ResponseHeaderTimeout: tier.Timeout,
-			DialContext:           (&net.Dialer{Timeout: 10 * time.Second}).DialContext,
-			MaxIdleConns:          10,
-			IdleConnTimeout:       30 * time.Second,
-			TLSHandshakeTimeout:   10 * time.Second,
-		},
-	}
-	if !stream {
-		httpClient.Timeout = tier.Timeout
-	}
-	resp, err := httpClient.Do(upstream)
+	resp, err := p.upstreamClient(tier.Timeout, stream).Do(upstream)
 	if err != nil {
 		ms := elapsedMS(start)
 		record.LatencyMS = &ms
@@ -837,6 +826,41 @@ func (p *Proxy) applyReview(w http.ResponseWriter, r *http.Request, base *metric
 		}
 	}
 	return prepared, false
+}
+
+// upstreamClient reuses one bounded transport for every provider call.
+// A fresh transport per request would keep its own idle sockets.
+func (p *Proxy) upstreamClient(timeout time.Duration, stream bool) *http.Client {
+	client := &http.Client{
+		CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
+		Transport:     p.sharedTransport(),
+	}
+	if !stream && timeout > 0 {
+		client.Timeout = timeout
+	}
+	return client
+}
+
+func (p *Proxy) sharedTransport() *http.Transport {
+	p.transportOnce.Do(func() {
+		headerTimeout := p.Config.Cheap.Timeout
+		if p.Config.Frontier.Timeout > headerTimeout {
+			headerTimeout = p.Config.Frontier.Timeout
+		}
+		if headerTimeout <= 0 {
+			headerTimeout = 60 * time.Second
+		}
+		p.transport = &http.Transport{
+			Proxy:                 nil,
+			DialContext:           (&net.Dialer{Timeout: 10 * time.Second}).DialContext,
+			ResponseHeaderTimeout: headerTimeout,
+			MaxIdleConns:          10,
+			MaxIdleConnsPerHost:   2,
+			IdleConnTimeout:       30 * time.Second,
+			TLSHandshakeTimeout:   10 * time.Second,
+		}
+	})
+	return p.transport
 }
 
 func forceStreamFlag(body []byte, stream bool) []byte {

@@ -7,7 +7,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"net"
 	"net/http"
 	"strings"
 	"time"
@@ -171,20 +170,8 @@ func (p *Proxy) cheapSummary(ctx context.Context, client *http.Request, tail str
 		}
 		req.Header.Set("anthropic-version", version)
 	}
-	httpClient := &http.Client{
-		Timeout:       tier.Timeout,
-		CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
-		Transport: &http.Transport{
-			Proxy:               nil,
-			DialContext:         (&net.Dialer{Timeout: 10 * time.Second}).DialContext,
-			TLSHandshakeTimeout: 10 * time.Second,
-			IdleConnTimeout:     30 * time.Second,
-			MaxIdleConns:        2,
-		},
-	}
-	defer httpClient.CloseIdleConnections()
 	start := time.Now()
-	resp, err := httpClient.Do(req)
+	resp, err := p.upstreamClient(tier.Timeout, false).Do(req)
 	latency := elapsedMS(start)
 	if err != nil {
 		return "", usage.UncertainUsage(), latency, err

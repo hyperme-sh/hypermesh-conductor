@@ -391,6 +391,20 @@ func TestTruncatedProviderBodyIsUncertain(t *testing.T) {
 	}
 }
 
+func TestOutboundTransportIsShared(t *testing.T) {
+	dir := t.TempDir()
+	cfg := loadTestConfig(t, dir, "http://127.0.0.1:9/v1", "http://127.0.0.1:9/v1", config.AuthPassthrough, config.ProviderOpenAICompatible)
+	proxy := New(cfg, aiuditor.Stub{}, nil)
+	first := proxy.sharedTransport()
+	second := proxy.sharedTransport()
+	if first != second || first.IdleConnTimeout <= 0 || first.MaxIdleConns <= 0 || first.MaxIdleConnsPerHost <= 0 {
+		t.Fatalf("timeout %s idle %d per-host %d same %v", first.IdleConnTimeout, first.MaxIdleConns, first.MaxIdleConnsPerHost, first == second)
+	}
+	if proxy.upstreamClient(time.Second, false).Transport != first || proxy.upstreamClient(time.Second, true).Transport != first {
+		t.Fatal("provider calls do not share one transport")
+	}
+}
+
 func TestServerBoundsInboundConnections(t *testing.T) {
 	dir := t.TempDir()
 	cfg := loadTestConfig(t, dir, "http://127.0.0.1:9/v1", "http://127.0.0.1:9/v1", config.AuthPassthrough, config.ProviderOpenAICompatible)
