@@ -703,6 +703,15 @@ func TestCleanEOFBeforeCompletionIsUncertain(t *testing.T) {
 	}
 }
 
+func TestKeylessCompactionDoesNotRequireAProxyToken(t *testing.T) {
+	t.Setenv(config.ProxyTokenEnv, "")
+	tier := config.Tier{Auth: config.AuthPassthroughOrEnv}
+	req := httptest.NewRequest(http.MethodPost, "/", nil)
+	if err := authorizeCompaction(req, tier); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestBrokenResponsesStreamIsNotCompleted(t *testing.T) {
 	payload := "event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"delta\":{\"type\":\"text_delta\",\"text\":\"partial\"}}\n\n"
 	base := truncatedServer(t, "200 OK", "text/event-stream", payload)
