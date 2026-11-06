@@ -21,6 +21,33 @@ func TestLeadingDeveloperMessageStaysInThePrefix(t *testing.T) {
 	}
 }
 
+func TestImageContentIsNotCompactedAway(t *testing.T) {
+	image := `{"role":"user","content":[{"type":"image_url","image_url":{"url":"data:image/png;base64,AAAA"}},{"type":"text","text":"diagram"}]}`
+	raw := []byte(`[` + image + `,{"role":"user","content":"` + strings.Repeat("word ", 80) + `"}]`)
+	plan, err := PlanMessages(raw, 10, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if plan.Needed || plan.SummaryInput != "" {
+		t.Fatal(plan.Needed, plan.SummaryInput)
+	}
+	anthropic := `{"role":"user","content":[{"type":"image","source":{"type":"base64","media_type":"image/png","data":"AAAA"}}]}`
+	raw = []byte(`[` + anthropic + `,{"role":"user","content":"` + strings.Repeat("word ", 80) + `"}]`)
+	plan, err = PlanMessages(raw, 10, 0)
+	if err != nil || plan.Needed {
+		t.Fatal(err, plan.Needed)
+	}
+	kept := `[{"role":"user","content":"` + strings.Repeat("word ", 80) + `"},` + image + `]`
+	plan, err = PlanMessages([]byte(kept), 10, 1)
+	if err != nil || !plan.Needed {
+		t.Fatal(err, plan.Needed)
+	}
+	out, err := ApplyMessages(plan, "goals")
+	if err != nil || !strings.Contains(string(out), "image_url") || strings.Contains(plan.SummaryInput, "AAAA") {
+		t.Fatal(err, plan.SummaryInput, string(out))
+	}
+}
+
 func TestPrefixMessagesStayByteStable(t *testing.T) {
 	system := `{"role":"system","name":"keep","content":"Stay stable."}`
 	raw := []byte(`[` + system + `,{"role":"user","content":"` + strings.Repeat("word ", 80) + `"}]`)

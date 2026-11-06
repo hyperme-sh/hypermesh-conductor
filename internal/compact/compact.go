@@ -74,6 +74,12 @@ func PlanMessages(raw json.RawMessage, maxTail, recent int) (Plan, error) {
 		split--
 	}
 	older := plan.TailRaw[:split]
+	if containsUnsummarized(older) {
+		plan.Needed = false
+		plan.RecentRaw = nil
+		plan.SummaryInput = ""
+		return plan, nil
+	}
 	if len(older) == 0 {
 		plan.Needed = false
 		plan.RecentRaw = nil
@@ -184,6 +190,42 @@ func textOfAll(items []json.RawMessage) string {
 		writeSummaryContent(&buf, obj["content"])
 	}
 	return buf.String()
+}
+
+func containsUnsummarized(items []json.RawMessage) bool {
+	for _, item := range items {
+		var obj map[string]any
+		if err := json.Unmarshal(item, &obj); err != nil {
+			return true
+		}
+		if contentUnsummarized(obj["content"]) {
+			return true
+		}
+	}
+	return false
+}
+
+func contentUnsummarized(content any) bool {
+	blocks, ok := content.([]any)
+	if !ok {
+		return false
+	}
+	for _, part := range blocks {
+		block, ok := part.(map[string]any)
+		if !ok {
+			return true
+		}
+		switch block["type"] {
+		case "text", "tool_use", "":
+		case "tool_result":
+			if contentUnsummarized(block["content"]) {
+				return true
+			}
+		default:
+			return true
+		}
+	}
+	return false
 }
 
 func writeSummaryContent(buf *bytes.Buffer, content any) {
