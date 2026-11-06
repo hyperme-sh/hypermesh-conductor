@@ -206,9 +206,9 @@ func (s *Store) syncDir(dir string, replace bool) (Stats, error) {
 	}
 	var stats Stats
 	stats.Warnings = warnings
-	seen := map[string]struct{}{}
+	seen := map[string]string{}
 	for _, note := range incoming {
-		seen[note.Path] = struct{}{}
+		seen[note.Path] = note.ID
 	}
 	for _, note := range incoming {
 		var existingHash, existingID string
@@ -330,10 +330,9 @@ type sqlDB interface {
 	QueryRow(query string, args ...any) *sql.Row
 }
 
-// releaseStaleOwner drops an indexed path for this id when that path is no
-// longer in the directory. A rename keeps the id. Two files that both still
-// exist and share an id stay a collision.
-func releaseStaleOwner(tx sqlDB, note Note, seen map[string]struct{}) error {
+// releaseStaleOwner drops obsolete ID-to-path ownership, including swaps.
+// Two incoming files that still claim the same ID remain a collision.
+func releaseStaleOwner(tx sqlDB, note Note, seen map[string]string) error {
 	var owner string
 	err := tx.QueryRow(`SELECT path FROM notes WHERE id = ?`, note.ID).Scan(&owner)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -345,7 +344,7 @@ func releaseStaleOwner(tx sqlDB, note Note, seen map[string]struct{}) error {
 	if owner == "" || owner == note.Path {
 		return nil
 	}
-	if _, ok := seen[owner]; ok {
+	if incomingID, ok := seen[owner]; ok && incomingID == note.ID {
 		return nil
 	}
 	return deletePath(tx, owner)
@@ -700,14 +699,8 @@ func markdownFiles(dir string) ([]string, error) {
 func ftsQuery(text string) string {
 	var tokens []string
 	seen := map[string]struct{}{}
-	for _, field := range strings.Fields(text) {
-		var b strings.Builder
-		for _, r := range field {
-			if unicodeLetter(r) {
-				b.WriteRune(r)
-			}
-		}
-		token := strings.ToLower(b.String())
+	for _, field := range strings.FieldsFunc(text, func(r rune) bool { return !unicodeLetter(r) }) {
+		token := strings.ToLower(field)
 		if len(token) < 3 {
 			continue
 		}

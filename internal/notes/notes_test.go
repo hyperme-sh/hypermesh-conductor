@@ -738,3 +738,49 @@ func TestIndexPathMetacharactersAndUnicodeSearch(t *testing.T) {
 		}
 	}
 }
+
+func TestSearchSplitsPunctuationLikeFTS(t *testing.T) {
+	for _, text := range []string{"api_key", "foo-bar", "owner.service"} {
+		t.Run(text, func(t *testing.T) {
+			dir := t.TempDir()
+			writeNote(t, dir, "identifier.md", "# Identifier\n"+text+"\n")
+			store := openTestStore(t, dir)
+			if _, err := store.Rebuild(dir); err != nil {
+				t.Fatal(err)
+			}
+			got, err := store.Search(text, 5)
+			if err != nil || len(got) != 1 {
+				t.Fatalf("search %q: %v %v", text, got, err)
+			}
+		})
+	}
+}
+
+func TestSyncSwappedExplicitIDs(t *testing.T) {
+	dir := t.TempDir()
+	alpha := "---\nid: alpha\n---\n# Alpha\nALPHABODY [[beta]]\n"
+	beta := "---\nid: beta\n---\n# Beta\nBETABODY [[alpha]]\n"
+	writeNote(t, dir, "a.md", alpha)
+	writeNote(t, dir, "b.md", beta)
+	store := openTestStore(t, dir)
+	if _, err := store.Rebuild(dir); err != nil {
+		t.Fatal(err)
+	}
+	writeNote(t, dir, "a.md", beta)
+	writeNote(t, dir, "b.md", alpha)
+	for i := 0; i < 2; i++ {
+		stats, err := store.Sync(dir)
+		if err != nil || len(stats.Warnings) > 0 {
+			t.Fatalf("sync: %+v %v", stats, err)
+		}
+		for id, path := range map[string]string{"alpha": "b.md", "beta": "a.md"} {
+			note, ok, err := store.Get(id)
+			if err != nil || !ok || note.Path != filepath.Join(dir, path) {
+				t.Fatalf("%s: %+v %v", id, note, err)
+			}
+		}
+		if stats.Links != 2 {
+			t.Fatalf("swapped link graph: %+v", stats)
+		}
+	}
+}
