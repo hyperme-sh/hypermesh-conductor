@@ -360,6 +360,78 @@ func TestIndexIsOwnerOnly(t *testing.T) {
 	check()
 }
 
+func TestOpenLeavesAnExistingDatabaseDirectory(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("unix permissions")
+	}
+	dir := t.TempDir()
+	if err := os.Chmod(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(dir, "index.db")
+	store, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	dirInfo, err := os.Stat(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if dirInfo.Mode().Perm()&0o077 == 0 {
+		t.Fatalf("existing directory mode %o", dirInfo.Mode().Perm())
+	}
+	dbInfo, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if dbInfo.Mode().Perm()&0o077 != 0 {
+		t.Fatalf("database mode %o", dbInfo.Mode().Perm())
+	}
+}
+
+func TestDatabasePathWithURICharactersStaysInPlace(t *testing.T) {
+	parent := t.TempDir()
+	dir := filepath.Join(parent, "notes?archive")
+	path := filepath.Join(dir, ".conductor", "index.db")
+	writeNote(t, dir, "secret.md", "---\nid: secret\ntype: note\n---\n# Secret\nURIKEEP stays here.\n")
+	store, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	if _, err := store.Rebuild(dir); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(path); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(parent, "notes")); !os.IsNotExist(err) {
+		t.Fatal(err)
+	}
+	ids, err := store.Search("urikeep", 5)
+	if err != nil || len(ids) != 1 || ids[0] != "secret" {
+		t.Fatal(err, ids)
+	}
+}
+
+func TestSearchKeepsUnicodeWords(t *testing.T) {
+	dir := t.TempDir()
+	writeNote(t, dir, "secret.md", "---\nid: secret\ntype: note\n---\n# Secret\nThe contraseña is local. Приветствие stays.\n")
+	store := openTestStore(t, dir)
+	if _, err := store.Rebuild(dir); err != nil {
+		t.Fatal(err)
+	}
+	spanish, err := store.Search("contraseña", 5)
+	if err != nil || len(spanish) != 1 || spanish[0] != "secret" {
+		t.Fatal(err, spanish)
+	}
+	cyrillic, err := store.Search("Приветствие", 5)
+	if err != nil || len(cyrillic) != 1 || cyrillic[0] != "secret" {
+		t.Fatal(err, cyrillic)
+	}
+}
+
 func TestExplicitIDCollisionDoesNotReplace(t *testing.T) {
 	dir := t.TempDir()
 	writeNote(t, dir, "a/one.md", "---\nid: same\ntype: note\n---\n# One\nALPHAONLY\n")

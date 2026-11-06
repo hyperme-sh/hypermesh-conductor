@@ -24,16 +24,20 @@ type Store struct {
 	db *sql.DB
 }
 
-// Open creates private database files without changing an existing parent's permissions.
+// Open opens or creates the index database. The database file is owner-only
+// because it stores note bodies. A directory this program creates, including
+// .conductor, is owner-only too. An existing directory the caller supplied is
+// left unchanged.
 func Open(path string) (*Store, error) {
-	path, err := filepath.Abs(path)
+	if err := prepareIndexDir(filepath.Dir(path)); err != nil {
+		return nil, err
+	}
+	dsn, err := sqliteDSN(path)
 	if err != nil {
 		return nil, err
 	}
-	dir := filepath.Dir(path)
-	if err := os.MkdirAll(dir, 0o700); err != nil {
-		return nil, err
-	}
+	// Create with private permissions before SQLite can write any page. Existing
+	// files and sidecars are restricted before schema access, not only afterward.
 	file, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR, 0o600)
 	if err != nil {
 		return nil, err
@@ -41,16 +45,10 @@ func Open(path string) (*Store, error) {
 	if err := file.Close(); err != nil {
 		return nil, err
 	}
-	// Restrict existing files before SQLite can persist or read private content.
 	if err := restrictIndex(path); err != nil {
 		return nil, err
 	}
-	uriPath := filepath.ToSlash(path)
-	if !strings.HasPrefix(uriPath, "/") {
-		uriPath = "/" + uriPath
-	}
-	uri := url.URL{Scheme: "file", Path: uriPath, RawQuery: "_pragma=busy_timeout(5000)"}
-	db, err := sql.Open("sqlite", uri.String())
+	db, err := sql.Open("sqlite", dsn)
 	if err != nil {
 		return nil, err
 	}
@@ -64,6 +62,39 @@ func Open(path string) (*Store, error) {
 		return nil, err
 	}
 	return store, nil
+}
+
+func prepareIndexDir(dir string) error {
+	info, err := os.Stat(dir)
+	if os.IsNotExist(err) {
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			return err
+		}
+		return os.Chmod(dir, 0o700)
+	}
+	if err != nil {
+		return err
+	}
+	if !info.IsDir() {
+		return fmt.Errorf("note index directory %s is not a directory", dir)
+	}
+	if filepath.Base(dir) != ".conductor" {
+		return nil
+	}
+	return os.Chmod(dir, 0o700)
+}
+
+func sqliteDSN(path string) (string, error) {
+	abs, err := filepath.Abs(path)
+	if err != nil {
+		return "", err
+	}
+	slash := filepath.ToSlash(abs)
+	if !strings.HasPrefix(slash, "/") {
+		slash = "/" + slash
+	}
+	uri := (&url.URL{Scheme: "file", Path: slash}).String()
+	return uri + "?_pragma=busy_timeout(5000)", nil
 }
 
 func restrictIndex(path string) error {
@@ -92,7 +123,6 @@ func restrictIndex(path string) error {
 			return fmt.Errorf("note index is readable by other users")
 		}
 	}
-
 	return nil
 }
 
