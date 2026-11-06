@@ -722,9 +722,40 @@ func mergeUsage(base, extra map[string]any) map[string]any {
 		out[key] = value
 	}
 	for key, value := range extra {
-		out[key] = value
+		switch key {
+		case "prompt_tokens_details", "input_tokens_details":
+			details, ok := value.(map[string]any)
+			if !ok {
+				continue
+			}
+			if n, ok := details["cached_tokens"]; ok && usageNumber(n) {
+				out[key] = map[string]any{"cached_tokens": n}
+			}
+		default:
+			if usageCounter(key) && usageNumber(value) {
+				out[key] = value
+			}
+		}
 	}
 	return out
+}
+
+func usageCounter(key string) bool {
+	switch key {
+	case "input_tokens", "output_tokens", "prompt_tokens", "completion_tokens", "cache_read_input_tokens", "cache_creation_input_tokens":
+		return true
+	default:
+		return false
+	}
+}
+
+func usageNumber(value any) bool {
+	switch value.(type) {
+	case float64, int, int64, json.Number:
+		return true
+	default:
+		return false
+	}
 }
 
 func chatChunk(id string, delta map[string]any, finish any, usage any) map[string]any {

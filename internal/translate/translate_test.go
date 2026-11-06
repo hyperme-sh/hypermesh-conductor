@@ -1,6 +1,7 @@
 package translate
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 )
@@ -213,6 +214,20 @@ func TestTranslatedStreamCapsTotalText(t *testing.T) {
 	}
 	if !stream.TooLarge() || stream.respText.Len() > maxEventBytes || stream.translated > maxEventBytes {
 		t.Fatalf("large %v text %d translated %d out %s", stream.TooLarge(), stream.respText.Len(), stream.translated, out)
+	}
+}
+
+func TestStreamUsageKeepsOnlyCounters(t *testing.T) {
+	stream := NewStream(ProtoChat, ProtoMessages)
+	var b strings.Builder
+	b.WriteString("event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"m1\",\"usage\":{\"input_tokens\":4")
+	for i := 0; i < 100; i++ {
+		b.WriteString(fmt.Sprintf(",\"k%d\":%d", i, i))
+	}
+	b.WriteString("}}}\n\n")
+	_ = stream.Consume([]byte(b.String()))
+	if stream.TooLarge() || len(stream.chatUsage) != 1 || stream.chatUsage["input_tokens"] == nil {
+		t.Fatalf("too %v usage %v", stream.TooLarge(), stream.chatUsage)
 	}
 }
 

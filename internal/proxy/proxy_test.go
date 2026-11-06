@@ -698,6 +698,45 @@ func (s *scriptBody) Close() error {
 	return nil
 }
 
+type flushFail struct {
+	header http.Header
+}
+
+func (f *flushFail) Header() http.Header {
+	if f.header == nil {
+		f.header = http.Header{}
+	}
+	return f.header
+}
+
+func (f *flushFail) Write(p []byte) (int, error) { return len(p), nil }
+
+func (f *flushFail) WriteHeader(int) {}
+
+func (f *flushFail) Flush() {}
+
+func (f *flushFail) FlushError() error { return errors.New("flush failed") }
+
+func TestStreamFlushFailureClosesUpstream(t *testing.T) {
+	events := make([]string, 100)
+	for i := range events {
+		events[i] = "data: {\"choices\":[{\"delta\":{\"content\":\"x\"}}]}\n\n"
+	}
+	body := &scriptBody{events: events, closed: make(chan struct{})}
+	resp := &http.Response{Body: body, StatusCode: http.StatusOK, Header: http.Header{}}
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+	p := New(config.Config{}, aiuditor.Stub{}, nil)
+	p.stream(&flushFail{}, req, resp, translate.Wire{Protocol: translate.ProtoChat}, time.Now(), nil, metrics.StepRecord{})
+	select {
+	case <-body.closed:
+	case <-time.After(time.Second):
+		t.Fatal("upstream body stayed open")
+	}
+	if body.i > 2 {
+		t.Fatalf("upstream events consumed %d", body.i)
+	}
+}
+
 func TestStreamWriteFailureClosesUpstream(t *testing.T) {
 	events := make([]string, 100)
 	for i := range events {

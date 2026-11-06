@@ -339,7 +339,17 @@ func (p *Proxy) stream(w http.ResponseWriter, client *http.Request, resp *http.R
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
 	w.WriteHeader(http.StatusOK)
-	flush(w)
+	if err := flushResult(w); err != nil {
+		_ = resp.Body.Close()
+		ms := elapsedMS(start)
+		record.LatencyMS = &ms
+		msg := "provider request failed"
+		record.Error = &msg
+		record.UsageStatus = metrics.StatusUncertain
+		p.journal(record)
+		p.logRecord(client, record)
+		return
+	}
 	bridge := translate.NewStream(protocolOfRequest(client), wire.Protocol)
 	passthrough := bridge.Passthrough()
 	acc := usage.UncertainUsage()
@@ -358,7 +368,12 @@ func (p *Proxy) stream(w http.ResponseWriter, client *http.Request, resp *http.R
 			_ = resp.Body.Close()
 			return false
 		}
-		flush(w)
+		if err := flushResult(w); err != nil {
+			clientGone = true
+			readErr = err
+			_ = resp.Body.Close()
+			return false
+		}
 		return true
 	}
 	for {
@@ -1101,10 +1116,18 @@ func (d deadlineWriter) Write(p []byte) (int, error) {
 }
 
 func (d deadlineWriter) Flush() {
+	_ = d.FlushError()
+}
+
+func (d deadlineWriter) FlushError() error {
 	d.arm()
-	if f, ok := d.ResponseWriter.(http.Flusher); ok {
-		f.Flush()
-	}
+	return http.NewResponseController(d.ResponseWriter).Flush()
+}
+
+func (d deadlineWriter) Unwrap() http.ResponseWriter { return d.ResponseWriter }
+
+func flushResult(w http.ResponseWriter) error {
+	return http.NewResponseController(w).Flush()
 }
 
 func (d deadlineWriter) arm() {
