@@ -4,11 +4,14 @@ import (
 	"bytes"
 	"encoding/json"
 	"strings"
+	"sync/atomic"
 )
 
 // Stream converts upstream SSE into the client protocol.
 // Same-protocol streams are copied through.
 type Stream struct {
+	held         int
+	closed       bool
 	client       string
 	upstream     string
 	buf          []byte
@@ -47,6 +50,42 @@ type responseCall struct {
 // one response, including tool-call names and ids.
 var maxEventBytes = 32 << 20
 
+// Shared across every translating stream, including incomplete events and IDs.
+var maxRetainedStreamBytes int64 = 64 << 20
+var retainedStreamBytes atomic.Int64
+
+func (s *Stream) resizeHeld(n int) bool {
+	delta := int64(n - s.held)
+	if delta > 0 {
+		for {
+			used := retainedStreamBytes.Load()
+			if delta > maxRetainedStreamBytes-used {
+				return false
+			}
+			if retainedStreamBytes.CompareAndSwap(used, used+delta) {
+				break
+			}
+		}
+	} else {
+		retainedStreamBytes.Add(delta)
+	}
+	s.held = n
+	return true
+}
+
+// Close releases every retained provider byte, including on client disconnect.
+func (s *Stream) Close() {
+	s.buf = nil
+	s.respText.Reset()
+	s.respCalls = nil
+	s.toolSlots = nil
+	s.chatTools = nil
+	s.chatUsage = nil
+	s.id, s.event = "", ""
+	s.resizeHeld(0)
+	s.closed = true
+}
+
 // callMetaBytes is the retained cost of one tool-call record aside from its
 // name and id. Tool starts have to count, or a stream of empty calls grows
 // without hitting the text cap.
@@ -73,14 +112,17 @@ func openaiFamily(proto string) bool {
 
 // Consume translates the next upstream chunk into client bytes.
 func (s *Stream) Consume(chunk []byte) []byte {
-	if s.failed {
+	if s.failed || s.closed {
 		return nil
 	}
 	if s.passthrough() {
 		return chunk
 	}
-	s.buf = append(s.buf, chunk...)
 	var out bytes.Buffer
+	if len(s.buf)+len(chunk) > maxEventBytes || !s.resizeHeld(s.held+len(chunk)) {
+		return s.failLarge(&out)
+	}
+	s.buf = append(s.buf, chunk...)
 	for {
 		i := bytes.IndexByte(s.buf, '\n')
 		if i < 0 {
@@ -95,6 +137,20 @@ func (s *Stream) Consume(chunk []byte) []byte {
 		line := strings.TrimRight(string(s.buf[:i]), "\r")
 		s.buf = s.buf[i+1:]
 		out.Write(s.onLine(line))
+		if s.failed {
+			break
+		}
+		needed := len(s.buf) + s.translated + len(s.id) + len(s.event)
+		if needed > maxEventBytes || (needed > s.held && !s.resizeHeld(needed)) {
+			return s.failLarge(&out)
+		}
+	}
+	if !s.closed {
+		// Do not retain a consumed chunk's backing array outside its reservation.
+		s.buf = bytes.Clone(s.buf)
+		if !s.resizeHeld(len(s.buf) + s.translated + len(s.id) + len(s.event)) {
+			return s.failLarge(&out)
+		}
 	}
 	return out.Bytes()
 }
@@ -103,7 +159,7 @@ func (s *Stream) Consume(chunk []byte) []byte {
 func (s *Stream) TooLarge() bool { return s.tooLarge }
 
 func (s *Stream) noteTranslated(n int) bool {
-	if s.tooLarge || s.translated+n > maxEventBytes {
+	if s.tooLarge || s.translated+n > maxEventBytes || !s.resizeHeld(s.held+n) {
 		return false
 	}
 	s.translated += n
@@ -111,6 +167,7 @@ func (s *Stream) noteTranslated(n int) bool {
 }
 
 func (s *Stream) failLarge(out *bytes.Buffer) []byte {
+	defer s.Close()
 	s.failed = true
 	s.tooLarge = true
 	s.done = true
@@ -128,6 +185,7 @@ func (s *Stream) failLarge(out *bytes.Buffer) []byte {
 // Abort tells the client the upstream ended in failure. It does not emit a
 // successful completion.
 func (s *Stream) Abort() []byte {
+	defer s.Close()
 	if s.done || s.failed {
 		return nil
 	}
@@ -138,6 +196,7 @@ func (s *Stream) Abort() []byte {
 
 // Finish flushes a closing event when the upstream ended quietly.
 func (s *Stream) Finish() []byte {
+	defer s.Close()
 	if s.passthrough() || s.done || s.failed {
 		return nil
 	}

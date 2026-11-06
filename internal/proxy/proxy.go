@@ -219,6 +219,12 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if halted {
 		return
 	}
+	if !replaceReservation(held, len(prepared)) {
+		held = 0
+		writeJSON(w, http.StatusServiceUnavailable, map[string]any{"error": map[string]any{"message": "request body budget exceeded"}})
+		return
+	}
+	held = len(prepared)
 	if hash, err := hashBody(proto, prepared); err == nil {
 		prelimHash = hash
 	}
@@ -239,6 +245,12 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+	if !replaceReservation(held, len(prepared)) {
+		held = 0
+		writeJSON(w, http.StatusServiceUnavailable, map[string]any{"error": map[string]any{"message": "request body budget exceeded"}})
+		return
+	}
+	held = len(prepared)
 	forced, err := forceModel(prepared, tier.Model)
 	if err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"error": map[string]any{"message": err.Error()}})
@@ -351,6 +363,7 @@ func (p *Proxy) stream(w http.ResponseWriter, client *http.Request, resp *http.R
 		return
 	}
 	bridge := translate.NewStream(protocolOfRequest(client), wire.Protocol)
+	defer bridge.Close()
 	passthrough := bridge.Passthrough()
 	acc := usage.UncertainUsage()
 	buf := make([]byte, 32*1024)

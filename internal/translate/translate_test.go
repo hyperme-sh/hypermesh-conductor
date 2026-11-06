@@ -61,6 +61,7 @@ func TestChatDeveloperMessageBecomesAnthropicSystem(t *testing.T) {
 
 func TestAnthropicStreamKeepsInputUsage(t *testing.T) {
 	stream := NewStream(ProtoChat, ProtoMessages)
+	t.Cleanup(stream.Close)
 	input := "" +
 		"event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"m1\",\"usage\":{\"input_tokens\":100,\"cache_read_input_tokens\":20}}}\n\n" +
 		"event: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"output_tokens\":5}}\n\n"
@@ -72,6 +73,7 @@ func TestAnthropicStreamKeepsInputUsage(t *testing.T) {
 
 func TestAnthropicStreamBecomesChatChunks(t *testing.T) {
 	stream := NewStream(ProtoChat, ProtoMessages)
+	t.Cleanup(stream.Close)
 	input := "" +
 		"event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"m1\"}}\n\n" +
 		"event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"delta\":{\"type\":\"text_delta\",\"text\":\"yo\"}}\n\n" +
@@ -124,6 +126,7 @@ func TestSystemBlocksAndStopReasons(t *testing.T) {
 
 func TestStreamToolIndexesAndErrorEvent(t *testing.T) {
 	stream := NewStream(ProtoChat, ProtoMessages)
+	t.Cleanup(stream.Close)
 	var out string
 	chunks := []string{
 		"event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\n",
@@ -142,6 +145,7 @@ func TestStreamToolIndexesAndErrorEvent(t *testing.T) {
 		t.Fatal(out)
 	}
 	errStream := NewStream(ProtoChat, ProtoMessages)
+	t.Cleanup(errStream.Close)
 	_ = errStream.Consume([]byte("event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"m1\",\"usage\":{\"input_tokens\":1,\"output_tokens\":1}}}\n\n"))
 	failed := string(errStream.Consume([]byte("event: error\ndata: {\"type\":\"error\",\"error\":{\"type\":\"api_error\",\"message\":\"overloaded\"}}\n\n")))
 	if !strings.Contains(failed, `"message":"overloaded"`) || len(errStream.Finish()) != 0 {
@@ -207,6 +211,7 @@ func TestToolChoiceCrossesTheProtocolBoundary(t *testing.T) {
 
 func TestChatStreamClosesContentBlocks(t *testing.T) {
 	stream := NewStream(ProtoMessages, ProtoChat)
+	t.Cleanup(stream.Close)
 	chunk := "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_w\",\"type\":\"function\",\"function\":{\"name\":\"weather\",\"arguments\":\"\"}}]},\"finish_reason\":\"tool_calls\"}]}\n\n"
 	out := string(stream.Consume([]byte(chunk))) + string(stream.Finish())
 	if !strings.Contains(out, `"type":"content_block_stop"`) || strings.Index(out, "content_block_stop") > strings.Index(out, "message_delta") {
@@ -222,6 +227,7 @@ func TestTranslatedStreamCapsTotalText(t *testing.T) {
 	maxEventBytes = 8
 	t.Cleanup(func() { maxEventBytes = previous })
 	stream := NewStream(ProtoResponses, ProtoMessages)
+	t.Cleanup(stream.Close)
 	var out string
 	for i := 0; i < 5; i++ {
 		out += string(stream.Consume([]byte("data: {\"type\":\"content_block_delta\",\"delta\":{\"type\":\"text_delta\",\"text\":\"abcd\"}}\n\n")))
@@ -233,6 +239,7 @@ func TestTranslatedStreamCapsTotalText(t *testing.T) {
 
 func TestStreamUsageKeepsOnlyCounters(t *testing.T) {
 	stream := NewStream(ProtoChat, ProtoMessages)
+	t.Cleanup(stream.Close)
 	var b strings.Builder
 	b.WriteString("event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"m1\",\"usage\":{\"input_tokens\":4")
 	for i := 0; i < 100; i++ {
@@ -250,6 +257,7 @@ func TestCrossProtocolToolStateHitsTheCap(t *testing.T) {
 	maxEventBytes = 300
 	t.Cleanup(func() { maxEventBytes = previous })
 	chat := NewStream(ProtoChat, ProtoMessages)
+	t.Cleanup(chat.Close)
 	var chatOut string
 	for i := 1; i <= 6; i++ {
 		chatOut += string(chat.Consume([]byte("event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":" + string(rune('0'+i)) + ",\"content_block\":{\"type\":\"tool_use\",\"id\":\"ab\",\"name\":\"n\"}}\n\n")))
@@ -258,6 +266,7 @@ func TestCrossProtocolToolStateHitsTheCap(t *testing.T) {
 		t.Fatalf("chat too %v slots %v out %s", chat.TooLarge(), chat.toolSlots != nil, chatOut)
 	}
 	messages := NewStream(ProtoMessages, ProtoChat)
+	t.Cleanup(messages.Close)
 	var msgOut string
 	for i := 1; i <= 6; i++ {
 		msgOut += string(messages.Consume([]byte("data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":" + string(rune('0'+i)) + ",\"id\":\"ab\",\"type\":\"function\",\"function\":{\"name\":\"n\",\"arguments\":\"\"}}]}}]}\n\n")))
@@ -272,6 +281,7 @@ func TestToolStartsCountTowardTheStreamCap(t *testing.T) {
 	maxEventBytes = 200
 	t.Cleanup(func() { maxEventBytes = previous })
 	stream := NewStream(ProtoResponses, ProtoMessages)
+	t.Cleanup(stream.Close)
 	event := func(index int) string {
 		return "event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":" + string(rune('0'+index)) + ",\"content_block\":{\"type\":\"tool_use\",\"id\":\"ab\",\"name\":\"n\"}}\n\n"
 	}
@@ -290,6 +300,7 @@ func TestStreamDropsAnOversizedLine(t *testing.T) {
 	maxEventBytes = 16
 	t.Cleanup(func() { maxEventBytes = previous })
 	stream := NewStream(ProtoMessages, ProtoChat)
+	t.Cleanup(stream.Close)
 	out := stream.Consume([]byte(strings.Repeat("a", 40)))
 	if !stream.TooLarge() || len(stream.buf) != 0 || !strings.Contains(string(out), "too large") {
 		t.Fatalf("large %v buf %d out %s", stream.TooLarge(), len(stream.buf), out)
@@ -298,6 +309,7 @@ func TestStreamDropsAnOversizedLine(t *testing.T) {
 
 func TestChatStreamUsageReachesMessages(t *testing.T) {
 	stream := NewStream(ProtoMessages, ProtoChat)
+	t.Cleanup(stream.Close)
 	finish := "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n"
 	usage := "data: {\"choices\":[],\"usage\":{\"prompt_tokens\":100,\"completion_tokens\":5,\"prompt_tokens_details\":{\"cached_tokens\":80}}}\n\n"
 	out := string(stream.Consume([]byte(finish))) + string(stream.Consume([]byte(usage)))
@@ -329,6 +341,7 @@ func TestLargeToolIntegersStayExact(t *testing.T) {
 
 func TestChatStreamKeepsToolCalls(t *testing.T) {
 	stream := NewStream(ProtoMessages, ProtoChat)
+	t.Cleanup(stream.Close)
 	chunk := "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_w\",\"type\":\"function\",\"function\":{\"name\":\"weather\",\"arguments\":\"{\\\"q\\\":1}\"}}]}}]}\n\n"
 	out := string(stream.Consume([]byte(chunk)))
 	if !strings.Contains(out, `"type":"tool_use"`) || !strings.Contains(out, `"name":"weather"`) || !strings.Contains(out, `"id":"call_w"`) || !strings.Contains(out, `"partial_json":"{\"q\":1}"`) {
@@ -366,6 +379,7 @@ func TestMaxTokensBecomesAnIncompleteResponse(t *testing.T) {
 		t.Fatal(text)
 	}
 	stream := NewStream(ProtoResponses, ProtoMessages)
+	t.Cleanup(stream.Close)
 	var streamed string
 	streamed += string(stream.Consume([]byte("event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"delta\":{\"type\":\"text_delta\",\"text\":\"partial\"}}\n\n")))
 	streamed += string(stream.Consume([]byte("event: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"max_tokens\"}}\n\n")))
@@ -380,6 +394,7 @@ func TestResponsesFinishStaysInsideTheCap(t *testing.T) {
 	maxEventBytes = 500
 	t.Cleanup(func() { maxEventBytes = previous })
 	stream := NewStream(ProtoResponses, ProtoMessages)
+	t.Cleanup(stream.Close)
 	piece := strings.Repeat("a", 20)
 	for i := 0; i < 8; i++ {
 		chunk := "event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"delta\":{\"type\":\"text_delta\",\"text\":\"" + piece + "\"}}\n\n"
@@ -403,6 +418,7 @@ func TestResponsesSamplingAndStreamUsage(t *testing.T) {
 		t.Fatal(text)
 	}
 	stream := NewStream(ProtoResponses, ProtoMessages)
+	t.Cleanup(stream.Close)
 	var out string
 	for _, chunk := range []string{
 		"event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"m1\",\"usage\":{\"input_tokens\":20,\"cache_read_input_tokens\":80,\"cache_creation_input_tokens\":50}}}\n\n",
@@ -428,6 +444,7 @@ func TestResponsesToolsAndStreamLifecycle(t *testing.T) {
 		t.Fatal(text)
 	}
 	stream := NewStream(ProtoResponses, ProtoMessages)
+	t.Cleanup(stream.Close)
 	out := string(stream.Consume([]byte("event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"delta\":{\"type\":\"text_delta\",\"text\":\"yo\"}}\n\n")))
 	out += string(stream.Consume([]byte("event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n")))
 	if !strings.Contains(out, `"type":"response.output_item.added"`) || !strings.Contains(out, `"type":"response.content_part.added"`) || !strings.Contains(out, `"output_index":0`) {
@@ -449,6 +466,7 @@ func TestResponsesOutputKeepsToolCalls(t *testing.T) {
 		t.Fatal(text)
 	}
 	stream := NewStream(ProtoResponses, ProtoMessages)
+	t.Cleanup(stream.Close)
 	var streamed string
 	for _, chunk := range []string{
 		"event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":1,\"content_block\":{\"type\":\"tool_use\",\"id\":\"call_w\",\"name\":\"weather\"}}\n\n",
