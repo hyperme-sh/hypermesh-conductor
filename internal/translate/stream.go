@@ -20,6 +20,7 @@ type Stream struct {
 	toolSlots   map[int]int
 	nextTool    int
 	chatTools   map[int]int
+	chatUsage   map[string]any
 	nextContent int
 	respOpened  bool
 	respText    strings.Builder
@@ -187,6 +188,9 @@ func (s *Stream) anthropicToChat(kind string, obj map[string]any) []byte {
 	case "message_start":
 		if message, ok := obj["message"].(map[string]any); ok {
 			s.id, _ = message["id"].(string)
+			if usage, ok := message["usage"].(map[string]any); ok {
+				s.chatUsage = mergeUsage(nil, usage)
+			}
 		}
 		if s.id == "" {
 			s.id = "chatcmpl"
@@ -231,9 +235,12 @@ func (s *Stream) anthropicToChat(kind string, obj map[string]any) []byte {
 				finish = mapStop(reason)
 			}
 		}
-		var usage any
 		if raw, ok := obj["usage"].(map[string]any); ok {
-			usage = usageToOpenAI(raw)
+			s.chatUsage = mergeUsage(s.chatUsage, raw)
+		}
+		var usage any
+		if len(s.chatUsage) > 0 {
+			usage = usageToOpenAI(s.chatUsage)
 		}
 		return sseData(chatChunk(s.id, map[string]any{}, finish, usage))
 	case "message_stop":
@@ -626,6 +633,17 @@ func (s *Stream) clientError(obj map[string]any) []byte {
 		return sseData(map[string]any{"type": "error", "error": map[string]any{"message": message}})
 	}
 	return sseData(map[string]any{"error": map[string]any{"message": message, "type": "server_error"}})
+}
+
+func mergeUsage(base, extra map[string]any) map[string]any {
+	out := map[string]any{}
+	for key, value := range base {
+		out[key] = value
+	}
+	for key, value := range extra {
+		out[key] = value
+	}
+	return out
 }
 
 func chatChunk(id string, delta map[string]any, finish any, usage any) map[string]any {

@@ -163,8 +163,10 @@ func replaceStrings(body json.RawMessage, from, to string) (json.RawMessage, boo
 	if len(body) == 0 {
 		return body, false
 	}
+	dec := json.NewDecoder(bytes.NewReader(body))
+	dec.UseNumber()
 	var value any
-	if err := json.Unmarshal(body, &value); err != nil {
+	if err := dec.Decode(&value); err != nil {
 		return body, false
 	}
 	changed := walkReplace(value, from, to)

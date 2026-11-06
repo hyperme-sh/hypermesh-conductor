@@ -19,6 +19,28 @@ func TestChatRequestBecomesAnthropicMessages(t *testing.T) {
 	}
 }
 
+func TestChatDeveloperMessageBecomesAnthropicSystem(t *testing.T) {
+	wire, err := Request(ProtoChat, ProviderAnthropic, "frontier", []byte(`{"messages":[{"role":"developer","content":"Follow these rules"},{"role":"user","content":"hi"}]}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(wire.Body)
+	if strings.Contains(text, `"role":"developer"`) || !strings.Contains(text, `"system":"Follow these rules"`) || !strings.Contains(text, `"role":"user"`) {
+		t.Fatal(text)
+	}
+}
+
+func TestAnthropicStreamKeepsInputUsage(t *testing.T) {
+	stream := NewStream(ProtoChat, ProtoMessages)
+	input := "" +
+		"event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"m1\",\"usage\":{\"input_tokens\":100,\"cache_read_input_tokens\":20}}}\n\n" +
+		"event: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"output_tokens\":5}}\n\n"
+	out := string(stream.Consume([]byte(input)))
+	if !strings.Contains(out, `"prompt_tokens":120`) || !strings.Contains(out, `"completion_tokens":5`) || !strings.Contains(out, `"cached_tokens":20`) {
+		t.Fatal(out)
+	}
+}
+
 func TestAnthropicStreamBecomesChatChunks(t *testing.T) {
 	stream := NewStream(ProtoChat, ProtoMessages)
 	input := "" +

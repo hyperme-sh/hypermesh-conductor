@@ -306,7 +306,7 @@ func splitChatMessages(messages []any) (string, []any, error) {
 			return "", nil, err
 		}
 		switch role {
-		case "system":
+		case "system", "developer":
 			if text != "" {
 				systemParts = append(systemParts, text)
 			}
