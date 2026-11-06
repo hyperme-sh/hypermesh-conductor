@@ -9,16 +9,18 @@ import (
 // Stream converts upstream SSE into the client protocol.
 // Same-protocol streams are copied through.
 type Stream struct {
-	client    string
-	upstream  string
-	buf       []byte
-	event     string
-	id        string
-	opened    bool
-	done      bool
-	failed    bool
-	toolSlots map[int]int
-	nextTool  int
+	client      string
+	upstream    string
+	buf         []byte
+	event       string
+	id          string
+	opened      bool
+	done        bool
+	failed      bool
+	toolSlots   map[int]int
+	nextTool    int
+	chatTools   map[int]int
+	nextContent int
 }
 
 // NewStream starts a bridge. Identical protocols copy bytes unchanged.
@@ -194,6 +196,7 @@ func (s *Stream) chatToAnthropic(obj map[string]any) []byte {
 			"type": "content_block_start", "index": 0,
 			"content_block": map[string]any{"type": "text", "text": ""},
 		}))
+		s.nextContent = 1
 	}
 	choices, _ := obj["choices"].([]any)
 	if len(choices) == 0 {
@@ -208,6 +211,9 @@ func (s *Stream) chatToAnthropic(obj map[string]any) []byte {
 			"delta": map[string]any{"type": "text_delta", "text": text},
 		}))
 	}
+	if calls, ok := delta["tool_calls"].([]any); ok {
+		out.Write(s.chatToolCalls(calls))
+	}
 	if finish, ok := choice["finish_reason"].(string); ok && finish != "" {
 		out.WriteString("event: message_delta\n")
 		out.Write(sseData(map[string]any{
@@ -218,6 +224,45 @@ func (s *Stream) chatToAnthropic(obj map[string]any) []byte {
 		out.WriteString("event: message_stop\n")
 		out.Write(sseData(map[string]any{"type": "message_stop"}))
 		s.done = true
+	}
+	return out.Bytes()
+}
+
+func (s *Stream) chatToolCalls(calls []any) []byte {
+	var out bytes.Buffer
+	for _, item := range calls {
+		call, ok := item.(map[string]any)
+		if !ok {
+			continue
+		}
+		index, ok := eventIndex(call["index"])
+		if !ok {
+			index = 0
+		}
+		if s.chatTools == nil {
+			s.chatTools = map[int]int{}
+		}
+		block, started := s.chatTools[index]
+		fn, _ := call["function"].(map[string]any)
+		if !started {
+			block = s.nextContent
+			s.nextContent++
+			s.chatTools[index] = block
+			name, _ := fn["name"].(string)
+			id, _ := call["id"].(string)
+			out.WriteString("event: content_block_start\n")
+			out.Write(sseData(map[string]any{
+				"type": "content_block_start", "index": block,
+				"content_block": map[string]any{"type": "tool_use", "id": id, "name": name, "input": map[string]any{}},
+			}))
+		}
+		if args, ok := fn["arguments"].(string); ok && args != "" {
+			out.WriteString("event: content_block_delta\n")
+			out.Write(sseData(map[string]any{
+				"type": "content_block_delta", "index": s.chatTools[index],
+				"delta": map[string]any{"type": "input_json_delta", "partial_json": args},
+			}))
+		}
 	}
 	return out.Bytes()
 }

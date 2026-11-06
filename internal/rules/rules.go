@@ -11,6 +11,8 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+
+	"github.com/hyperme-sh/hypermesh-conductor/internal/routing"
 )
 
 const Schema = "hypermesh.conductor.rules.v0"
@@ -189,8 +191,12 @@ func EffectiveClassTiers(base map[string]string, policy File, class string, peak
 	for key, value := range policy.Routing.ClassTiers {
 		out[key] = value
 	}
-	if limit, ok := policy.Routing.EscalateWhenPeakTokensAbove[class]; ok && peak > limit {
-		out[class] = "frontier"
+	canonical := class
+	if name, err := routing.CanonicalClass(class); err == nil {
+		canonical = name
+	}
+	if limit, ok := policy.Routing.EscalateWhenPeakTokensAbove[canonical]; ok && peak > limit {
+		out[canonical] = "frontier"
 	}
 	return out
 }

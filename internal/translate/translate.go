@@ -153,6 +153,9 @@ func chatToAnthropic(body []byte, model string) ([]byte, error) {
 	if tools, ok := req["tools"].([]any); ok && len(tools) > 0 {
 		out["tools"] = openaiToolsToAnthropic(tools)
 	}
+	if err := applySampling(out, req, true); err != nil {
+		return nil, err
+	}
 	if stream, ok := req["stream"].(bool); ok && stream {
 		out["stream"] = true
 	}
@@ -184,6 +187,9 @@ func anthropicToChat(body []byte, model string) ([]byte, error) {
 	}
 	if tools, ok := req["tools"].([]any); ok && len(tools) > 0 {
 		out["tools"] = anthropicToolsToOpenAI(tools)
+	}
+	if err := applySampling(out, req, false); err != nil {
+		return nil, err
 	}
 	if stream, ok := req["stream"].(bool); ok {
 		out["stream"] = stream
@@ -722,6 +728,71 @@ func usageToAnthropic(usage map[string]any) map[string]any {
 		}
 	}
 	return out
+}
+
+func applySampling(dst, src map[string]any, toAnthropic bool) error {
+	if toAnthropic {
+		if err := rejectSampling(src, "frequency_penalty", "presence_penalty", "logit_bias", "logprobs", "top_logprobs", "n", "seed"); err != nil {
+			return err
+		}
+	} else if err := rejectSampling(src, "top_k"); err != nil {
+		return err
+	}
+	for _, key := range []string{"temperature", "top_p"} {
+		if err := copySamplingNumber(dst, src, key); err != nil {
+			return err
+		}
+	}
+	if toAnthropic {
+		if err := copySamplingNumber(dst, src, "top_k"); err != nil {
+			return err
+		}
+		return copyStop(dst, src["stop"])
+	}
+	if value, ok := src["stop_sequences"]; ok {
+		dst["stop"] = value
+	}
+	return nil
+}
+
+func rejectSampling(src map[string]any, keys ...string) error {
+	for _, key := range keys {
+		if _, ok := src[key]; ok {
+			return fmt.Errorf("unsupported sampling control %s for protocol translation", key)
+		}
+	}
+	return nil
+}
+
+func copySamplingNumber(dst, src map[string]any, key string) error {
+	value, ok := src[key]
+	if !ok || value == nil {
+		return nil
+	}
+	switch value.(type) {
+	case float64, int, json.Number:
+		dst[key] = value
+		return nil
+	default:
+		return fmt.Errorf("unsupported sampling control %s for protocol translation", key)
+	}
+}
+
+func copyStop(dst map[string]any, value any) error {
+	switch stop := value.(type) {
+	case nil:
+		return nil
+	case string:
+		if stop != "" {
+			dst["stop_sequences"] = []any{stop}
+		}
+		return nil
+	case []any:
+		dst["stop_sequences"] = stop
+		return nil
+	default:
+		return fmt.Errorf("unsupported sampling control stop for protocol translation")
+	}
 }
 
 func maxTokens(req map[string]any) int {

@@ -119,10 +119,6 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"error": map[string]any{"message": err.Error()}})
 		return
 	}
-	next, didCompact := p.maybeCompact(r.Context(), proto, prepared, taskID, stepID, clientHash)
-	if didCompact {
-		prepared = next
-	}
 	tier, err := p.Config.Endpoint(decision.Tier)
 	if err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"error": map[string]any{"message": err.Error()}})
@@ -150,10 +146,6 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		},
 	})
 	base := p.baseRecord(taskID, stepID, decision, tier.Model, prelimHash)
-	if didCompact {
-		yes := true
-		base.Compacted = &yes
-	}
 	if prefixMatch {
 		yes := true
 		base.PrefixCacheMatch = &yes
@@ -181,6 +173,23 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		prepared = verdict.Body
+		if hash, err := hashBody(proto, prepared); err == nil {
+			prelimHash = hash
+			base.PrefixSHA256 = hash
+		}
+	}
+	next, didCompact, compactErr := p.maybeCompact(r.Context(), r, proto, prepared, taskID, stepID, prelimHash)
+	if compactErr != nil {
+		var denied proxyAuthError
+		if errors.As(compactErr, &denied) {
+			writeJSON(w, http.StatusUnauthorized, map[string]any{"error": map[string]any{"message": compactErr.Error()}})
+			return
+		}
+	}
+	if didCompact {
+		prepared = next
+		yes := true
+		base.Compacted = &yes
 	}
 	forced, err := forceModel(prepared, tier.Model)
 	if err != nil {
@@ -249,11 +258,17 @@ func (p *Proxy) forward(w http.ResponseWriter, client *http.Request, upstream *h
 		p.stream(w, client, resp, wire, start, secrets, record)
 		return
 	}
-	raw, err := io.ReadAll(io.LimitReader(resp.Body, maxBody))
+	raw, err := io.ReadAll(io.LimitReader(resp.Body, maxBody+1))
 	ms := elapsedMS(start)
 	record.LatencyMS = &ms
+	if err == nil && len(raw) > maxBody {
+		err = fmt.Errorf("provider response is too large")
+	}
 	if err != nil {
 		msg := "provider request failed"
+		if len(raw) > maxBody {
+			msg = "provider response is too large"
+		}
 		record.Error = &msg
 		record.UsageStatus = metrics.StatusUncertain
 		p.finish(w, client, http.StatusBadGateway, nil, record, secrets, false)

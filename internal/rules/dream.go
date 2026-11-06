@@ -43,7 +43,7 @@ func Dream(in DreamInput, active File, proposalsDir string) (Proposal, string, e
 	}
 	outcomesByStep := map[string][]Outcome{}
 	for _, outcome := range in.Outcomes {
-		outcomesByStep[outcome.StepID] = append(outcomesByStep[outcome.StepID], outcome)
+		outcomesByStep[outcomeKey(outcome.TaskID, outcome.StepID)] = append(outcomesByStep[outcomeKey(outcome.TaskID, outcome.StepID)], outcome)
 	}
 
 	classes := make([]string, 0, len(byClass))
@@ -58,7 +58,7 @@ func Dream(in DreamInput, active File, proposalsDir string) (Proposal, string, e
 			if row.Tier != "cheap" {
 				continue
 			}
-			for _, outcome := range outcomesByStep[row.StepID] {
+			for _, outcome := range outcomesByStep[outcomeKey(row.TaskID, row.StepID)] {
 				if outcome.Kind == "escalation" || outcome.Kind == "test_failed" {
 					misses = append(misses, row.StepID)
 					break
@@ -266,15 +266,12 @@ func Apply(activePath, proposalPath string) error {
 		if err := os.MkdirAll(revDir, 0o755); err != nil {
 			return err
 		}
-		archived := current
-		if archived.Version == 0 {
-			archived.Version = nextRevision(revDir)
-		}
-		blob, err := Marshal(archived)
+		blob, err := Marshal(current)
 		if err != nil {
 			return err
 		}
-		if err := os.WriteFile(filepath.Join(revDir, fmt.Sprintf("%04d.json", archived.Version)), blob, 0o644); err != nil {
+		rev := nextRevision(revDir)
+		if err := os.WriteFile(filepath.Join(revDir, fmt.Sprintf("%04d.json", rev)), blob, 0o644); err != nil {
 			return err
 		}
 	}
@@ -319,6 +316,10 @@ func Rollback(activePath string) error {
 		return err
 	}
 	return os.Remove(filepath.Join(revDir, best))
+}
+
+func outcomeKey(taskID, stepID string) string {
+	return taskID + "\x00" + stepID
 }
 
 func nextRevision(dir string) int {

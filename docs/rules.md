@@ -15,10 +15,10 @@ conductor rules apply --rules rules/active.json --proposal rules/proposals/0001.
 conductor rules rollback --rules rules/active.json
 ```
 
-`dream` reads metrics rows and outcome records (`test_passed`, `test_failed`, `retry`, `escalation`, `aiuditor_deny`, `user_correction`, `link_used`, `link_unused`). It writes `rules/proposals/NNNN.json` with evidence step ids and prevalence. Repeated cheap-tier misses propose an escalation threshold. Cache reports that never hit propose keeping the system prompt and tools in the prefix. Repeated link outcomes propose index link adds or drops. AIuditor denials are recorded as observations. They do not become permission to skip the hop.
+`dream` reads metrics rows and outcome records (`test_passed`, `test_failed`, `retry`, `escalation`, `aiuditor_deny`, `user_correction`, `link_used`, `link_unused`). An outcome counts only for the journal row with the same task id and step id. It writes `rules/proposals/NNNN.json` with evidence step ids and prevalence. Repeated cheap-tier misses propose an escalation threshold. Class names are canonical before an escalation threshold is applied, so `PARSE` and `parsing` follow the `parse` rule. Cache reports that never hit propose keeping the system prompt and tools in the prefix. Repeated link outcomes propose index link adds or drops. AIuditor denials are recorded as observations. They do not become permission to skip the hop.
 
 Prompt bodies stay out of the proposal unless `--bodies` is set. That flag reads `history.jsonl`. Keys are not part of either file.
 
-`apply` refuses a file that contains `aiuditor`, `fail_closed`, `deny_job_classes`, `bypass`, or `fail_open`. The previous active file is copied under `rules/revisions/` first. `rollback` restores that copy.
+`apply` refuses a file that contains `aiuditor`, `fail_closed`, `deny_job_classes`, `bypass`, or `fail_open`. The previous active file is copied under `rules/revisions/` with the next free revision name. That name is not the policy version, so a version-zero baseline is not overwritten by the next apply. `rollback` restores that copy.
 
 Activation here is the local `apply` command. A bench replay of compaction modes stays in hypermesh-bench issue 12. This command does not claim a measured saving.

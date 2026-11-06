@@ -98,6 +98,41 @@ func TestStreamToolIndexesAndErrorEvent(t *testing.T) {
 	}
 }
 
+func TestSamplingControlsCrossTheProtocolBoundary(t *testing.T) {
+	body := []byte(`{"temperature":0,"top_p":0.8,"messages":[{"role":"user","content":"hi"}]}`)
+	wire, err := Request(ProtoChat, ProviderAnthropic, "frontier", body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(wire.Body)
+	if !strings.Contains(text, `"temperature":0`) || !strings.Contains(text, `"top_p":0.8`) {
+		t.Fatal(text)
+	}
+	back, err := Request(ProtoMessages, ProviderOpenAI, "frontier", []byte(`{"temperature":0,"top_p":0.8,"messages":[{"role":"user","content":"hi"}]}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	text = string(back.Body)
+	if !strings.Contains(text, `"temperature":0`) || !strings.Contains(text, `"top_p":0.8`) {
+		t.Fatal(text)
+	}
+	if _, err := Request(ProtoChat, ProviderAnthropic, "frontier", []byte(`{"frequency_penalty":1,"messages":[{"role":"user","content":"hi"}]}`)); err == nil {
+		t.Fatal("frequency_penalty was dropped")
+	}
+	if _, err := Request(ProtoMessages, ProviderOpenAI, "frontier", []byte(`{"top_k":10,"messages":[{"role":"user","content":"hi"}]}`)); err == nil {
+		t.Fatal("top_k was dropped")
+	}
+}
+
+func TestChatStreamKeepsToolCalls(t *testing.T) {
+	stream := NewStream(ProtoMessages, ProtoChat)
+	chunk := "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_w\",\"type\":\"function\",\"function\":{\"name\":\"weather\",\"arguments\":\"{\\\"q\\\":1}\"}}]}}]}\n\n"
+	out := string(stream.Consume([]byte(chunk)))
+	if !strings.Contains(out, `"type":"tool_use"`) || !strings.Contains(out, `"name":"weather"`) || !strings.Contains(out, `"id":"call_w"`) || !strings.Contains(out, `"partial_json":"{\"q\":1}"`) {
+		t.Fatal(out)
+	}
+}
+
 func TestSameProtocolPreservesNestedBytes(t *testing.T) {
 	body := []byte(`{"messages":[{"role":"user","content":"a & b"}],"stream":false}`)
 	wire, err := Request(ProtoChat, ProviderOpenAICompatible, "local-small", body)

@@ -626,6 +626,130 @@ func TestStreamErrorIsUncertain(t *testing.T) {
 	}
 }
 
+func TestDeniedRequestDoesNotSummarize(t *testing.T) {
+	hits := 0
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits++
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer upstream.Close()
+	dir := t.TempDir()
+	t.Setenv("CONDUCTOR_CHEAP_API_KEY", "test-key-do-not-log")
+	cfg := loadTestConfig(t, dir, upstream.URL+"/v1", upstream.URL+"/v1", config.AuthEnv, config.ProviderOpenAICompatible)
+	cfg.Compaction.MaxTailTokens = 30
+	cfg.Compaction.RecentMessages = 0
+	journal := openJournal(t, dir)
+	rules := aiuditor.Stub{Rules: aiuditor.Rules{DenyJobClasses: map[string]string{"parse": "denied"}}}
+	long := strings.Repeat("LONGTAILMARKER ", 40)
+	rec := do(New(cfg, rules, journal), "/v1/chat/completions", "parse", "task-1", "long-1", "", `{"messages":[{"role":"user","content":"`+long+`"}]}`)
+	if rec.Code != http.StatusForbidden || hits != 0 {
+		t.Fatalf("code %d hits %d body %s", rec.Code, hits, rec.Body.String())
+	}
+}
+
+func TestCompactionRequiresTheProxyTokenFirst(t *testing.T) {
+	hits := 0
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits++
+		_, _ = w.Write([]byte(`{"choices":[{"message":{"role":"assistant","content":"SUMMARYTEXT"}}],"usage":{"prompt_tokens":4,"completion_tokens":1}}`))
+	}))
+	defer upstream.Close()
+	dir := t.TempDir()
+	t.Setenv("CONDUCTOR_CHEAP_API_KEY", "test-key-do-not-log")
+	t.Setenv(config.ProxyTokenEnv, "proxy-token-for-tests")
+	cfg := loadTestConfig(t, dir, upstream.URL+"/v1", upstream.URL+"/v1", config.AuthEnv, config.ProviderOpenAICompatible)
+	cfg.Compaction.MaxTailTokens = 30
+	cfg.Compaction.RecentMessages = 0
+	journal := openJournal(t, dir)
+	long := strings.Repeat("LONGTAILMARKER ", 40)
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{"messages":[{"role":"user","content":"`+long+`"}]}`))
+	req.Header.Set("X-Conductor-Class", "parse")
+	req.Header.Set("X-Conductor-Task", "task-1")
+	req.Header.Set("X-Conductor-Step", "long-1")
+	rec := httptest.NewRecorder()
+	New(cfg, aiuditor.Stub{}, journal).ServeHTTP(rec, req)
+	if rec.Code != http.StatusUnauthorized || hits != 0 {
+		t.Fatalf("code %d hits %d body %s", rec.Code, hits, rec.Body.String())
+	}
+}
+
+func TestHistoryFailureKeepsTheOriginalTail(t *testing.T) {
+	var bodies []string
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		raw, _ := io.ReadAll(r.Body)
+		bodies = append(bodies, string(raw))
+		_, _ = w.Write([]byte(`{"choices":[{"message":{"role":"assistant","content":"SUMMARYTEXT"}}],"usage":{"prompt_tokens":4,"completion_tokens":1}}`))
+	}))
+	defer upstream.Close()
+	dir := t.TempDir()
+	if err := os.Mkdir(filepath.Join(dir, "history.jsonl"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("CONDUCTOR_CHEAP_API_KEY", "test-key-do-not-log")
+	cfg := loadTestConfig(t, dir, upstream.URL+"/v1", upstream.URL+"/v1", config.AuthEnv, config.ProviderOpenAICompatible)
+	cfg.Compaction.MaxTailTokens = 30
+	cfg.Compaction.RecentMessages = 0
+	journal := openJournal(t, dir)
+	long := strings.Repeat("LONGTAILMARKER ", 40)
+	rec := do(New(cfg, aiuditor.Stub{}, journal), "/v1/chat/completions", "parse", "task-1", "long-1", "", `{"messages":[{"role":"user","content":"`+long+`"}]}`)
+	if rec.Code != http.StatusOK {
+		t.Fatal(rec.Code, rec.Body.String())
+	}
+	main := bodies[len(bodies)-1]
+	if !strings.Contains(main, "LONGTAILMARKER") {
+		t.Fatal(main)
+	}
+}
+
+func TestAnthropicCheapTierCompactsWithMessages(t *testing.T) {
+	var paths []string
+	var versions []string
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		paths = append(paths, r.URL.Path)
+		versions = append(versions, r.Header.Get("anthropic-version"))
+		_, _ = w.Write([]byte(`{"id":"msg_1","type":"message","role":"assistant","content":[{"type":"text","text":"SUMMARYTEXT"}],"usage":{"input_tokens":4,"output_tokens":1}}`))
+	}))
+	defer upstream.Close()
+	dir := t.TempDir()
+	cfg := loadTestConfig(t, dir, upstream.URL+"/v1", upstream.URL+"/v1", config.AuthPassthrough, config.ProviderAnthropic)
+	cfg.Compaction.MaxTailTokens = 30
+	cfg.Compaction.RecentMessages = 0
+	journal := openJournal(t, dir)
+	long := strings.Repeat("LONGTAILMARKER ", 40)
+	rec := do(New(cfg, aiuditor.Stub{}, journal), "/v1/chat/completions", "parse", "task-1", "long-1", "", `{"messages":[{"role":"user","content":"`+long+`"}]}`)
+	if rec.Code != http.StatusOK || len(paths) < 1 || paths[0] != "/v1/messages" || versions[0] == "" {
+		t.Fatalf("code %d paths %v versions %v body %s", rec.Code, paths, versions, rec.Body.String())
+	}
+}
+
+func TestOversizedProviderBodyIsRejected(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.Copy(w, io.LimitReader(neverEnding('a'), (32<<20)+8))
+	}))
+	defer upstream.Close()
+	dir := t.TempDir()
+	t.Setenv("CONDUCTOR_CHEAP_API_KEY", "test-key-do-not-log")
+	cfg := loadTestConfig(t, dir, upstream.URL+"/v1", upstream.URL+"/v1", config.AuthEnv, config.ProviderOpenAICompatible)
+	journal := openJournal(t, dir)
+	rec := do(New(cfg, aiuditor.Stub{}, journal), "/v1/embeddings", "embed", "task-1", "emb-1", "", `{"input":"hello"}`)
+	if rec.Code != http.StatusBadGateway || !strings.Contains(rec.Body.String(), "too large") {
+		t.Fatal(rec.Code, rec.Body.String())
+	}
+	records, err := metrics.ReadJournal(journal.Path())
+	if err != nil || records[0].UsageStatus != metrics.StatusUncertain {
+		t.Fatal(err, records)
+	}
+}
+
+type neverEnding byte
+
+func (b neverEnding) Read(p []byte) (int, error) {
+	for i := range p {
+		p[i] = byte(b)
+	}
+	return len(p), nil
+}
+
 func TestModelsAndUnknownClass(t *testing.T) {
 	dir := t.TempDir()
 	cfg := loadTestConfig(t, dir, "http://127.0.0.1:9/v1", "http://127.0.0.1:9/v1", config.AuthPassthrough, config.ProviderOpenAICompatible)
