@@ -391,6 +391,29 @@ func TestTruncatedProviderBodyIsUncertain(t *testing.T) {
 	}
 }
 
+func TestOversizedStreamLineIsUncertain(t *testing.T) {
+	previous := maxSSELine
+	maxSSELine = 64
+	t.Cleanup(func() { maxSSELine = previous })
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = io.Copy(w, io.LimitReader(neverEnding('a'), 256))
+	}))
+	defer upstream.Close()
+	dir := t.TempDir()
+	t.Setenv("CONDUCTOR_CHEAP_API_KEY", "test-key-do-not-log")
+	cfg := loadTestConfig(t, dir, upstream.URL+"/v1", upstream.URL+"/v1", config.AuthEnv, config.ProviderOpenAICompatible)
+	journal := openJournal(t, dir)
+	rec := do(New(cfg, aiuditor.Stub{}, journal), "/v1/chat/completions", "summarize", "task-1", "huge-line", "", `{"stream":true,"messages":[{"role":"user","content":"hi"}]}`)
+	if rec.Code != http.StatusOK || rec.Body.Len() > maxSSELine {
+		t.Fatalf("code %d bytes %d body %q", rec.Code, rec.Body.Len(), rec.Body.String())
+	}
+	records, err := metrics.ReadJournal(journal.Path())
+	if err != nil || len(records) != 1 || records[0].UsageStatus != metrics.StatusUncertain || records[0].Error == nil {
+		t.Fatal(err, records)
+	}
+}
+
 func TestTruncatedStreamIsUncertain(t *testing.T) {
 	payload := "data: {\"usage\":{\"prompt_tokens\":6,\"completion_tokens\":1}}\n\n"
 	base := truncatedServer(t, "200 OK", "text/event-stream", payload)

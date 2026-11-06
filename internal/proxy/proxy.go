@@ -34,6 +34,11 @@ import (
 
 const maxBody = 32 << 20
 
+// maxSSELine bounds one streaming event. A provider that never sends a
+// newline cannot grow the proxy without limit. Streaming reads have no
+// overall deadline, so the cap is what stops the read.
+var maxSSELine = maxBody
+
 var idPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._:-]{0,199}$`)
 
 // Proxy serves the local endpoints.
@@ -270,9 +275,17 @@ func (p *Proxy) stream(w http.ResponseWriter, client *http.Request, resp *http.R
 		if n > 0 {
 			chunk := buf[:n]
 			pending = append(pending, chunk...)
+			overflow := false
 			for {
 				i := bytes.IndexByte(pending, '\n')
 				if i < 0 {
+					if len(pending) > maxSSELine {
+						overflow = true
+					}
+					break
+				}
+				if i > maxSSELine {
+					overflow = true
 					break
 				}
 				line := pending[:i]
@@ -285,7 +298,18 @@ func (p *Proxy) stream(w http.ResponseWriter, client *http.Request, resp *http.R
 					usage.Absorb(&acc, payload, wire.Protocol == translate.ProtoEmbeddings)
 				}
 			}
+			if overflow {
+				pending = nil
+				readErr = fmt.Errorf("provider stream event is too large")
+				_ = resp.Body.Close()
+				break
+			}
 			out := bridge.Consume(chunk)
+			if bridge.TooLarge() {
+				readErr = fmt.Errorf("provider stream event is too large")
+				_ = resp.Body.Close()
+				break
+			}
 			if len(out) > 0 {
 				_, _ = w.Write(redact(out, secrets))
 				flush(w)

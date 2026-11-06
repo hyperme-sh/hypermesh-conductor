@@ -154,6 +154,17 @@ func TestChatStreamClosesContentBlocks(t *testing.T) {
 	}
 }
 
+func TestStreamDropsAnOversizedLine(t *testing.T) {
+	previous := maxEventBytes
+	maxEventBytes = 16
+	t.Cleanup(func() { maxEventBytes = previous })
+	stream := NewStream(ProtoMessages, ProtoChat)
+	out := stream.Consume([]byte(strings.Repeat("a", 40)))
+	if !stream.TooLarge() || len(stream.buf) != 0 || !strings.Contains(string(out), "too large") {
+		t.Fatalf("large %v buf %d out %s", stream.TooLarge(), len(stream.buf), out)
+	}
+}
+
 func TestChatStreamKeepsToolCalls(t *testing.T) {
 	stream := NewStream(ProtoMessages, ProtoChat)
 	chunk := "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_w\",\"type\":\"function\",\"function\":{\"name\":\"weather\",\"arguments\":\"{\\\"q\\\":1}\"}}]}}]}\n\n"

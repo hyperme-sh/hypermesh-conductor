@@ -23,7 +23,12 @@ type Stream struct {
 	nextContent int
 	respOpened  bool
 	respText    strings.Builder
+	tooLarge    bool
 }
+
+// maxEventBytes is the largest SSE line the bridge will buffer. A provider
+// that never sends a newline cannot grow this buffer without limit.
+var maxEventBytes = 32 << 20
 
 // NewStream starts a bridge. Identical protocols copy bytes unchanged.
 func NewStream(clientProto, upstreamProto string) *Stream {
@@ -43,6 +48,9 @@ func openaiFamily(proto string) bool {
 
 // Consume translates the next upstream chunk into client bytes.
 func (s *Stream) Consume(chunk []byte) []byte {
+	if s.failed {
+		return nil
+	}
 	if s.passthrough() {
 		return chunk
 	}
@@ -51,12 +59,32 @@ func (s *Stream) Consume(chunk []byte) []byte {
 	for {
 		i := bytes.IndexByte(s.buf, '\n')
 		if i < 0 {
+			if len(s.buf) > maxEventBytes {
+				return s.failLarge(&out)
+			}
 			break
+		}
+		if i > maxEventBytes {
+			return s.failLarge(&out)
 		}
 		line := strings.TrimRight(string(s.buf[:i]), "\r")
 		s.buf = s.buf[i+1:]
 		out.Write(s.onLine(line))
 	}
+	return out.Bytes()
+}
+
+// TooLarge reports that an upstream event exceeded the SSE line cap.
+func (s *Stream) TooLarge() bool { return s.tooLarge }
+
+func (s *Stream) failLarge(out *bytes.Buffer) []byte {
+	s.failed = true
+	s.tooLarge = true
+	s.done = true
+	s.buf = nil
+	out.Write(s.clientError(map[string]any{
+		"error": map[string]any{"message": "provider stream event is too large"},
+	}))
 	return out.Bytes()
 }
 
