@@ -23,7 +23,19 @@ type Stream struct {
 	nextContent int
 	respOpened  bool
 	respText    strings.Builder
+	textOpen    bool
+	textIndex   int
+	nextOut     int
+	respCalls   []responseCall
 	tooLarge    bool
+}
+
+type responseCall struct {
+	block int
+	index int
+	id    string
+	name  string
+	args  strings.Builder
 }
 
 // maxEventBytes is the largest SSE line the bridge will buffer. A provider
@@ -313,53 +325,129 @@ func (s *Stream) anthropicToResponses(kind string, obj map[string]any) []byte {
 				s.id = id
 			}
 		}
-		return s.openResponses()
-	case "content_block_delta":
-		delta, _ := obj["delta"].(map[string]any)
-		if delta["type"] != "text_delta" {
+		return s.ensureResponse()
+	case "content_block_start":
+		block, _ := obj["content_block"].(map[string]any)
+		if block["type"] != "tool_use" {
 			return nil
 		}
-		text, _ := delta["text"].(string)
-		var out bytes.Buffer
-		if !s.respOpened {
-			out.Write(s.openResponses())
+		return s.openFunctionCall(obj, block)
+	case "content_block_delta":
+		delta, _ := obj["delta"].(map[string]any)
+		switch delta["type"] {
+		case "text_delta":
+			text, _ := delta["text"].(string)
+			var out bytes.Buffer
+			if !s.textOpen {
+				out.Write(s.openResponses())
+			}
+			s.respText.WriteString(text)
+			out.Write(sseData(map[string]any{
+				"type":          "response.output_text.delta",
+				"output_index":  s.textIndex,
+				"content_index": 0,
+				"delta":         text,
+			}))
+			return out.Bytes()
+		case "input_json_delta":
+			return s.appendFunctionArgs(obj, delta)
+		default:
+			return nil
 		}
-		s.respText.WriteString(text)
-		out.Write(sseData(map[string]any{
-			"type":          "response.output_text.delta",
-			"output_index":  0,
-			"content_index": 0,
-			"delta":         text,
-		}))
-		return out.Bytes()
 	case "message_stop":
 		s.done = true
-		var out bytes.Buffer
-		if !s.respOpened {
-			out.Write(s.openResponses())
-		}
-		text := s.respText.String()
-		out.Write(sseData(map[string]any{
-			"type": "response.output_text.done", "output_index": 0, "content_index": 0, "text": text,
-		}))
-		out.Write(sseData(map[string]any{
-			"type": "response.content_part.done", "output_index": 0, "content_index": 0,
-			"part": map[string]any{"type": "output_text", "text": text},
-		}))
-		out.Write(sseData(map[string]any{
-			"type": "response.output_item.done", "output_index": 0,
-			"item": s.responsesMessage(text),
-		}))
-		out.Write(sseData(map[string]any{
-			"type":     "response.completed",
-			"response": s.responsesObject(text, "completed"),
-		}))
-		return out.Bytes()
+		return s.finishResponses()
 	}
 	return nil
 }
 
-func (s *Stream) openResponses() []byte {
+func (s *Stream) openFunctionCall(obj, block map[string]any) []byte {
+	var out bytes.Buffer
+	out.Write(s.ensureResponse())
+	blockIndex, ok := eventIndex(obj["index"])
+	if !ok {
+		blockIndex = len(s.respCalls)
+	}
+	id, _ := block["id"].(string)
+	name, _ := block["name"].(string)
+	call := responseCall{block: blockIndex, index: s.allocOut(), id: id, name: name}
+	s.respCalls = append(s.respCalls, call)
+	out.Write(sseData(map[string]any{
+		"type":         "response.output_item.added",
+		"output_index": call.index,
+		"item": map[string]any{
+			"type": "function_call", "id": id, "call_id": id, "name": name, "arguments": "", "status": "in_progress",
+		},
+	}))
+	return out.Bytes()
+}
+
+func (s *Stream) appendFunctionArgs(obj, delta map[string]any) []byte {
+	partial, _ := delta["partial_json"].(string)
+	blockIndex, ok := eventIndex(obj["index"])
+	if !ok {
+		return nil
+	}
+	for i := range s.respCalls {
+		if s.respCalls[i].block != blockIndex {
+			continue
+		}
+		s.respCalls[i].args.WriteString(partial)
+		return sseData(map[string]any{
+			"type":         "response.function_call_arguments.delta",
+			"item_id":      s.respCalls[i].id,
+			"output_index": s.respCalls[i].index,
+			"delta":        partial,
+		})
+	}
+	return nil
+}
+
+func (s *Stream) allocOut() int {
+	n := s.nextOut
+	s.nextOut++
+	return n
+}
+
+func (s *Stream) finishResponses() []byte {
+	var out bytes.Buffer
+	if !s.respOpened {
+		out.Write(s.openResponses())
+	}
+	text := s.respText.String()
+	if s.textOpen {
+		out.Write(sseData(map[string]any{
+			"type": "response.output_text.done", "output_index": s.textIndex, "content_index": 0, "text": text,
+		}))
+		out.Write(sseData(map[string]any{
+			"type": "response.content_part.done", "output_index": s.textIndex, "content_index": 0,
+			"part": map[string]any{"type": "output_text", "text": text},
+		}))
+		out.Write(sseData(map[string]any{
+			"type": "response.output_item.done", "output_index": s.textIndex,
+			"item": s.responsesMessage(text),
+		}))
+	}
+	for i := range s.respCalls {
+		call := &s.respCalls[i]
+		args := call.args.String()
+		out.Write(sseData(map[string]any{
+			"type": "response.function_call_arguments.done", "item_id": call.id,
+			"output_index": call.index, "arguments": args,
+		}))
+		out.Write(sseData(map[string]any{
+			"type": "response.output_item.done", "output_index": call.index,
+			"item": functionCallItem(call.id, call.name, args, "completed"),
+		}))
+	}
+	out.Write(sseData(map[string]any{
+		"type":     "response.completed",
+		"response": s.responsesObject(text, "completed"),
+	}))
+	return out.Bytes()
+}
+
+func (s *Stream) ensureResponse() []byte {
 	if s.respOpened {
 		return nil
 	}
@@ -367,17 +455,28 @@ func (s *Stream) openResponses() []byte {
 	if s.id == "" {
 		s.id = "resp"
 	}
+	return sseData(map[string]any{
+		"type": "response.created",
+		"response": map[string]any{
+			"id": s.id, "object": "response", "status": "in_progress", "output": []any{},
+		},
+	})
+}
+
+func (s *Stream) openResponses() []byte {
+	if s.textOpen {
+		return nil
+	}
 	var out bytes.Buffer
+	out.Write(s.ensureResponse())
+	s.textOpen = true
+	s.textIndex = s.allocOut()
 	out.Write(sseData(map[string]any{
-		"type":     "response.created",
-		"response": s.responsesObject("", "in_progress"),
-	}))
-	out.Write(sseData(map[string]any{
-		"type": "response.output_item.added", "output_index": 0,
+		"type": "response.output_item.added", "output_index": s.textIndex,
 		"item": map[string]any{"id": s.id, "type": "message", "role": "assistant", "content": []any{}},
 	}))
 	out.Write(sseData(map[string]any{
-		"type": "response.content_part.added", "output_index": 0, "content_index": 0,
+		"type": "response.content_part.added", "output_index": s.textIndex, "content_index": 0,
 		"part": map[string]any{"type": "output_text", "text": ""},
 	}))
 	return out.Bytes()
@@ -393,7 +492,41 @@ func (s *Stream) responsesMessage(text string) map[string]any {
 func (s *Stream) responsesObject(text, status string) map[string]any {
 	return map[string]any{
 		"id": s.id, "object": "response", "status": status,
-		"output": []any{s.responsesMessage(text)},
+		"output": s.responseOutput(text),
+	}
+}
+
+func (s *Stream) responseOutput(text string) []any {
+	type slot struct {
+		index int
+		item  any
+	}
+	var slots []slot
+	if s.textOpen {
+		slots = append(slots, slot{s.textIndex, s.responsesMessage(text)})
+	}
+	for i := range s.respCalls {
+		call := &s.respCalls[i]
+		slots = append(slots, slot{call.index, functionCallItem(call.id, call.name, call.args.String(), "completed")})
+	}
+	for i := 1; i < len(slots); i++ {
+		for j := i; j > 0 && slots[j].index < slots[j-1].index; j-- {
+			slots[j], slots[j-1] = slots[j-1], slots[j]
+		}
+	}
+	out := make([]any, 0, len(slots))
+	for _, item := range slots {
+		out = append(out, item.item)
+	}
+	if len(out) == 0 {
+		out = append(out, s.responsesMessage(text))
+	}
+	return out
+}
+
+func functionCallItem(id, name, args, status string) map[string]any {
+	return map[string]any{
+		"type": "function_call", "id": id, "call_id": id, "name": name, "arguments": args, "status": status,
 	}
 }
 

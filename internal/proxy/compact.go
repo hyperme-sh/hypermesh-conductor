@@ -133,7 +133,11 @@ func (p *Proxy) cheapSummary(ctx context.Context, client *http.Request, tail str
 	} else if verdict.Action == aiuditor.Deny {
 		return "", usage.UncertainUsage(), 0, fmt.Errorf("aiuditor deny: %s", verdict.Reason)
 	} else if verdict.Action == aiuditor.Modify && json.Valid(verdict.Body) {
-		bodyToSend = verdict.Body
+		forced, err := forceModel(verdict.Body, tier.Model)
+		if err != nil {
+			return "", usage.UncertainUsage(), 0, err
+		}
+		bodyToSend = forced
 	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, tier.BaseURL+"/"+wire.Path, bytes.NewReader(bodyToSend))
 	if err != nil {

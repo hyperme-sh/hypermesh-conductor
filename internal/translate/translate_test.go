@@ -195,6 +195,30 @@ func TestResponsesToolsAndStreamLifecycle(t *testing.T) {
 	}
 }
 
+func TestResponsesOutputKeepsToolCalls(t *testing.T) {
+	body := []byte(`{"id":"msg_1","type":"message","role":"assistant","content":[{"type":"tool_use","id":"call_w","name":"weather","input":{"city":"Paris"}}],"stop_reason":"tool_use"}`)
+	out, err := Response(ProtoResponses, ProtoMessages, body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(out)
+	if !strings.Contains(text, `"type":"function_call"`) || !strings.Contains(text, `"name":"weather"`) || !strings.Contains(text, `"call_id":"call_w"`) || !strings.Contains(text, "Paris") || strings.Contains(text, "[tool_use weather]") {
+		t.Fatal(text)
+	}
+	stream := NewStream(ProtoResponses, ProtoMessages)
+	var streamed string
+	for _, chunk := range []string{
+		"event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":1,\"content_block\":{\"type\":\"tool_use\",\"id\":\"call_w\",\"name\":\"weather\"}}\n\n",
+		"event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":1,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"{\\\"city\\\":\\\"Paris\\\"}\"}}\n\n",
+		"event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n",
+	} {
+		streamed += string(stream.Consume([]byte(chunk)))
+	}
+	if !strings.Contains(streamed, `"type":"function_call"`) || !strings.Contains(streamed, "response.function_call_arguments.delta") || !strings.Contains(streamed, "Paris") || !strings.Contains(streamed, `"type":"response.completed"`) {
+		t.Fatal(streamed)
+	}
+}
+
 func TestResponsesToolItemsBecomeAnthropicBlocks(t *testing.T) {
 	body := []byte(`{"input":[{"type":"function_call","call_id":"call_1","name":"lookup","arguments":"{\"q\":1}"},{"type":"function_call_output","call_id":"call_1","output":"balance is 930"}]}`)
 	wire, err := Request(ProtoResponses, ProviderAnthropic, "frontier", body)

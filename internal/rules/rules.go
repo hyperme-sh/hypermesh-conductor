@@ -219,16 +219,45 @@ func Marshal(value any) ([]byte, error) {
 	return append(raw, '\n'), nil
 }
 
-// SaveActive writes the live policy.
+// SaveActive writes the live policy. The bytes land in a temporary file in the
+// same directory and replace the active file with one rename, so a reader
+// never observes a truncated policy.
 func SaveActive(path string, file File) error {
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+	dir := filepath.Dir(path)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return err
 	}
 	raw, err := Marshal(file)
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(path, raw, 0o644)
+	tmp, err := os.CreateTemp(dir, ".policy-*")
+	if err != nil {
+		return err
+	}
+	tmpName := tmp.Name()
+	keep := false
+	defer func() {
+		if !keep {
+			_ = os.Remove(tmpName)
+		}
+	}()
+	if _, err := tmp.Write(raw); err != nil {
+		_ = tmp.Close()
+		return err
+	}
+	if err := tmp.Chmod(0o644); err != nil {
+		_ = tmp.Close()
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	if err := os.Rename(tmpName, path); err != nil {
+		return err
+	}
+	keep = true
+	return nil
 }
 
 // Diff returns sorted lines of changed policy fields.

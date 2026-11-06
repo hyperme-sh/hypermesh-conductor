@@ -755,7 +755,7 @@ func anthropicResponseToResponses(body []byte) ([]byte, error) {
 	if err := json.Unmarshal(body, &msg); err != nil {
 		return nil, fmt.Errorf("provider response was not JSON")
 	}
-	text, err := anthropicContentToText(msg["content"])
+	output, err := anthropicContentToResponsesOutput(msg["content"])
 	if err != nil {
 		return nil, err
 	}
@@ -763,19 +763,93 @@ func anthropicResponseToResponses(body []byte) ([]byte, error) {
 		"id":     msg["id"],
 		"object": "response",
 		"status": "completed",
-		"output": []any{map[string]any{
-			"type": "message",
-			"role": "assistant",
-			"content": []any{map[string]any{
-				"type": "output_text",
-				"text": text,
-			}},
-		}},
+		"output": output,
 	}
 	if usage, ok := msg["usage"].(map[string]any); ok {
 		out["usage"] = usageToAnthropic(usage)
 	}
 	return json.Marshal(out)
+}
+
+func anthropicContentToResponsesOutput(content any) ([]any, error) {
+	switch value := content.(type) {
+	case string:
+		return []any{responsesTextMessage(value)}, nil
+	case nil:
+		return []any{responsesTextMessage("")}, nil
+	case []any:
+		var output []any
+		var texts []string
+		flush := func() {
+			if len(texts) == 0 {
+				return
+			}
+			output = append(output, responsesTextMessage(strings.Join(texts, "")))
+			texts = nil
+		}
+		for _, part := range value {
+			obj, ok := part.(map[string]any)
+			if !ok {
+				return nil, fmt.Errorf("provider response was not JSON")
+			}
+			switch obj["type"] {
+			case "text":
+				text, _ := obj["text"].(string)
+				texts = append(texts, text)
+			case "tool_use":
+				flush()
+				item, err := responsesFunctionCall(obj)
+				if err != nil {
+					return nil, err
+				}
+				output = append(output, item)
+			default:
+				return nil, fmt.Errorf("unsupported content for protocol translation")
+			}
+		}
+		flush()
+		if len(output) == 0 {
+			output = append(output, responsesTextMessage(""))
+		}
+		return output, nil
+	default:
+		return nil, fmt.Errorf("unsupported content for protocol translation")
+	}
+}
+
+func responsesTextMessage(text string) map[string]any {
+	return map[string]any{
+		"type": "message",
+		"role": "assistant",
+		"content": []any{map[string]any{
+			"type": "output_text",
+			"text": text,
+		}},
+	}
+}
+
+func responsesFunctionCall(block map[string]any) (map[string]any, error) {
+	name, _ := block["name"].(string)
+	id, _ := block["id"].(string)
+	if name == "" {
+		return nil, fmt.Errorf("unsupported content for protocol translation")
+	}
+	raw := []byte("{}")
+	if block["input"] != nil {
+		encoded, err := json.Marshal(block["input"])
+		if err != nil {
+			return nil, err
+		}
+		raw = encoded
+	}
+	return map[string]any{
+		"type":      "function_call",
+		"id":        id,
+		"call_id":   id,
+		"name":      name,
+		"arguments": string(raw),
+		"status":    "completed",
+	}, nil
 }
 
 func anthropicToolCalls(content any) []any {

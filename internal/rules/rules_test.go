@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/hyperme-sh/hypermesh-conductor/internal/history"
@@ -104,6 +105,51 @@ func TestApplyRejectsAIULooseningAndRollbackRestores(t *testing.T) {
 	restored, err := Load(active)
 	if err != nil || restored.Routing.EscalateWhenPeakTokensAbove["summarize"] != 0 {
 		t.Fatal(err, restored.Routing)
+	}
+}
+
+func TestSaveActiveDoesNotExposeAPartialFile(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "active.json")
+	if err := SaveActive(path, Defaults()); err != nil {
+		t.Fatal(err)
+	}
+	var wg sync.WaitGroup
+	var mu sync.Mutex
+	var got error
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		for i := 0; i < 80; i++ {
+			if _, err := Load(path); err != nil {
+				mu.Lock()
+				got = err
+				mu.Unlock()
+				return
+			}
+		}
+	}()
+	go func() {
+		defer wg.Done()
+		file := Defaults()
+		file.Routing.ClassTiers = map[string]string{"parse": "frontier"}
+		for i := 0; i < 80; i++ {
+			file.Version = i + 1
+			if err := SaveActive(path, file); err != nil {
+				mu.Lock()
+				got = err
+				mu.Unlock()
+				return
+			}
+		}
+	}()
+	wg.Wait()
+	if got != nil {
+		t.Fatal(got)
+	}
+	loaded, err := Load(path)
+	if err != nil || loaded.Routing.ClassTiers["parse"] != "frontier" {
+		t.Fatal(err, loaded.Routing.ClassTiers)
 	}
 }
 

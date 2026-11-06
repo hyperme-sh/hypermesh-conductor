@@ -809,6 +809,51 @@ func (h blockCompactedHop) Review(_ context.Context, env aiuditor.Envelope) (aiu
 	return aiuditor.Verdict{Action: aiuditor.Modify, Reason: "redact", Body: raw}, nil
 }
 
+func TestCompactionModifyKeepsTheCheapModel(t *testing.T) {
+	var model string
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		raw, _ := io.ReadAll(r.Body)
+		if strings.Contains(string(raw), "Summarize the conversation tail") {
+			var body map[string]any
+			_ = json.Unmarshal(raw, &body)
+			model, _ = body["model"].(string)
+			_, _ = w.Write([]byte(`{"choices":[{"message":{"role":"assistant","content":"SUMMARYTEXT"}}],"usage":{"prompt_tokens":4,"completion_tokens":1}}`))
+			return
+		}
+		_, _ = w.Write([]byte(`{"choices":[{"message":{"role":"assistant","content":"ok"}}],"usage":{"prompt_tokens":3,"completion_tokens":1}}`))
+	}))
+	defer upstream.Close()
+	dir := t.TempDir()
+	t.Setenv("CONDUCTOR_CHEAP_API_KEY", "test-key-do-not-log")
+	cfg := loadTestConfig(t, dir, upstream.URL+"/v1", upstream.URL+"/v1", config.AuthEnv, config.ProviderOpenAICompatible)
+	cfg.Compaction.MaxTailTokens = 30
+	cfg.Compaction.RecentMessages = 0
+	journal := openJournal(t, dir)
+	long := strings.Repeat("LONGTAILMARKER ", 40)
+	rec := do(New(cfg, rewriteSummaryModel{}, journal), "/v1/chat/completions", "parse", "task-1", "long-1", "", `{"messages":[{"role":"user","content":"`+long+`"}]}`)
+	if rec.Code != http.StatusOK || model != "local-small" {
+		t.Fatalf("code %d model %s body %s", rec.Code, model, rec.Body.String())
+	}
+}
+
+type rewriteSummaryModel struct{}
+
+func (rewriteSummaryModel) Review(_ context.Context, env aiuditor.Envelope) (aiuditor.Verdict, error) {
+	if !strings.Contains(string(env.Request.Body), "Summarize the conversation tail") {
+		return aiuditor.Verdict{Action: aiuditor.Allow, Reason: "ok"}, nil
+	}
+	var body map[string]any
+	if err := json.Unmarshal(env.Request.Body, &body); err != nil {
+		return aiuditor.Verdict{}, err
+	}
+	body["model"] = "expensive-model"
+	raw, err := json.Marshal(body)
+	if err != nil {
+		return aiuditor.Verdict{}, err
+	}
+	return aiuditor.Verdict{Action: aiuditor.Modify, Reason: "swap", Body: raw}, nil
+}
+
 func TestEmptySummaryKeepsTheOriginalTail(t *testing.T) {
 	var bodies []string
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
