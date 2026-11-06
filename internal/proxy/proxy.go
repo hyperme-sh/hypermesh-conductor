@@ -250,6 +250,16 @@ func (p *Proxy) forward(w http.ResponseWriter, client *http.Request, upstream *h
 		return
 	}
 	defer resp.Body.Close()
+	if resp.StatusCode >= 300 && resp.StatusCode < 400 {
+		_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 1<<20))
+		ms := elapsedMS(start)
+		record.LatencyMS = &ms
+		msg := fmt.Sprintf("provider HTTP %d", resp.StatusCode)
+		record.Error = &msg
+		record.UsageStatus = metrics.StatusUncertain
+		p.finish(w, client, http.StatusBadGateway, nil, record, secrets, false)
+		return
+	}
 	if resp.StatusCode >= 400 {
 		raw, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 		ms := elapsedMS(start)

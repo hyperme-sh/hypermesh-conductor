@@ -27,6 +27,7 @@ type Stream struct {
 	textIndex   int
 	nextOut     int
 	respCalls   []responseCall
+	respStop    string
 	translated  int
 	tooLarge    bool
 }
@@ -379,6 +380,13 @@ func (s *Stream) anthropicToResponses(kind string, obj map[string]any) []byte {
 		default:
 			return nil
 		}
+	case "message_delta":
+		if delta, ok := obj["delta"].(map[string]any); ok {
+			if reason, ok := delta["stop_reason"].(string); ok && reason != "" {
+				s.respStop = reason
+			}
+		}
+		return nil
 	case "message_stop":
 		s.done = true
 		return s.finishResponses()
@@ -469,9 +477,18 @@ func (s *Stream) finishResponses() []byte {
 			"item": functionCallItem(call.id, call.name, args, "completed"),
 		}))
 	}
+	status, details := responsesStatus(s.respStop)
+	event := "response.completed"
+	if status != "completed" {
+		event = "response.incomplete"
+	}
+	response := s.responsesObject(text, status)
+	if details != nil {
+		response["incomplete_details"] = details
+	}
 	out.Write(sseData(map[string]any{
-		"type":     "response.completed",
-		"response": s.responsesObject(text, "completed"),
+		"type":     event,
+		"response": response,
 	}))
 	return out.Bytes()
 }

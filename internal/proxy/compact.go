@@ -172,13 +172,13 @@ func (p *Proxy) cheapSummary(ctx context.Context, client *http.Request, tail str
 	}
 	start := time.Now()
 	resp, err := p.upstreamClient(tier.Timeout, false).Do(req)
-	latency := elapsedMS(start)
 	if err != nil {
-		return "", usage.UncertainUsage(), latency, err
+		return "", usage.UncertainUsage(), elapsedMS(start), err
 	}
 	defer resp.Body.Close()
 	body, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
-	if err != nil || resp.StatusCode >= 400 {
+	latency := elapsedMS(start)
+	if err != nil || resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		if err == nil {
 			err = fmt.Errorf("provider HTTP %d", resp.StatusCode)
 		}

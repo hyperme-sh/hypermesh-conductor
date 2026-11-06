@@ -200,6 +200,45 @@ func TestChatStreamKeepsToolCalls(t *testing.T) {
 	}
 }
 
+func TestResponsesTranslationKeepsInstructionsAndRefusesState(t *testing.T) {
+	body := []byte(`{"instructions":"be brief","input":[{"role":"system","content":"Follow these rules"},{"role":"developer","content":"Stay in scope"},{"role":"user","content":"hi"}]}`)
+	wire, err := Request(ProtoResponses, ProviderAnthropic, "frontier", body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(wire.Body)
+	wantSystem := `be brief\nFollow these rules\nStay in scope`
+	if strings.Contains(text, `"role":"system"`) || strings.Contains(text, `"role":"developer"`) || !strings.Contains(text, wantSystem) || !strings.Contains(text, `"role":"user"`) {
+		t.Fatal(text)
+	}
+	if _, err := Request(ProtoResponses, ProviderAnthropic, "frontier", []byte(`{"previous_response_id":"resp_prior","input":"what next?"}`)); err == nil {
+		t.Fatal("previous_response_id was forwarded")
+	}
+}
+
+func TestMaxTokensBecomesAnIncompleteResponse(t *testing.T) {
+	body := []byte(`{"id":"msg_1","content":[{"type":"text","text":"partial"}],"stop_reason":"max_tokens","usage":{"input_tokens":20,"output_tokens":4,"cache_read_input_tokens":80,"cache_creation_input_tokens":50}}`)
+	out, err := Response(ProtoResponses, ProtoMessages, body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(out)
+	if !strings.Contains(text, `"status":"incomplete"`) || !strings.Contains(text, `"reason":"max_output_tokens"`) || strings.Contains(text, `"status":"completed"`) {
+		t.Fatal(text)
+	}
+	if !strings.Contains(text, `"input_tokens":150`) || !strings.Contains(text, `"cached_tokens":80`) || strings.Contains(text, "cache_creation_input_tokens") || strings.Contains(text, "cache_read_input_tokens") {
+		t.Fatal(text)
+	}
+	stream := NewStream(ProtoResponses, ProtoMessages)
+	var streamed string
+	streamed += string(stream.Consume([]byte("event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"delta\":{\"type\":\"text_delta\",\"text\":\"partial\"}}\n\n")))
+	streamed += string(stream.Consume([]byte("event: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"max_tokens\"}}\n\n")))
+	streamed += string(stream.Consume([]byte("event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n")))
+	if !strings.Contains(streamed, `"type":"response.incomplete"`) || !strings.Contains(streamed, `"reason":"max_output_tokens"`) || strings.Contains(streamed, `"type":"response.completed"`) {
+		t.Fatal(streamed)
+	}
+}
+
 func TestResponsesToolsAndStreamLifecycle(t *testing.T) {
 	body := []byte(`{"tools":[{"type":"function","name":"weather","description":"Forecast","parameters":{"type":"object"}}],"tool_choice":"required","input":"hi"}`)
 	wire, err := Request(ProtoResponses, ProviderAnthropic, "frontier", body)

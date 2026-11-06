@@ -558,6 +558,68 @@ func truncatedServer(t *testing.T, status, contentType, body string) string {
 	return "http://" + ln.Addr().String() + "/v1"
 }
 
+func TestProviderRedirectIsNotSuccess(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Location", "http://169.254.169.254/latest")
+		w.WriteHeader(http.StatusTemporaryRedirect)
+		_, _ = io.WriteString(w, "not-a-stream")
+	}))
+	defer upstream.Close()
+	dir := t.TempDir()
+	t.Setenv("CONDUCTOR_CHEAP_API_KEY", "test-key-do-not-log")
+	cfg := loadTestConfig(t, dir, upstream.URL+"/v1", upstream.URL+"/v1", config.AuthEnv, config.ProviderOpenAICompatible)
+	journal := openJournal(t, dir)
+	rec := do(New(cfg, aiuditor.Stub{}, journal), "/v1/chat/completions", "parse", "task-1", "redir-1", "", `{"stream":true,"messages":[{"role":"user","content":"hi"}]}`)
+	if rec.Code != http.StatusBadGateway || strings.Contains(rec.Body.String(), "not-a-stream") || rec.Header().Get("Content-Type") == "text/event-stream" {
+		t.Fatalf("code %d type %s body %s", rec.Code, rec.Header().Get("Content-Type"), rec.Body.String())
+	}
+	records, err := metrics.ReadJournal(journal.Path())
+	if err != nil || len(records) != 1 || records[0].Error == nil || !strings.Contains(*records[0].Error, "307") || records[0].UsageStatus != metrics.StatusUncertain {
+		t.Fatal(err, records)
+	}
+}
+
+func TestCompactionLatencyIncludesTheBody(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		raw, _ := io.ReadAll(r.Body)
+		if strings.Contains(string(raw), "Summarize the conversation tail") {
+			w.WriteHeader(http.StatusOK)
+			if f, ok := w.(http.Flusher); ok {
+				f.Flush()
+			}
+			time.Sleep(200 * time.Millisecond)
+			_, _ = w.Write([]byte(`{"choices":[{"message":{"role":"assistant","content":"SUMMARYTEXT"}}],"usage":{"prompt_tokens":4,"completion_tokens":1}}`))
+			return
+		}
+		_, _ = w.Write([]byte(`{"choices":[{"message":{"role":"assistant","content":"ok"}}],"usage":{"prompt_tokens":4,"completion_tokens":1}}`))
+	}))
+	defer upstream.Close()
+	dir := t.TempDir()
+	t.Setenv("CONDUCTOR_CHEAP_API_KEY", "test-key-do-not-log")
+	cfg := loadTestConfig(t, dir, upstream.URL+"/v1", upstream.URL+"/v1", config.AuthEnv, config.ProviderOpenAICompatible)
+	cfg.Compaction.MaxTailTokens = 30
+	cfg.Compaction.RecentMessages = 0
+	journal := openJournal(t, dir)
+	long := strings.Repeat("LONGTAILMARKER ", 40)
+	rec := do(New(cfg, aiuditor.Stub{}, journal), "/v1/chat/completions", "parse", "task-1", "slow-1", "", `{"messages":[{"role":"user","content":"`+long+`"}]}`)
+	if rec.Code != http.StatusOK {
+		t.Fatal(rec.Code, rec.Body.String())
+	}
+	records, err := metrics.ReadJournal(journal.Path())
+	if err != nil {
+		t.Fatal(err)
+	}
+	var compacted *metrics.StepRecord
+	for i := range records {
+		if records[i].StepID == "slow-1.compact" {
+			compacted = &records[i]
+		}
+	}
+	if compacted == nil || compacted.LatencyMS == nil || *compacted.LatencyMS < 150 {
+		t.Fatal(records)
+	}
+}
+
 func TestCompactionKeepsThePrefixAndStoresTheTail(t *testing.T) {
 	var mains []string
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

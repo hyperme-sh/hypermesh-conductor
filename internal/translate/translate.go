@@ -208,6 +208,13 @@ func responsesToAnthropic(body []byte, model string) ([]byte, error) {
 	if err := json.Unmarshal(body, &req); err != nil {
 		return nil, fmt.Errorf("request body is not JSON")
 	}
+	if prior, ok := req["previous_response_id"].(string); ok && strings.TrimSpace(prior) != "" {
+		return nil, fmt.Errorf("previous_response_id cannot be translated")
+	}
+	var systemParts []string
+	if instructions, ok := req["instructions"].(string); ok && instructions != "" {
+		systemParts = append(systemParts, instructions)
+	}
 	messages := []any{}
 	switch input := req["input"].(type) {
 	case string:
@@ -218,6 +225,16 @@ func responsesToAnthropic(body []byte, model string) ([]byte, error) {
 			if !ok {
 				return nil, fmt.Errorf("unsupported content for protocol translation")
 			}
+			instruction, isInstruction, err := responsesInstruction(msg)
+			if err != nil {
+				return nil, err
+			}
+			if isInstruction {
+				if instruction != "" {
+					systemParts = append(systemParts, instruction)
+				}
+				continue
+			}
 			converted, err := responsesItemToAnthropic(msg)
 			if err != nil {
 				return nil, err
@@ -227,9 +244,12 @@ func responsesToAnthropic(body []byte, model string) ([]byte, error) {
 	default:
 		return nil, fmt.Errorf("unsupported content for protocol translation")
 	}
+	if len(messages) == 0 {
+		return nil, fmt.Errorf("unsupported content for protocol translation")
+	}
 	out := map[string]any{"model": model, "max_tokens": maxTokens(req), "messages": messages}
-	if instructions, ok := req["instructions"].(string); ok && instructions != "" {
-		out["system"] = instructions
+	if len(systemParts) > 0 {
+		out["system"] = strings.Join(systemParts, "\n")
 	}
 	if tools, ok := req["tools"].([]any); ok && len(tools) > 0 {
 		converted, err := responsesToolsToAnthropic(tools)
@@ -459,6 +479,27 @@ func userBlocksToOpenAI(blocks []any) ([]any, error) {
 		out = append(out, map[string]any{"role": "user", "content": ""})
 	}
 	return out, nil
+}
+
+func responsesInstruction(msg map[string]any) (string, bool, error) {
+	kind, _ := msg["type"].(string)
+	if kind != "" && kind != "message" {
+		return "", false, nil
+	}
+	role, _ := msg["role"].(string)
+	if role != "system" && role != "developer" {
+		return "", false, nil
+	}
+	text, err := contentToText(msg["content"])
+	if err != nil {
+		return "", false, err
+	}
+	if text == "" {
+		if direct, ok := msg["text"].(string); ok {
+			text = direct
+		}
+	}
+	return text, true, nil
 }
 
 func responsesItemToAnthropic(msg map[string]any) ([]any, error) {
@@ -759,16 +800,64 @@ func anthropicResponseToResponses(body []byte) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
+	status, details := responsesStatus(stringField(msg, "stop_reason"))
 	out := map[string]any{
 		"id":     msg["id"],
 		"object": "response",
-		"status": "completed",
+		"status": status,
 		"output": output,
 	}
+	if details != nil {
+		out["incomplete_details"] = details
+	}
 	if usage, ok := msg["usage"].(map[string]any); ok {
-		out["usage"] = usageToAnthropic(usage)
+		out["usage"] = usageToResponses(usage)
 	}
 	return json.Marshal(out)
+}
+
+func responsesStatus(stopReason string) (string, map[string]any) {
+	if stopReason == "max_tokens" {
+		return "incomplete", map[string]any{"reason": "max_output_tokens"}
+	}
+	return "completed", nil
+}
+
+func usageToResponses(usage map[string]any) map[string]any {
+	out := map[string]any{}
+	if n, ok := asInt(usage["output_tokens"]); ok {
+		out["output_tokens"] = n
+	}
+	if n, ok := asInt(usage["completion_tokens"]); ok {
+		out["output_tokens"] = n
+	}
+	if prompt, ok := asInt(usage["prompt_tokens"]); ok {
+		out["input_tokens"] = prompt
+		if cached, ok := openAICachedTokens(usage); ok {
+			out["input_tokens_details"] = map[string]any{"cached_tokens": cached}
+		}
+		return out
+	}
+	input, hasInput := asInt(usage["input_tokens"])
+	read, hasRead := asInt(usage["cache_read_input_tokens"])
+	created, hasCreated := asInt(usage["cache_creation_input_tokens"])
+	if hasInput || hasRead || hasCreated {
+		total := 0
+		if hasInput {
+			total += input
+		}
+		if hasRead {
+			total += read
+		}
+		if hasCreated {
+			total += created
+		}
+		out["input_tokens"] = total
+	}
+	if hasRead {
+		out["input_tokens_details"] = map[string]any{"cached_tokens": read}
+	}
+	return out
 }
 
 func anthropicContentToResponsesOutput(content any) ([]any, error) {
