@@ -35,6 +35,10 @@ import (
 
 const maxBody = 32 << 20
 
+func init() {
+	aiuditor.SetBodyBudget(reserveBody, releaseBody)
+}
+
 // bodyLimit is the total request-body bytes buffered at once, before
 // authorization. It is one max body, not one per connection.
 var (
@@ -978,8 +982,11 @@ func (p *Proxy) applyReview(w http.ResponseWriter, r *http.Request, base *metric
 		},
 	})
 	if hopErr != nil {
-		if p.Config.AIU.FailClosed {
+		if errors.Is(hopErr, aiuditor.ErrBudget) || p.Config.AIU.FailClosed {
 			msg := "aiuditor unreachable"
+			if errors.Is(hopErr, aiuditor.ErrBudget) {
+				msg = "request body budget exceeded"
+			}
 			base.Error = &msg
 			base.UsageStatus = metrics.StatusUncertain
 			p.finish(w, r, http.StatusServiceUnavailable, nil, *base, nil, false)

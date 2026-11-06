@@ -144,6 +144,9 @@ func (p *Proxy) cheapSummary(ctx context.Context, client *http.Request, tail str
 	})
 	bodyToSend := wire.Body
 	if hopErr != nil {
+		if errors.Is(hopErr, aiuditor.ErrBudget) {
+			return "", usage.UncertainUsage(), 0, errBodyBudget
+		}
 		if p.Config.AIU.FailClosed {
 			return "", usage.UncertainUsage(), 0, hopErr
 		}

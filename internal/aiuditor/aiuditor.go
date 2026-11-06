@@ -9,12 +9,30 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"strings"
 	"time"
 )
+
+// ErrBudget means the AIuditor response did not fit in the shared body budget.
+// The body was not retained.
+var ErrBudget = errors.New("aiuditor response budget exceeded")
+
+// reserveBudget and releaseBudget charge the process-wide body budget while
+// an HTTP verdict is read. The proxy installs them at startup.
+var (
+	reserveBudget func(int) bool
+	releaseBudget func(int)
+)
+
+// SetBodyBudget installs the shared reservation used while reading a verdict.
+func SetBodyBudget(reserve func(int) bool, release func(int)) {
+	reserveBudget = reserve
+	releaseBudget = release
+}
 
 const (
 	Allow  = "allow"
@@ -247,8 +265,16 @@ func (h HTTP) Review(ctx context.Context, env Envelope) (Verdict, error) {
 		return Verdict{}, fmt.Errorf("aiuditor unreachable")
 	}
 	defer resp.Body.Close()
-	respBody, err := io.ReadAll(io.LimitReader(resp.Body, 8<<20))
+	respBody, held, err := readVerdict(resp.Body, 8<<20)
+	defer func() {
+		if releaseBudget != nil {
+			releaseBudget(held)
+		}
+	}()
 	if err != nil {
+		if errors.Is(err, ErrBudget) {
+			return Verdict{}, err
+		}
 		return Verdict{}, fmt.Errorf("aiuditor unreachable")
 	}
 	if resp.StatusCode != http.StatusOK {
@@ -263,5 +289,35 @@ func (h HTTP) Review(ctx context.Context, env Envelope) (Verdict, error) {
 		return verdict, nil
 	default:
 		return Verdict{}, fmt.Errorf("aiuditor response has an unknown action")
+	}
+}
+
+// readVerdict buffers the hop response in chunks and reserves each chunk
+// before keeping it. The caller releases held. A failed reservation returns
+// ErrBudget and the bytes already reserved.
+func readVerdict(r io.Reader, limit int) ([]byte, int, error) {
+	var body []byte
+	held := 0
+	buf := make([]byte, 32*1024)
+	for {
+		n, err := r.Read(buf)
+		if n > 0 {
+			if len(body)+n > limit {
+				return nil, held, fmt.Errorf("aiuditor response is too large")
+			}
+			if reserveBudget != nil && !reserveBudget(n) {
+				return nil, held, ErrBudget
+			}
+			if reserveBudget != nil {
+				held += n
+			}
+			body = append(body, buf[:n]...)
+		}
+		if err == io.EOF {
+			return body, held, nil
+		}
+		if err != nil {
+			return nil, held, err
+		}
 	}
 }
