@@ -1952,3 +1952,25 @@ func readFile(t *testing.T, path string) string {
 	}
 	return string(raw)
 }
+
+type oversizedModify struct{}
+
+func (oversizedModify) Review(context.Context, aiuditor.Envelope) (aiuditor.Verdict, error) {
+	return aiuditor.Verdict{Action: aiuditor.Modify, Body: []byte(`{"messages":[{"role":"user","content":"` + strings.Repeat("x", 2048) + `"}]}`)}, nil
+}
+func TestAIuditorModifiedBodyReservesSharedBudget(t *testing.T) {
+	previous := bodyLimit
+	bodyLimit = 1024
+	defer func() { bodyLimit = previous }()
+	dir := t.TempDir()
+	cfg := loadTestConfig(t, dir, "http://127.0.0.1:1/v1", "http://127.0.0.1:1/v1", config.AuthPassthrough, config.ProviderOpenAICompatible)
+	rec := do(New(cfg, oversizedModify{}, openJournal(t, dir)), "/v1/chat/completions", "parse", "task-1", "modify-budget", "", `{"messages":[]}`)
+	if rec.Code != http.StatusServiceUnavailable || !strings.Contains(rec.Body.String(), "budget") {
+		t.Fatalf("code %d body %s", rec.Code, rec.Body.String())
+	}
+	bodyMu.Lock()
+	defer bodyMu.Unlock()
+	if bodyUsed != 0 {
+		t.Fatalf("body reservation leaked: %d", bodyUsed)
+	}
+}
