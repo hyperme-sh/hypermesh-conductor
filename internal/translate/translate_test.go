@@ -202,6 +202,24 @@ func TestTranslatedStreamCapsTotalText(t *testing.T) {
 	}
 }
 
+func TestToolStartsCountTowardTheStreamCap(t *testing.T) {
+	previous := maxEventBytes
+	maxEventBytes = 200
+	t.Cleanup(func() { maxEventBytes = previous })
+	stream := NewStream(ProtoResponses, ProtoMessages)
+	event := func(index int) string {
+		return "event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":" + string(rune('0'+index)) + ",\"content_block\":{\"type\":\"tool_use\",\"id\":\"ab\",\"name\":\"n\"}}\n\n"
+	}
+	if out := stream.Consume([]byte(event(1))); stream.TooLarge() || len(stream.respCalls) != 1 {
+		t.Fatalf("first too %v calls %d out %s", stream.TooLarge(), len(stream.respCalls), out)
+	}
+	_ = stream.Consume([]byte(event(2)))
+	out := string(stream.Consume([]byte(event(3))))
+	if !stream.TooLarge() || stream.respCalls != nil || !strings.Contains(out, "too large") {
+		t.Fatalf("too %v calls %v translated %d out %s", stream.TooLarge(), stream.respCalls, stream.translated, out)
+	}
+}
+
 func TestStreamDropsAnOversizedLine(t *testing.T) {
 	previous := maxEventBytes
 	maxEventBytes = 16

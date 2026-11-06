@@ -372,14 +372,15 @@ func (p *Proxy) stream(w http.ResponseWriter, client *http.Request, resp *http.R
 				break
 			}
 			out := bridge.Consume(chunk)
-			if bridge.TooLarge() {
-				readErr = fmt.Errorf("provider stream event is too large")
-				_ = resp.Body.Close()
-				break
-			}
 			if len(out) > 0 {
 				_, _ = w.Write(redact(out, secrets))
 				flush(w)
+			}
+			if bridge.TooLarge() {
+				pending = nil
+				readErr = fmt.Errorf("provider stream event is too large")
+				_ = resp.Body.Close()
+				break
 			}
 		}
 		if err != nil {

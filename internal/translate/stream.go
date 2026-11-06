@@ -41,9 +41,14 @@ type responseCall struct {
 	args  strings.Builder
 }
 
-// maxEventBytes is the largest SSE line the bridge will buffer. A provider
-// that never sends a newline cannot grow this buffer without limit.
+// maxEventBytes bounds one SSE line and the translated output retained for
+// one response, including tool-call names and ids.
 var maxEventBytes = 32 << 20
+
+// callMetaBytes is the retained cost of one tool-call record aside from its
+// name and id. Tool starts have to count, or a stream of empty calls grows
+// without hitting the text cap.
+const callMetaBytes = 64
 
 // NewStream starts a bridge. Identical protocols copy bytes unchanged.
 func NewStream(clientProto, upstreamProto string) *Stream {
@@ -410,6 +415,9 @@ func (s *Stream) openFunctionCall(obj, block map[string]any) []byte {
 	}
 	id, _ := block["id"].(string)
 	name, _ := block["name"].(string)
+	if !s.noteTranslated(len(id) + len(name) + callMetaBytes) {
+		return s.failLarge(&out)
+	}
 	call := responseCall{block: blockIndex, index: s.allocOut(), id: id, name: name}
 	s.respCalls = append(s.respCalls, call)
 	out.Write(sseData(map[string]any{
