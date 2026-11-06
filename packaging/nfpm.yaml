@@ -1,0 +1,20 @@
+# Package metadata for hypermesh-conductor. packaging/package.sh fills VERSION
+# and NFPM_ARCH (amd64 or arm64). Published asset names use x86_64 and aarch64,
+# matching the Visor bundle layout. This build is not a release.
+name: hypermesh-conductor
+arch: ${NFPM_ARCH}
+platform: linux
+version: ${VERSION}
+version_schema: none
+release: "1"
+section: utils
+priority: optional
+maintainer: Hypermesh <security@hyperme.sh>
+description: Localhost model proxy for Hypermesh Conductor
+homepage: https://github.com/hyperme-sh/hypermesh-conductor
+contents:
+  - src: ${CONDUCTOR_BIN}
+    dst: /usr/bin/conductor
+    expand: true
+    file_info:
+      mode: 0755

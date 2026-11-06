@@ -9,13 +9,16 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strings"
 
 	"github.com/hyperme-sh/hypermesh-conductor/internal/aiuditor"
 	"github.com/hyperme-sh/hypermesh-conductor/internal/config"
+	"github.com/hyperme-sh/hypermesh-conductor/internal/history"
 	"github.com/hyperme-sh/hypermesh-conductor/internal/metrics"
 	"github.com/hyperme-sh/hypermesh-conductor/internal/proxy"
 	"github.com/hyperme-sh/hypermesh-conductor/internal/routing"
+	"github.com/hyperme-sh/hypermesh-conductor/internal/rules"
 )
 
 // Main runs one invocation. args do not include the program name.
@@ -33,8 +36,12 @@ func Main(args []string, stdout, stderr io.Writer) int {
 		return serveCmd(args[1:], stdout, stderr)
 	case "run":
 		return runCmd(args[1:], stdout, stderr)
+	case "dream":
+		return dreamCmd(args[1:], stdout, stderr)
+	case "rules":
+		return rulesCmd(args[1:], stdout, stderr)
 	case "-h", "--help", "help":
-		fmt.Fprintln(stdout, "usage: conductor <route|run|summary|serve>")
+		fmt.Fprintln(stdout, "usage: conductor <route|run|summary|serve|dream|rules>")
 		return 0
 	default:
 		fmt.Fprintf(stderr, "unknown command %s\n", args[0])
@@ -252,6 +259,164 @@ func contentOf(body []byte) any {
 		}
 	}
 	return nil
+}
+
+func dreamCmd(args []string, stdout, stderr io.Writer) int {
+	fs := flag.NewFlagSet("dream", flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	journalPath := fs.String("journal", "", "measurement journal")
+	outcomesPath := fs.String("outcomes", "", "optional outcomes jsonl")
+	rulesPath := fs.String("rules", "", "active rules file, if one exists")
+	proposals := fs.String("proposals", "rules/proposals", "directory for inactive proposals")
+	bodies := fs.Bool("bodies", false, "opt in to reading the history store")
+	if err := fs.Parse(args); err != nil {
+		return 2
+	}
+	if *journalPath == "" {
+		fmt.Fprintln(stderr, "journal is required")
+		return 2
+	}
+	records, err := metrics.ReadJournal(*journalPath)
+	if err != nil {
+		fmt.Fprintln(stderr, err.Error())
+		return 2
+	}
+	var outcomes []rules.Outcome
+	if *outcomesPath != "" {
+		outcomes, err = readOutcomes(*outcomesPath)
+		if err != nil {
+			fmt.Fprintln(stderr, err.Error())
+			return 2
+		}
+	}
+	var past []history.Record
+	if *bodies {
+		past, err = history.Read(history.PathFor(*journalPath))
+		if err != nil {
+			fmt.Fprintln(stderr, err.Error())
+			return 2
+		}
+	}
+	active, err := rules.Load(*rulesPath)
+	if err != nil {
+		fmt.Fprintln(stderr, err.Error())
+		return 2
+	}
+	proposal, path, err := rules.Dream(rules.DreamInput{
+		Records: records, Outcomes: outcomes, History: past, Bodies: *bodies,
+	}, active, *proposals)
+	if err != nil {
+		fmt.Fprintln(stderr, err.Error())
+		return 2
+	}
+	fmt.Fprintf(stdout, "wrote inactive proposal %s version %d with %d evidence rows\n", path, proposal.Version, len(proposal.Evidence))
+	return 0
+}
+
+func rulesCmd(args []string, stdout, stderr io.Writer) int {
+	if len(args) == 0 {
+		fmt.Fprintln(stderr, "usage: conductor rules <diff|apply|rollback>")
+		return 2
+	}
+	switch args[0] {
+	case "diff":
+		return rulesDiff(args[1:], stdout, stderr)
+	case "apply":
+		return rulesApply(args[1:], stderr)
+	case "rollback":
+		return rulesRollback(args[1:], stderr)
+	default:
+		fmt.Fprintf(stderr, "unknown rules command %s\n", args[0])
+		return 2
+	}
+}
+
+func rulesDiff(args []string, stdout, stderr io.Writer) int {
+	fs := flag.NewFlagSet("rules diff", flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	activePath := fs.String("rules", "", "active rules file")
+	proposalPath := fs.String("proposal", "", "proposal file")
+	if err := fs.Parse(args); err != nil {
+		return 2
+	}
+	if *proposalPath == "" {
+		fmt.Fprintln(stderr, "proposal is required")
+		return 2
+	}
+	active, err := rules.Load(*activePath)
+	if err != nil {
+		fmt.Fprintln(stderr, err.Error())
+		return 2
+	}
+	raw, err := os.ReadFile(*proposalPath)
+	if err != nil {
+		fmt.Fprintln(stderr, err.Error())
+		return 2
+	}
+	proposal, err := rules.ParseProposal(raw)
+	if err != nil {
+		fmt.Fprintln(stderr, err.Error())
+		return 2
+	}
+	fmt.Fprint(stdout, rules.Diff(active, proposal.File))
+	return 0
+}
+
+func rulesApply(args []string, stderr io.Writer) int {
+	fs := flag.NewFlagSet("rules apply", flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	activePath := fs.String("rules", "rules/active.json", "active rules file")
+	proposalPath := fs.String("proposal", "", "proposal file")
+	if err := fs.Parse(args); err != nil {
+		return 2
+	}
+	if *proposalPath == "" {
+		fmt.Fprintln(stderr, "proposal is required")
+		return 2
+	}
+	if err := rules.Apply(*activePath, *proposalPath); err != nil {
+		fmt.Fprintln(stderr, err.Error())
+		return 2
+	}
+	return 0
+}
+
+func rulesRollback(args []string, stderr io.Writer) int {
+	fs := flag.NewFlagSet("rules rollback", flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	activePath := fs.String("rules", "rules/active.json", "active rules file")
+	if err := fs.Parse(args); err != nil {
+		return 2
+	}
+	if err := rules.Rollback(*activePath); err != nil {
+		fmt.Fprintln(stderr, err.Error())
+		return 2
+	}
+	return 0
+}
+
+func readOutcomes(path string) ([]rules.Outcome, error) {
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+	var out []rules.Outcome
+	start := 0
+	for i := 0; i <= len(raw); i++ {
+		if i == len(raw) || raw[i] == '\n' {
+			line := raw[start:i]
+			start = i + 1
+			if len(bytes.TrimSpace(line)) == 0 {
+				continue
+			}
+			var outcome rules.Outcome
+			if err := json.Unmarshal(line, &outcome); err != nil {
+				return nil, err
+			}
+			out = append(out, outcome)
+		}
+	}
+	return out, nil
 }
 
 func hopFrom(cfg config.Config) (aiuditor.Hop, error) {

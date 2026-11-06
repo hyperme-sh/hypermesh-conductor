@@ -18,11 +18,13 @@ import (
 	"time"
 
 	"github.com/hyperme-sh/hypermesh-conductor/internal/aiuditor"
+	"github.com/hyperme-sh/hypermesh-conductor/internal/compact"
 	"github.com/hyperme-sh/hypermesh-conductor/internal/config"
 	"github.com/hyperme-sh/hypermesh-conductor/internal/jsonbody"
 	"github.com/hyperme-sh/hypermesh-conductor/internal/metrics"
 	"github.com/hyperme-sh/hypermesh-conductor/internal/prefix"
 	"github.com/hyperme-sh/hypermesh-conductor/internal/routing"
+	"github.com/hyperme-sh/hypermesh-conductor/internal/rules"
 	"github.com/hyperme-sh/hypermesh-conductor/internal/translate"
 	"github.com/hyperme-sh/hypermesh-conductor/internal/usage"
 )
@@ -97,10 +99,26 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"error": map[string]any{"message": "request body must be a JSON object"}})
 		return
 	}
-	decision, err := routing.Route(className, suggest, p.Config.ClassTiers)
+	policy, err := rules.Load(p.Config.RulesFile)
 	if err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"error": map[string]any{"message": err.Error()}})
 		return
+	}
+	peak := compact.EstimateTokens(string(prepared))
+	clientHash, _ := hashBody(proto, prepared)
+	configHash, _ := p.Config.Prefix.SHA256()
+	prefixMatch := clientHash != "" && clientHash == configHash
+	if suggest == "" {
+		suggest = rules.Suggest(policy, prefixMatch)
+	}
+	decision, err := routing.Route(className, suggest, rules.EffectiveClassTiers(p.Config.ClassTiers, policy, className, peak))
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": map[string]any{"message": err.Error()}})
+		return
+	}
+	next, didCompact := p.maybeCompact(r.Context(), proto, prepared, taskID, stepID, clientHash)
+	if didCompact {
+		prepared = next
 	}
 	tier, err := p.Config.Endpoint(decision.Tier)
 	if err != nil {
@@ -129,6 +147,14 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		},
 	})
 	base := p.baseRecord(taskID, stepID, decision, tier.Model, prelimHash)
+	if didCompact {
+		yes := true
+		base.Compacted = &yes
+	}
+	if prefixMatch {
+		yes := true
+		base.PrefixCacheMatch = &yes
+	}
 	if hopErr != nil {
 		if p.Config.AIU.FailClosed {
 			msg := "aiuditor unreachable"

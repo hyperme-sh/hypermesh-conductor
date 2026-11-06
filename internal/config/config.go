@@ -88,6 +88,14 @@ type Config struct {
 	ClassTiers   map[string]string
 	CostRates    map[string]CostRate
 	AIU          AIU
+	Compaction   Compaction
+	RulesFile    string
+}
+
+// Compaction controls tail summarization. A zero max leaves the tail unchanged.
+type Compaction struct {
+	MaxTailTokens  int
+	RecentMessages int
 }
 
 // Endpoint returns the tier selected by routing.
@@ -193,6 +201,11 @@ func Load(path string) (Config, error) {
 	if err != nil {
 		return Config{}, err
 	}
+	compaction, err := parseCompaction(raw["compaction"])
+	if err != nil {
+		return Config{}, err
+	}
+	rulesFile, _ := raw["rules_file"].(string)
 	return Config{
 		Listen:       listen,
 		Journal:      journal,
@@ -203,7 +216,35 @@ func Load(path string) (Config, error) {
 		ClassTiers:   classTiers,
 		CostRates:    rates,
 		AIU:          aiu,
+		Compaction:   compaction,
+		RulesFile:    rulesFile,
 	}, nil
+}
+
+func parseCompaction(value any) (Compaction, error) {
+	out := Compaction{RecentMessages: 2}
+	if value == nil {
+		return Compaction{}, nil
+	}
+	obj, ok := value.(map[string]any)
+	if !ok {
+		return Compaction{}, fmt.Errorf("compaction must be an object")
+	}
+	if raw, ok := obj["max_tail_tokens"]; ok && raw != nil {
+		number, ok := asFloat(raw)
+		if !ok || number < 0 {
+			return Compaction{}, fmt.Errorf("compaction.max_tail_tokens must be a non-negative number")
+		}
+		out.MaxTailTokens = int(number)
+	}
+	if raw, ok := obj["recent_messages"]; ok && raw != nil {
+		number, ok := asFloat(raw)
+		if !ok || number < 0 {
+			return Compaction{}, fmt.Errorf("compaction.recent_messages must be a non-negative number")
+		}
+		out.RecentMessages = int(number)
+	}
+	return out, nil
 }
 
 // ValidateListen allows loopback addresses only.

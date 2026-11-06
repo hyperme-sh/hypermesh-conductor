@@ -1,0 +1,16 @@
+# Tail compaction
+
+The cacheable prefix is the system prompt and the tool definitions. Compaction edits only the tail past that prefix.
+
+`compaction.max_tail_tokens` in the endpoints file is the threshold. `0` leaves the tail unchanged. The size check is a local estimate (about four characters to a token), not a provider count. `compaction.recent_messages` keeps that many tail messages after the summary.
+
+When the tail is over the threshold, Conductor asks the cheap tier to summarize the older tail as goals, steps, facts, and notes. The summary replaces that older tail. Leading system messages keep the bytes they arrived with, so a prefix cache can still match. The original tail is appended to `history.jsonl` beside the metrics journal. The metrics journal records a `summarize` step for the compaction call and does not store the tail text.
+
+The forwarded request is routed with two signals:
+
+- peak context, from the same estimate
+- prefix-cache match, when the canonical system and tools equal the configured prefix
+
+A written rule may escalate a class when the estimate is above `escalate_when_peak_tokens_above`. Without that rule, a large tail is compacted and stays on its policy tier. A prefix match may propose the cheap tier. Routing still rejects a proposal that would change the written tier.
+
+Responses API string inputs are not compacted in this slice. Chat completions and Anthropic messages are.

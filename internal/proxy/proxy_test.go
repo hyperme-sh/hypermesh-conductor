@@ -431,6 +431,106 @@ func truncatedServer(t *testing.T, status, contentType, body string) string {
 	return "http://" + ln.Addr().String() + "/v1"
 }
 
+func TestCompactionKeepsThePrefixAndStoresTheTail(t *testing.T) {
+	var mains []string
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		raw, _ := io.ReadAll(r.Body)
+		if strings.Contains(string(raw), "Summarize the conversation tail") {
+			_, _ = w.Write([]byte(`{"choices":[{"message":{"role":"assistant","content":"SUMMARYTEXT"}}],"usage":{"prompt_tokens":12,"completion_tokens":2}}`))
+			return
+		}
+		mains = append(mains, string(raw))
+		_, _ = w.Write([]byte(`{"choices":[{"message":{"role":"assistant","content":"ok"}}],"usage":{"prompt_tokens":8,"completion_tokens":1}}`))
+	}))
+	defer upstream.Close()
+	dir := t.TempDir()
+	t.Setenv("CONDUCTOR_CHEAP_API_KEY", "test-key-do-not-log")
+	cfg := loadTestConfig(t, dir, upstream.URL+"/v1", upstream.URL+"/v1", config.AuthEnv, config.ProviderOpenAICompatible)
+	cfg.Compaction.MaxTailTokens = 30
+	cfg.Compaction.RecentMessages = 0
+	journal := openJournal(t, dir)
+	system := `{"role":"system","name":"keep","content":"Stay stable."}`
+	long := strings.Repeat("LONGTAILMARKER ", 40)
+	server := New(cfg, aiuditor.Stub{}, journal)
+	if rec := do(server, "/v1/chat/completions", "parse", "task-1", "long-1", "", `{"messages":[`+system+`,{"role":"user","content":"`+long+`"}]}`); rec.Code != http.StatusOK {
+		t.Fatal(rec.Code, rec.Body.String())
+	}
+	if rec := do(server, "/v1/chat/completions", "parse", "task-1", "short-1", "", `{"messages":[`+system+`,{"role":"user","content":"hi"}]}`); rec.Code != http.StatusOK {
+		t.Fatal(rec.Code, rec.Body.String())
+	}
+	if len(mains) != 2 {
+		t.Fatalf("main calls %d", len(mains))
+	}
+	if !strings.Contains(mains[0], system) || !strings.Contains(mains[0], "SUMMARYTEXT") || strings.Contains(mains[0], "LONGTAILMARKER") {
+		t.Fatal(mains[0])
+	}
+	if !strings.Contains(mains[1], system) {
+		t.Fatal(mains[1])
+	}
+	records, err := metrics.ReadJournal(journal.Path())
+	if err != nil {
+		t.Fatal(err)
+	}
+	var longRow, shortRow metrics.StepRecord
+	for _, row := range records {
+		if row.StepID == "long-1" {
+			longRow = row
+		}
+		if row.StepID == "short-1" {
+			shortRow = row
+		}
+	}
+	if longRow.PrefixSHA256 == "" || longRow.PrefixSHA256 != shortRow.PrefixSHA256 {
+		t.Fatalf("prefix hashes %s %s", longRow.PrefixSHA256, shortRow.PrefixSHA256)
+	}
+	if longRow.Compacted == nil || !*longRow.Compacted {
+		t.Fatal("expected compacted flag")
+	}
+	past, err := os.ReadFile(filepath.Join(dir, "history.jsonl"))
+	if err != nil || !strings.Contains(string(past), "LONGTAILMARKER") {
+		t.Fatal(err, string(past))
+	}
+	if strings.Contains(readFile(t, journal.Path()), "LONGTAILMARKER") || strings.Contains(readFile(t, journal.Path()), "SUMMARYTEXT") {
+		t.Fatal("metrics journal stored prompt text")
+	}
+}
+
+func TestThresholdRuleEscalatesAndAHintDoesNot(t *testing.T) {
+	cheapHits, frontierHits := 0, 0
+	cheap := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		cheapHits++
+		_, _ = w.Write([]byte(`{"usage":{"prompt_tokens":3,"completion_tokens":1}}`))
+	}))
+	defer cheap.Close()
+	frontier := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		frontierHits++
+		_, _ = w.Write([]byte(`{"usage":{"prompt_tokens":3,"completion_tokens":1}}`))
+	}))
+	defer frontier.Close()
+	dir := t.TempDir()
+	t.Setenv("CONDUCTOR_CHEAP_API_KEY", "test-key-do-not-log")
+	t.Setenv("CONDUCTOR_FRONTIER_API_KEY", "frontier-key-do-not-log")
+	cfg := loadTestConfig(t, dir, cheap.URL+"/v1", frontier.URL+"/v1", config.AuthEnv, config.ProviderOpenAICompatible)
+	journal := openJournal(t, dir)
+	long := strings.Repeat("token ", 80)
+	if rec := do(New(cfg, aiuditor.Stub{}, journal), "/v1/chat/completions", "summarize", "task-1", "plain-1", "", `{"messages":[{"role":"user","content":"`+long+`"}]}`); rec.Code != http.StatusOK || cheapHits != 1 || frontierHits != 0 {
+		t.Fatalf("default code %d cheap %d frontier %d body %s", rec.Code, cheapHits, frontierHits, rec.Body.String())
+	}
+	rulesPath := filepath.Join(dir, "active.json")
+	if err := os.WriteFile(rulesPath, []byte(`{"schema":"hypermesh.conductor.rules.v0","version":1,"routing":{"escalate_when_peak_tokens_above":{"summarize":10}},"cache_prefix":{"system_in_prefix":true,"tools_in_prefix":true,"prefer_on_match":"cheap"}}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg.RulesFile = rulesPath
+	cheapHits, frontierHits = 0, 0
+	if rec := do(New(cfg, aiuditor.Stub{}, journal), "/v1/chat/completions", "summarize", "task-1", "big-1", "", `{"messages":[{"role":"user","content":"`+long+`"}]}`); rec.Code != http.StatusOK || frontierHits != 1 {
+		t.Fatalf("escalated code %d cheap %d frontier %d %s", rec.Code, cheapHits, frontierHits, rec.Body.String())
+	}
+	cheapHits, frontierHits = 0, 0
+	if rec := do(New(cfg, aiuditor.Stub{}, journal), "/v1/chat/completions", "code", "task-1", "code-2", "", `{"messages":[{"role":"user","content":"implement"}]}`); rec.Code != http.StatusOK || frontierHits != 1 || cheapHits != 0 {
+		t.Fatalf("hint code %d cheap %d frontier %d", rec.Code, cheapHits, frontierHits)
+	}
+}
+
 func TestModelsAndUnknownClass(t *testing.T) {
 	dir := t.TempDir()
 	cfg := loadTestConfig(t, dir, "http://127.0.0.1:9/v1", "http://127.0.0.1:9/v1", config.AuthPassthrough, config.ProviderOpenAICompatible)

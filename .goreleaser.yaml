@@ -1,5 +1,6 @@
-# Snapshot build of the static conductor binary.
-# CI compiles the same targets. This file does not publish a release or a tag.
+# Optional snapshot helper for raw binaries. Linux packages that match the
+# Visor bundle are built by packaging/package.sh, not by this file.
+# Releases stay disabled. Do not create a tag from this config.
 version: 2
 
 project_name: conductor
@@ -13,6 +14,7 @@ builds:
     flags:
       - -buildvcs=false
       - -trimpath
+      - -buildvcs=false
     ldflags:
       - -s -w
     goos:

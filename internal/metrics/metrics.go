@@ -52,6 +52,8 @@ type StepRecord struct {
 	Error              *string  `json:"error"`
 	CostProxy          *float64 `json:"cost_proxy"`
 	CostProxyLabel     *string  `json:"cost_proxy_label"`
+	Compacted          *bool    `json:"compacted,omitempty"`
+	PrefixCacheMatch   *bool    `json:"prefix_cache_match,omitempty"`
 }
 
 // Validate checks the row before it is written or summarized.
@@ -107,6 +109,8 @@ type wireRecord struct {
 	Error              *string   `json:"error"`
 	CostProxy          *float64  `json:"cost_proxy"`
 	CostProxyLabel     *string   `json:"cost_proxy_label"`
+	Compacted          *bool     `json:"compacted,omitempty"`
+	PrefixCacheMatch   *bool     `json:"prefix_cache_match,omitempty"`
 	PeakContextTokens  *int      `json:"peak_context_tokens"`
 	CostPerStep        *float64  `json:"cost_per_step"`
 	Accuracy           *Accuracy `json:"accuracy"`
@@ -137,6 +141,8 @@ func (r StepRecord) Wire() wireRecord {
 		Error:              r.Error,
 		CostProxy:          r.CostProxy,
 		CostProxyLabel:     r.CostProxyLabel,
+		Compacted:          r.Compacted,
+		PrefixCacheMatch:   r.PrefixCacheMatch,
 		PeakContextTokens:  peak,
 		CostPerStep:        r.CostProxy,
 		Accuracy:           &Accuracy{},
@@ -254,6 +260,7 @@ func parseLine(line []byte, lineNo int) (StepRecord, error) {
 		OutputTokens: wire.OutputTokens, CacheHitTokens: wire.CacheHitTokens,
 		LatencyMS: wire.LatencyMS, PrefixSHA256: wire.PrefixSHA256, UsageStatus: wire.UsageStatus,
 		Error: wire.Error, CostProxy: wire.CostProxy, CostProxyLabel: wire.CostProxyLabel,
+		Compacted: wire.Compacted, PrefixCacheMatch: wire.PrefixCacheMatch,
 	}
 	if record.Tier != routing.Cheap && record.Tier != routing.Frontier {
 		return StepRecord{}, fmt.Errorf("journal line %d has an unknown tier", lineNo)

@@ -6,7 +6,7 @@ Budgeted, recoverable AI task runtime for Hypermesh: model and host selection, t
 
 **Early slice.** Conductor is a localhost proxy written in Go. It classifies a request, asks the AIuditor hop, and forwards it to a cheap or frontier endpoint. Budgets, durable runs, retrieval, planning, the task tracker, and context compaction are still design. Nothing is released.
 
-`go test ./...` runs the tests. The binary is static. Design notes: [docs/routing.md](docs/routing.md), [docs/measurement.md](docs/measurement.md), and [docs/aiuditor.md](docs/aiuditor.md).
+`go test ./...` runs the tests. The binary is static. Linux `.deb` and `.rpm` packages follow the Visor bundle layout and are not a release. Design notes: [docs/routing.md](docs/routing.md), [docs/measurement.md](docs/measurement.md), [docs/aiuditor.md](docs/aiuditor.md), [docs/compaction.md](docs/compaction.md), [docs/rules.md](docs/rules.md), and [docs/packaging.md](docs/packaging.md).
 
 ## What Conductor is
 
@@ -114,6 +114,10 @@ mkdir -p runs
 ```
 
 `examples/endpoints.json` names loopback and provider placeholders. `serve` and `run` check that the journal directory exists before a provider call. Set `CONDUCTOR_CHEAP_API_KEY` when the cheap tier must use an environment key.
+
+Tails longer than `compaction.max_tail_tokens` are summarized on the cheap tier. The original tail is stored in `history.jsonl` next to the metrics journal. The system prompt and tools stay the prefix that is hashed.
+
+`conductor dream` replays the journal and writes an inactive rule proposal. `conductor rules diff`, `apply`, and `rollback` review that file. Proposals cannot loosen AIuditor rules. Prompt bodies are included only with `dream --bodies`.
 
 ## Contributing
 
