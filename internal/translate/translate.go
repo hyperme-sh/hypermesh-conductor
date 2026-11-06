@@ -156,6 +156,9 @@ func chatToAnthropic(body []byte, model string) ([]byte, error) {
 	if err := applySampling(out, req, true); err != nil {
 		return nil, err
 	}
+	if err := applyToolChoice(out, req, true); err != nil {
+		return nil, err
+	}
 	if stream, ok := req["stream"].(bool); ok && stream {
 		out["stream"] = true
 	}
@@ -189,6 +192,9 @@ func anthropicToChat(body []byte, model string) ([]byte, error) {
 		out["tools"] = anthropicToolsToOpenAI(tools)
 	}
 	if err := applySampling(out, req, false); err != nil {
+		return nil, err
+	}
+	if err := applyToolChoice(out, req, false); err != nil {
 		return nil, err
 	}
 	if stream, ok := req["stream"].(bool); ok {
@@ -793,6 +799,83 @@ func copyStop(dst map[string]any, value any) error {
 	default:
 		return fmt.Errorf("unsupported sampling control stop for protocol translation")
 	}
+}
+
+func applyToolChoice(dst, src map[string]any, toAnthropic bool) error {
+	value, ok := src["tool_choice"]
+	if !ok || value == nil {
+		return nil
+	}
+	var choice any
+	var err error
+	if toAnthropic {
+		choice, err = openAIToolChoiceToAnthropic(value)
+	} else {
+		choice, err = anthropicToolChoiceToOpenAI(value)
+	}
+	if err != nil {
+		return err
+	}
+	dst["tool_choice"] = choice
+	return nil
+}
+
+func openAIToolChoiceToAnthropic(value any) (any, error) {
+	switch choice := value.(type) {
+	case string:
+		switch choice {
+		case "none":
+			return map[string]any{"type": "none"}, nil
+		case "auto":
+			return map[string]any{"type": "auto"}, nil
+		case "required":
+			return map[string]any{"type": "any"}, nil
+		default:
+			return nil, fmt.Errorf("unsupported tool_choice %s for protocol translation", choice)
+		}
+	case map[string]any:
+		fn, _ := choice["function"].(map[string]any)
+		name, _ := fn["name"].(string)
+		if choice["type"] == "function" && name != "" {
+			return map[string]any{"type": "tool", "name": name}, nil
+		}
+	}
+	return nil, fmt.Errorf("unsupported tool_choice for protocol translation")
+}
+
+func anthropicToolChoiceToOpenAI(value any) (any, error) {
+	switch choice := value.(type) {
+	case string:
+		switch choice {
+		case "none", "auto":
+			return choice, nil
+		default:
+			return nil, fmt.Errorf("unsupported tool_choice %s for protocol translation", choice)
+		}
+	case map[string]any:
+		if disabled, ok := choice["disable_parallel_tool_use"].(bool); ok && disabled {
+			return nil, fmt.Errorf("unsupported tool_choice for protocol translation")
+		}
+		kind, _ := choice["type"].(string)
+		switch kind {
+		case "none":
+			return "none", nil
+		case "auto":
+			return "auto", nil
+		case "any":
+			return "required", nil
+		case "tool":
+			name, _ := choice["name"].(string)
+			if name == "" {
+				return nil, fmt.Errorf("unsupported tool_choice for protocol translation")
+			}
+			return map[string]any{"type": "function", "function": map[string]any{"name": name}}, nil
+		}
+		if _, extra := choice["disable_parallel_tool_use"]; extra {
+			return nil, fmt.Errorf("unsupported tool_choice for protocol translation")
+		}
+	}
+	return nil, fmt.Errorf("unsupported tool_choice for protocol translation")
 }
 
 func maxTokens(req map[string]any) int {

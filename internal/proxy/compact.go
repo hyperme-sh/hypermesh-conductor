@@ -157,8 +157,11 @@ func (p *Proxy) cheapSummary(ctx context.Context, client *http.Request, tail str
 			Proxy:               nil,
 			DialContext:         (&net.Dialer{Timeout: 10 * time.Second}).DialContext,
 			TLSHandshakeTimeout: 10 * time.Second,
+			IdleConnTimeout:     30 * time.Second,
+			MaxIdleConns:        2,
 		},
 	}
+	defer httpClient.CloseIdleConnections()
 	start := time.Now()
 	resp, err := httpClient.Do(req)
 	latency := elapsedMS(start)
@@ -187,7 +190,7 @@ func (p *Proxy) cheapSummary(ctx context.Context, client *http.Request, tail str
 		text = anthropicSummaryText(root)
 	}
 	if strings.TrimSpace(text) == "" {
-		text = "summary unavailable"
+		return "", parsed, latency, fmt.Errorf("compaction summary was empty")
 	}
 	return text, parsed, latency, nil
 }

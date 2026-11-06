@@ -215,6 +215,11 @@ func (s *Stream) chatToAnthropic(obj map[string]any) []byte {
 		out.Write(s.chatToolCalls(calls))
 	}
 	if finish, ok := choice["finish_reason"].(string); ok && finish != "" {
+		for i := 0; i < s.nextContent; i++ {
+			out.WriteString("event: content_block_stop\n")
+			out.Write(sseData(map[string]any{"type": "content_block_stop", "index": i}))
+		}
+		s.nextContent = 0
 		out.WriteString("event: message_delta\n")
 		out.Write(sseData(map[string]any{
 			"type":  "message_delta",

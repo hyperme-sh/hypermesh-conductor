@@ -63,8 +63,18 @@ func PlanMessages(raw json.RawMessage, maxTail, recent int) (Plan, error) {
 	if recent > len(plan.TailRaw) {
 		recent = len(plan.TailRaw)
 	}
-	older := plan.TailRaw[:len(plan.TailRaw)-recent]
-	plan.RecentRaw = plan.TailRaw[len(plan.TailRaw)-recent:]
+	split := len(plan.TailRaw) - recent
+	if split < 0 {
+		split = 0
+	}
+	if split > len(plan.TailRaw) {
+		split = len(plan.TailRaw)
+	}
+	for split > 0 && split < len(plan.TailRaw) && isToolResult(plan.TailRaw[split]) {
+		split--
+	}
+	older := plan.TailRaw[:split]
+	plan.RecentRaw = plan.TailRaw[split:]
 	if len(older) == 0 {
 		older = plan.TailRaw
 		plan.RecentRaw = nil
@@ -113,6 +123,34 @@ func decodeArray(raw json.RawMessage) ([]json.RawMessage, error) {
 		items = append(items, item)
 	}
 	return items, nil
+}
+
+func isToolResult(raw json.RawMessage) bool {
+	var obj map[string]any
+	if err := json.Unmarshal(raw, &obj); err != nil {
+		return false
+	}
+	if role, _ := obj["role"].(string); role == "tool" {
+		return true
+	}
+	if _, ok := obj["tool_call_id"].(string); ok {
+		return true
+	}
+	return contentHasType(obj["content"], "tool_result")
+}
+
+func contentHasType(content any, kind string) bool {
+	blocks, ok := content.([]any)
+	if !ok {
+		return false
+	}
+	for _, block := range blocks {
+		obj, _ := block.(map[string]any)
+		if obj["type"] == kind {
+			return true
+		}
+	}
+	return false
 }
 
 func roleOf(raw json.RawMessage) string {

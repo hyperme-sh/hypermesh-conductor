@@ -722,6 +722,35 @@ func TestAnthropicCheapTierCompactsWithMessages(t *testing.T) {
 	}
 }
 
+func TestEmptySummaryKeepsTheOriginalTail(t *testing.T) {
+	var bodies []string
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		raw, _ := io.ReadAll(r.Body)
+		bodies = append(bodies, string(raw))
+		if strings.Contains(string(raw), "Summarize the conversation tail") {
+			_, _ = w.Write([]byte(`{"choices":[{"message":{"role":"assistant","content":null}}]}`))
+			return
+		}
+		_, _ = w.Write([]byte(`{"choices":[{"message":{"role":"assistant","content":"ok"}}],"usage":{"prompt_tokens":2,"completion_tokens":1}}`))
+	}))
+	defer upstream.Close()
+	dir := t.TempDir()
+	t.Setenv("CONDUCTOR_CHEAP_API_KEY", "test-key-do-not-log")
+	cfg := loadTestConfig(t, dir, upstream.URL+"/v1", upstream.URL+"/v1", config.AuthEnv, config.ProviderOpenAICompatible)
+	cfg.Compaction.MaxTailTokens = 30
+	cfg.Compaction.RecentMessages = 0
+	journal := openJournal(t, dir)
+	long := strings.Repeat("LONGTAILMARKER ", 40)
+	rec := do(New(cfg, aiuditor.Stub{}, journal), "/v1/chat/completions", "parse", "task-1", "long-1", "", `{"messages":[{"role":"user","content":"`+long+`"}]}`)
+	if rec.Code != http.StatusOK {
+		t.Fatal(rec.Code, rec.Body.String())
+	}
+	main := bodies[len(bodies)-1]
+	if !strings.Contains(main, "LONGTAILMARKER") || strings.Contains(main, "summary unavailable") {
+		t.Fatal(main)
+	}
+}
+
 func TestOversizedProviderBodyIsRejected(t *testing.T) {
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_, _ = io.Copy(w, io.LimitReader(neverEnding('a'), (32<<20)+8))

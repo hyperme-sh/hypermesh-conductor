@@ -124,6 +124,36 @@ func TestSamplingControlsCrossTheProtocolBoundary(t *testing.T) {
 	}
 }
 
+func TestToolChoiceCrossesTheProtocolBoundary(t *testing.T) {
+	none, err := Request(ProtoChat, ProviderAnthropic, "frontier", []byte(`{"tool_choice":"none","tools":[{"type":"function","function":{"name":"lookup"}}],"messages":[{"role":"user","content":"hi"}]}`))
+	if err != nil || !strings.Contains(string(none.Body), `"tool_choice":{"type":"none"}`) {
+		t.Fatal(err, string(none.Body))
+	}
+	forced, err := Request(ProtoChat, ProviderAnthropic, "frontier", []byte(`{"tool_choice":{"type":"function","function":{"name":"lookup"}},"messages":[{"role":"user","content":"hi"}]}`))
+	if err != nil || !strings.Contains(string(forced.Body), `"type":"tool"`) || !strings.Contains(string(forced.Body), `"name":"lookup"`) {
+		t.Fatal(err, string(forced.Body))
+	}
+	back, err := Request(ProtoMessages, ProviderOpenAI, "frontier", []byte(`{"tool_choice":{"type":"any"},"messages":[{"role":"user","content":"hi"}]}`))
+	if err != nil || !strings.Contains(string(back.Body), `"tool_choice":"required"`) {
+		t.Fatal(err, string(back.Body))
+	}
+	if _, err := Request(ProtoMessages, ProviderOpenAI, "frontier", []byte(`{"tool_choice":{"type":"auto","disable_parallel_tool_use":true},"messages":[{"role":"user","content":"hi"}]}`)); err == nil {
+		t.Fatal("parallel tool constraint was dropped")
+	}
+}
+
+func TestChatStreamClosesContentBlocks(t *testing.T) {
+	stream := NewStream(ProtoMessages, ProtoChat)
+	chunk := "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_w\",\"type\":\"function\",\"function\":{\"name\":\"weather\",\"arguments\":\"\"}}]},\"finish_reason\":\"tool_calls\"}]}\n\n"
+	out := string(stream.Consume([]byte(chunk)))
+	if !strings.Contains(out, `"type":"content_block_stop"`) || strings.Index(out, "content_block_stop") > strings.Index(out, "message_delta") {
+		t.Fatal(out)
+	}
+	if strings.Count(out, "content_block_stop") < 2 {
+		t.Fatal(out)
+	}
+}
+
 func TestChatStreamKeepsToolCalls(t *testing.T) {
 	stream := NewStream(ProtoMessages, ProtoChat)
 	chunk := "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_w\",\"type\":\"function\",\"function\":{\"name\":\"weather\",\"arguments\":\"{\\\"q\\\":1}\"}}]}}]}\n\n"
