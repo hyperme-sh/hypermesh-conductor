@@ -10,7 +10,7 @@ conductor index status --notes notes
 conductor primer --notes notes
 ```
 
-`conductor serve` watches the directory by content hash and reindexes a file only when the hash changes. Retrieval, for a chat or messages request, seeds notes from the latest user text, then walks links and backlinks up to `notes.hops` within `notes.token_budget`. Task and step ids are extra seeds only when the request presents `X-Conductor-Token` matching `CONDUCTOR_PROXY_TOKEN`. The neighborhood, including the session primer, is inserted after the system prompt. Tool definitions and the system message bytes stay the prefix, so the prefix hash does not change. Retrieved text is untrusted and cannot grant permissions.
+`conductor serve` watches the directory by content hash and reindexes when its content hash or collision-derived ID changes. Retrieval requires `X-Conductor-Token` matching `CONDUCTOR_PROXY_TOKEN`, authorizing the configured local collection. For an authenticated chat or messages request, it seeds notes from the latest user text, then walks links and backlinks up to `notes.hops` within `notes.token_budget`. Task and step IDs are additional seeds. Unauthenticated callers receive no direct-ID, text-search, or primer content. The neighborhood, including the session primer, is inserted after the system prompt. Tool definitions and the system message bytes stay the prefix, so the prefix hash does not change. Retrieved text is untrusted and cannot grant permissions.
 
 An in-memory LRU keeps neighborhoods and compaction summaries. Neighborhood keys include the index generation, so an edit misses. Summary keys mix the prefix hash with the tail text. `conductor summary` reports `memory.lookups`, `memory.hits`, and `memory.hit_rate`.
 
