@@ -121,9 +121,9 @@ func (s *Store) syncDir(dir string, replace bool) (Stats, error) {
 	seen := map[string]struct{}{}
 	for _, note := range incoming {
 		seen[note.Path] = struct{}{}
-		var existing, existingID string
-		err = tx.QueryRow(`SELECT content_hash, id FROM notes WHERE path = ?`, note.Path).Scan(&existing, &existingID)
-		if err == nil && existing == note.Hash && existingID == note.ID {
+		var existingHash, existingID string
+		err = tx.QueryRow(`SELECT content_hash, id FROM notes WHERE path = ?`, note.Path).Scan(&existingHash, &existingID)
+		if err == nil && existingHash == note.Hash && existingID == note.ID {
 			continue
 		}
 		if err != nil && !errors.Is(err, sql.ErrNoRows) {
@@ -312,11 +312,16 @@ func deletePath(tx sqlDB, path string) error {
 }
 
 func resolveLinks(tx sqlDB) error {
+	if _, err := tx.Exec(`
+UPDATE links SET dst = (
+  SELECT notes.id FROM notes WHERE notes.id = links.target LIMIT 1
+)`); err != nil {
+		return err
+	}
 	_, err := tx.Exec(`
-UPDATE links SET dst = COALESCE(
-  (SELECT notes.id FROM notes WHERE notes.id = links.target),
-  (SELECT notes.id FROM notes WHERE lower(notes.title) = lower(links.target) ORDER BY notes.id LIMIT 1)
-)`)
+UPDATE links SET dst = (
+  SELECT notes.id FROM notes WHERE lower(notes.title) = lower(links.target) ORDER BY notes.id LIMIT 1
+) WHERE dst IS NULL`)
 	return err
 }
 

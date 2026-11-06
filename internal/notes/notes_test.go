@@ -251,6 +251,53 @@ func TestBasenameIDsStayDistinct(t *testing.T) {
 	}
 }
 
+func TestSyncUpdatesDerivedIDsWhenABasenameCollides(t *testing.T) {
+	dir := t.TempDir()
+	writeNote(t, dir, "a/index.md", "# Alpha\nALPHAONLY stays.\n")
+	store := openTestStore(t, dir)
+	if _, err := store.Sync(dir); err != nil {
+		t.Fatal(err)
+	}
+	alone, err := store.Search("alphaonly", 5)
+	if err != nil || len(alone) != 1 || alone[0] != "index" {
+		t.Fatal(err, alone)
+	}
+	writeNote(t, dir, "b/index.md", "# Beta\nBETAONLY stays.\n")
+	if _, err := store.Sync(dir); err != nil {
+		t.Fatal(err)
+	}
+	alpha, err := store.Search("alphaonly", 5)
+	if err != nil || len(alpha) != 1 || alpha[0] != "a/index" {
+		t.Fatal(err, alpha)
+	}
+	beta, err := store.Search("betaonly", 5)
+	if err != nil || len(beta) != 1 || beta[0] != "b/index" {
+		t.Fatal(err, beta)
+	}
+	if _, ok, err := store.Get("index"); err != nil || ok {
+		t.Fatal(err, ok)
+	}
+}
+
+func TestLinkResolutionPrefersExactID(t *testing.T) {
+	dir := t.TempDir()
+	writeNote(t, dir, "alpha.md", "---\nid: alpha\ntype: note\nstatus: open\n---\n# Beta\nTitle matches the other id.\n")
+	writeNote(t, dir, "beta.md", "---\nid: beta\ntype: note\nstatus: open\n---\n# Plain\nThe id is beta.\n")
+	writeNote(t, dir, "gamma.md", "---\nid: gamma\ntype: note\nstatus: open\n---\n# Other\nTitle-only target.\n")
+	writeNote(t, dir, "source.md", "---\nid: source\ntype: note\nstatus: open\n---\n# Source\n[[beta]]\n[[Other]]\n")
+	store := openTestStore(t, dir)
+	if _, err := store.Rebuild(dir); err != nil {
+		t.Fatal(err)
+	}
+	neighbors, err := store.Neighbors("source")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(neighbors) != 2 || neighbors[0] != "beta" || neighbors[1] != "gamma" {
+		t.Fatalf("%v", neighbors)
+	}
+}
+
 func TestExplicitIDCollisionDoesNotReplace(t *testing.T) {
 	dir := t.TempDir()
 	writeNote(t, dir, "a/one.md", "---\nid: same\ntype: note\n---\n# One\nALPHAONLY\n")
