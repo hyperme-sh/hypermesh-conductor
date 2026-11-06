@@ -230,6 +230,10 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	next, didCompact, compactErr := p.maybeCompact(r.Context(), r, proto, prepared, taskID, stepID, prelimHash, tier)
 	if compactErr != nil {
+		if errors.Is(compactErr, errBodyBudget) {
+			writeJSON(w, http.StatusServiceUnavailable, map[string]any{"error": map[string]any{"message": "request body budget exceeded"}})
+			return
+		}
 		var denied proxyAuthError
 		if errors.As(compactErr, &denied) {
 			writeJSON(w, http.StatusUnauthorized, map[string]any{"error": map[string]any{"message": compactErr.Error()}})
@@ -371,6 +375,7 @@ func (p *Proxy) stream(w http.ResponseWriter, client *http.Request, resp *http.R
 	var readErr error
 	failed := false
 	clientGone := false
+	terminal := false
 	writeClient := func(p []byte) bool {
 		if clientGone || len(p) == 0 {
 			return !clientGone
@@ -411,6 +416,9 @@ func (p *Proxy) stream(w http.ResponseWriter, client *http.Request, resp *http.R
 				line := pending[:i]
 				ready = append(ready, pending[:i+1]...)
 				pending = pending[i+1:]
+				if terminalSSELine(line) {
+					terminal = true
+				}
 				payload := ssePayload(line)
 				if payload != nil {
 					if providerError(payload) {
@@ -441,6 +449,11 @@ func (p *Proxy) stream(w http.ResponseWriter, client *http.Request, resp *http.R
 					break
 				}
 			}
+		}
+		if terminal {
+			pending = nil
+			_ = resp.Body.Close()
+			break
 		}
 		if err != nil {
 			if err != io.EOF {
@@ -999,6 +1012,31 @@ func forceStreamFlag(body []byte, stream bool) []byte {
 		return body
 	}
 	return raw
+}
+
+// Only protocol terminal events end a stream; finish_reason precedes usage
+// and is deliberately not terminal. Provider errors also close the transport.
+func terminalSSELine(line []byte) bool {
+	text := strings.TrimSpace(string(line))
+	if !strings.HasPrefix(text, "data:") {
+		return false
+	}
+	payload := strings.TrimSpace(strings.TrimPrefix(text, "data:"))
+	if payload == "[DONE]" {
+		return true
+	}
+	if providerError([]byte(payload)) {
+		return true
+	}
+	var obj map[string]any
+	if json.Unmarshal([]byte(payload), &obj) != nil {
+		return false
+	}
+	switch obj["type"] {
+	case "message_stop", "response.completed", "response.incomplete":
+		return true
+	}
+	return false
 }
 
 func ssePayload(line []byte) []byte {

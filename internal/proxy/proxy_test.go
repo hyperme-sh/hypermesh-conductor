@@ -1654,3 +1654,69 @@ func TestAIuditorModifiedBodyReservesSharedBudget(t *testing.T) {
 		t.Fatalf("body reservation leaked: %d", bodyUsed)
 	}
 }
+
+func TestAIuditorSummaryModificationReservesBudget(t *testing.T) {
+	previous := bodyLimit
+	bodyLimit = 1024
+	defer func() { bodyLimit = previous }()
+	dir := t.TempDir()
+	cfg := loadTestConfig(t, dir, "http://127.0.0.1:1/v1", "http://127.0.0.1:1/v1", config.AuthPassthrough, config.ProviderOpenAICompatible)
+	client := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+	client.Header.Set("Authorization", "Bearer test-secret")
+	_, _, _, err := New(cfg, oversizedModify{}, openJournal(t, dir)).cheapSummary(context.Background(), client, "small summary input")
+	if !errors.Is(err, errBodyBudget) {
+		t.Fatalf("expected summary budget rejection: %v", err)
+	}
+	bodyMu.Lock()
+	defer bodyMu.Unlock()
+	if bodyUsed != 0 {
+		t.Fatalf("summary leaked reservation: %d", bodyUsed)
+	}
+}
+
+func TestTerminalProviderEventsCloseOpenHTTPBody(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		provider string
+		terminal string
+	}{
+		{"passthrough_done", config.ProviderOpenAICompatible, "data: [DONE]\n\n"},
+		{"passthrough_error", config.ProviderOpenAICompatible, "data: {\"error\":{\"message\":\"failed\"}}\n\n"},
+		{"translated_stop", config.ProviderAnthropic, "event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n"},
+		{"translated_error", config.ProviderAnthropic, "event: error\ndata: {\"type\":\"error\",\"error\":{\"message\":\"failed\"}}\n\n"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			release := make(chan struct{})
+			cancelled := make(chan struct{})
+			upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "text/event-stream")
+				_, _ = io.WriteString(w, tc.terminal)
+				w.(http.Flusher).Flush()
+				select {
+				case <-r.Context().Done():
+					close(cancelled)
+				case <-release:
+				}
+			}))
+			defer func() { close(release); upstream.Close() }()
+			dir := t.TempDir()
+			cfg := loadTestConfig(t, dir, upstream.URL+"/v1", upstream.URL+"/v1", config.AuthPassthrough, tc.provider)
+			p := New(cfg, aiuditor.Stub{}, openJournal(t, dir))
+			done := make(chan struct{})
+			go func() {
+				defer close(done)
+				do(p, "/v1/chat/completions", "parse", "terminal-task", tc.name, "", `{"messages":[{"role":"user","content":"hi"}],"stream":true}`)
+			}()
+			select {
+			case <-done:
+			case <-time.After(2 * time.Second):
+				t.Fatal("proxy read past terminal event")
+			}
+			select {
+			case <-cancelled:
+			case <-time.After(2 * time.Second):
+				t.Fatal("provider connection not cancelled")
+			}
+		})
+	}
+}
