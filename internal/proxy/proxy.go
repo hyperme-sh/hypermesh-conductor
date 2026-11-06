@@ -230,13 +230,13 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	next, didCompact, compactErr := p.maybeCompact(r.Context(), r, proto, prepared, taskID, stepID, prelimHash, tier)
 	if compactErr != nil {
-		if errors.Is(compactErr, errBodyBudget) {
-			writeJSON(w, http.StatusServiceUnavailable, map[string]any{"error": map[string]any{"message": "request body budget exceeded"}})
-			return
-		}
 		var denied proxyAuthError
 		if errors.As(compactErr, &denied) {
 			writeJSON(w, http.StatusUnauthorized, map[string]any{"error": map[string]any{"message": compactErr.Error()}})
+			return
+		}
+		if errors.Is(compactErr, errBodyBudget) {
+			writeJSON(w, http.StatusServiceUnavailable, map[string]any{"error": map[string]any{"message": "request body budget exceeded"}})
 			return
 		}
 	}
@@ -374,8 +374,8 @@ func (p *Proxy) stream(w http.ResponseWriter, client *http.Request, resp *http.R
 	var pending []byte
 	var readErr error
 	failed := false
-	clientGone := false
 	terminal := false
+	clientGone := false
 	writeClient := func(p []byte) bool {
 		if clientGone || len(p) == 0 {
 			return !clientGone
@@ -416,13 +416,14 @@ func (p *Proxy) stream(w http.ResponseWriter, client *http.Request, resp *http.R
 				line := pending[:i]
 				ready = append(ready, pending[:i+1]...)
 				pending = pending[i+1:]
-				if terminalSSELine(line) {
+				if streamDone(line) {
 					terminal = true
 				}
 				payload := ssePayload(line)
 				if payload != nil {
 					if providerError(payload) {
 						failed = true
+						terminal = true
 					}
 					usage.Absorb(&acc, payload, wire.Protocol == translate.ProtoEmbeddings)
 				}
@@ -437,6 +438,10 @@ func (p *Proxy) stream(w http.ResponseWriter, client *http.Request, resp *http.R
 				if !writeClient(ready) {
 					break
 				}
+				if terminal {
+					_ = resp.Body.Close()
+					break
+				}
 			} else {
 				out := bridge.Consume(chunk)
 				if !writeClient(out) {
@@ -448,12 +453,11 @@ func (p *Proxy) stream(w http.ResponseWriter, client *http.Request, resp *http.R
 					_ = resp.Body.Close()
 					break
 				}
+				if bridge.Closed() {
+					_ = resp.Body.Close()
+					break
+				}
 			}
-		}
-		if terminal {
-			pending = nil
-			_ = resp.Body.Close()
-			break
 		}
 		if err != nil {
 			if err != io.EOF {
@@ -884,6 +888,27 @@ func authorizeProxy(src *http.Request) error {
 	return nil
 }
 
+func streamDone(line []byte) bool {
+	text := strings.TrimSpace(string(line))
+	if !strings.HasPrefix(text, "data:") {
+		return false
+	}
+	data := strings.TrimSpace(strings.TrimPrefix(text, "data:"))
+	if data == "[DONE]" {
+		return true
+	}
+	var obj map[string]any
+	if err := json.Unmarshal([]byte(data), &obj); err != nil {
+		return false
+	}
+	switch obj["type"] {
+	case "message_stop", "response.completed", "response.incomplete", "response.failed", "error":
+		return true
+	default:
+		return false
+	}
+}
+
 func providerError(payload []byte) bool {
 	var obj map[string]any
 	if err := json.Unmarshal(payload, &obj); err != nil {
@@ -1012,31 +1037,6 @@ func forceStreamFlag(body []byte, stream bool) []byte {
 		return body
 	}
 	return raw
-}
-
-// Only protocol terminal events end a stream; finish_reason precedes usage
-// and is deliberately not terminal. Provider errors also close the transport.
-func terminalSSELine(line []byte) bool {
-	text := strings.TrimSpace(string(line))
-	if !strings.HasPrefix(text, "data:") {
-		return false
-	}
-	payload := strings.TrimSpace(strings.TrimPrefix(text, "data:"))
-	if payload == "[DONE]" {
-		return true
-	}
-	if providerError([]byte(payload)) {
-		return true
-	}
-	var obj map[string]any
-	if json.Unmarshal([]byte(payload), &obj) != nil {
-		return false
-	}
-	switch obj["type"] {
-	case "message_stop", "response.completed", "response.incomplete":
-		return true
-	}
-	return false
 }
 
 func ssePayload(line []byte) []byte {
