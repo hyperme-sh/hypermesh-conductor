@@ -760,6 +760,62 @@ func TestDeniedRequestDoesNotSummarize(t *testing.T) {
 	}
 }
 
+func TestCompactionDoesNotSendTheFrontierCredential(t *testing.T) {
+	var cheapAuth, frontierAuth string
+	cheap := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		cheapAuth = r.Header.Get("Authorization")
+		_, _ = w.Write([]byte(`{"choices":[{"message":{"role":"assistant","content":"SUMMARYTEXT"}}],"usage":{"prompt_tokens":4,"completion_tokens":1}}`))
+	}))
+	defer cheap.Close()
+	frontier := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		frontierAuth = r.Header.Get("Authorization")
+		_, _ = w.Write([]byte(`{"choices":[{"message":{"role":"assistant","content":"ok"}}],"usage":{"prompt_tokens":3,"completion_tokens":1}}`))
+	}))
+	defer frontier.Close()
+	dir := t.TempDir()
+	cfg := loadTestConfig(t, dir, cheap.URL+"/v1", frontier.URL+"/v1", config.AuthPassthrough, config.ProviderOpenAICompatible)
+	cfg.Compaction.MaxTailTokens = 30
+	cfg.Compaction.RecentMessages = 0
+	journal := openJournal(t, dir)
+	long := strings.Repeat("LONGTAILMARKER ", 40)
+	req := request("/v1/chat/completions", "code", "task-1", "long-1", "", `{"messages":[{"role":"user","content":"`+long+`"}]}`)
+	req.Header.Set("Authorization", "Bearer frontier-secret-value")
+	rec := httptest.NewRecorder()
+	New(cfg, aiuditor.Stub{}, journal).ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK || strings.Contains(cheapAuth, "frontier-secret-value") || frontierAuth != "Bearer frontier-secret-value" {
+		t.Fatalf("code %d cheap %q frontier %q body %s", rec.Code, cheapAuth, frontierAuth, rec.Body.String())
+	}
+}
+
+func TestCompactionKeepsTheClientKeyOnTheCheapOrigin(t *testing.T) {
+	var auth string
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.Contains(readBody(r), "Summarize the conversation tail") {
+			auth = r.Header.Get("Authorization")
+		}
+		_, _ = w.Write([]byte(`{"choices":[{"message":{"role":"assistant","content":"SUMMARYTEXT"}}],"usage":{"prompt_tokens":4,"completion_tokens":1}}`))
+	}))
+	defer upstream.Close()
+	dir := t.TempDir()
+	cfg := loadTestConfig(t, dir, upstream.URL+"/v1", upstream.URL+"/v1", config.AuthPassthrough, config.ProviderOpenAICompatible)
+	cfg.Compaction.MaxTailTokens = 30
+	cfg.Compaction.RecentMessages = 0
+	journal := openJournal(t, dir)
+	long := strings.Repeat("LONGTAILMARKER ", 40)
+	req := request("/v1/chat/completions", "parse", "task-1", "long-1", "", `{"messages":[{"role":"user","content":"`+long+`"}]}`)
+	req.Header.Set("Authorization", "Bearer cheap-secret-value")
+	rec := httptest.NewRecorder()
+	New(cfg, aiuditor.Stub{}, journal).ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK || auth != "Bearer cheap-secret-value" {
+		t.Fatalf("code %d auth %q body %s", rec.Code, auth, rec.Body.String())
+	}
+}
+
+func readBody(r *http.Request) string {
+	raw, _ := io.ReadAll(r.Body)
+	return string(raw)
+}
+
 func TestCompactionRequiresTheProxyTokenFirst(t *testing.T) {
 	hits := 0
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

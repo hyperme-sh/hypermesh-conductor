@@ -22,7 +22,7 @@ import (
 	"github.com/hyperme-sh/hypermesh-conductor/internal/usage"
 )
 
-func (p *Proxy) maybeCompact(ctx context.Context, client *http.Request, proto string, prepared []byte, taskID, stepID, prefixHash string) ([]byte, bool, error) {
+func (p *Proxy) maybeCompact(ctx context.Context, client *http.Request, proto string, prepared []byte, taskID, stepID, prefixHash string, selected config.Tier) ([]byte, bool, error) {
 	if p.Journal == nil || p.Config.Compaction.MaxTailTokens <= 0 {
 		return prepared, false, nil
 	}
@@ -37,10 +37,11 @@ func (p *Proxy) maybeCompact(ctx context.Context, client *http.Request, proto st
 	if err != nil || !plan.Needed {
 		return prepared, false, nil
 	}
-	if err := authorizeCompaction(client, p.Config.Cheap); err != nil {
+	compactionClient := clientForCompaction(client, p.Config.Cheap, selected)
+	if err := authorizeCompaction(compactionClient, p.Config.Cheap); err != nil {
 		return prepared, false, err
 	}
-	summary, parsed, latency, err := p.cheapSummary(ctx, client, plan.SummaryInput)
+	summary, parsed, latency, err := p.cheapSummary(ctx, compactionClient, plan.SummaryInput)
 	compactID := stepID + ".compact"
 	record := metrics.StepRecord{
 		TaskID: taskID, StepID: compactID, JobClass: "summarize", Tier: "cheap",
@@ -81,6 +82,19 @@ func (p *Proxy) maybeCompact(ctx context.Context, client *http.Request, proto st
 		return prepared, false, nil
 	}
 	return next, true, nil
+}
+
+// clientForCompaction keeps a caller credential on the cheap call only when
+// that call uses the same origin as the selected tier. A frontier bearer is
+// not forwarded to a different cheap endpoint.
+func clientForCompaction(client *http.Request, cheap, selected config.Tier) *http.Request {
+	if cheap.BaseURL == selected.BaseURL && cheap.Provider == selected.Provider {
+		return client
+	}
+	clone := client.Clone(client.Context())
+	clone.Header.Del("Authorization")
+	clone.Header.Del("x-api-key")
+	return clone
 }
 
 func authorizeCompaction(client *http.Request, tier config.Tier) error {
