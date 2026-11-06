@@ -179,6 +179,33 @@ func TestSuggestCannotUpgrade(t *testing.T) {
 	}
 }
 
+func TestDreamMedianUsesFailedTasksOnly(t *testing.T) {
+	low := []int{100, 100}
+	high := []int{10000, 10000}
+	var records []metrics.StepRecord
+	var outcomes []Outcome
+	for i := range low {
+		n := low[i]
+		row := step("s1", "summarize", "cheap", &n)
+		row.TaskID = "fail-" + string(rune('a'+i))
+		records = append(records, row)
+		outcomes = append(outcomes, Outcome{TaskID: row.TaskID, StepID: "s1", Kind: "test_failed"})
+	}
+	for i := range high {
+		n := high[i]
+		row := step("s1", "summarize", "cheap", &n)
+		row.TaskID = "ok-" + string(rune('a'+i))
+		records = append(records, row)
+	}
+	proposal, _, err := Dream(DreamInput{Records: records, Outcomes: outcomes}, Defaults(), t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if proposal.Routing.EscalateWhenPeakTokensAbove["summarize"] != 100 {
+		t.Fatal(proposal.Routing.EscalateWhenPeakTokensAbove)
+	}
+}
+
 func TestDreamDoesNotShareOutcomesAcrossTasks(t *testing.T) {
 	in := 10
 	first := step("s1", "summarize", "cheap", &in)

@@ -905,10 +905,13 @@ func usageToOpenAI(usage map[string]any) map[string]any {
 
 func usageToAnthropic(usage map[string]any) map[string]any {
 	out := map[string]any{}
+	cached, hasCached := openAICachedTokens(usage)
 	if n, ok := asInt(usage["prompt_tokens"]); ok {
+		if hasCached && cached <= n {
+			n -= cached
+		}
 		out["input_tokens"] = n
-	}
-	if n, ok := asInt(usage["input_tokens"]); ok {
+	} else if n, ok := asInt(usage["input_tokens"]); ok {
 		out["input_tokens"] = n
 	}
 	if n, ok := asInt(usage["completion_tokens"]); ok {
@@ -917,12 +920,25 @@ func usageToAnthropic(usage map[string]any) map[string]any {
 	if n, ok := asInt(usage["output_tokens"]); ok {
 		out["output_tokens"] = n
 	}
-	if details, ok := usage["prompt_tokens_details"].(map[string]any); ok {
-		if n, ok := asInt(details["cached_tokens"]); ok {
-			out["cache_read_input_tokens"] = n
-		}
+	if hasCached {
+		out["cache_read_input_tokens"] = cached
+	} else if n, ok := asInt(usage["cache_read_input_tokens"]); ok {
+		out["cache_read_input_tokens"] = n
 	}
 	return out
+}
+
+func openAICachedTokens(usage map[string]any) (int, bool) {
+	for _, key := range []string{"prompt_tokens_details", "input_tokens_details"} {
+		details, ok := usage[key].(map[string]any)
+		if !ok {
+			continue
+		}
+		if n, ok := asInt(details["cached_tokens"]); ok {
+			return n, true
+		}
+	}
+	return 0, false
 }
 
 func applySampling(dst, src map[string]any, toAnthropic bool) error {

@@ -54,6 +54,7 @@ func Dream(in DreamInput, active File, proposalsDir string) (Proposal, string, e
 	for _, class := range classes {
 		rows := byClass[class]
 		var misses []string
+		var missKeys []string
 		for _, row := range rows {
 			if row.Tier != "cheap" {
 				continue
@@ -61,12 +62,13 @@ func Dream(in DreamInput, active File, proposalsDir string) (Proposal, string, e
 			for _, outcome := range outcomesByStep[outcomeKey(row.TaskID, row.StepID)] {
 				if outcome.Kind == "escalation" || outcome.Kind == "test_failed" {
 					misses = append(misses, row.StepID)
+					missKeys = append(missKeys, outcomeKey(row.TaskID, row.StepID))
 					break
 				}
 			}
 		}
 		if len(misses) >= 2 && len(rows) > 0 && float64(len(misses))/float64(len(rows)) >= 0.5 {
-			limit := medianPeak(rows, misses)
+			limit := medianPeak(rows, missKeys)
 			if proposal.Routing.EscalateWhenPeakTokensAbove == nil {
 				proposal.Routing.EscalateWhenPeakTokensAbove = map[string]int{}
 			}
@@ -197,14 +199,14 @@ func excerptFor(stepIDs []string, rows []history.Record) string {
 	return ""
 }
 
-func medianPeak(rows []metrics.StepRecord, ids []string) int {
+func medianPeak(rows []metrics.StepRecord, keys []string) int {
 	wanted := map[string]struct{}{}
-	for _, id := range ids {
-		wanted[id] = struct{}{}
+	for _, key := range keys {
+		wanted[key] = struct{}{}
 	}
 	var peaks []int
 	for _, row := range rows {
-		if _, ok := wanted[row.StepID]; !ok || row.InputTokens == nil {
+		if _, ok := wanted[outcomeKey(row.TaskID, row.StepID)]; !ok || row.InputTokens == nil {
 			continue
 		}
 		peaks = append(peaks, *row.InputTokens)

@@ -124,6 +124,18 @@ func TestSamplingControlsCrossTheProtocolBoundary(t *testing.T) {
 	}
 }
 
+func TestMessagesUsageSubtractsCachedPromptTokens(t *testing.T) {
+	body := []byte(`{"id":"c1","model":"frontier","usage":{"prompt_tokens":100,"completion_tokens":2,"prompt_tokens_details":{"cached_tokens":80}},"choices":[{"finish_reason":"stop","message":{"role":"assistant","content":"ok"}}]}`)
+	out, err := Response(ProtoMessages, ProtoChat, body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(out)
+	if !strings.Contains(text, `"input_tokens":20`) || !strings.Contains(text, `"cache_read_input_tokens":80`) || strings.Contains(text, `"input_tokens":100`) {
+		t.Fatal(text)
+	}
+}
+
 func TestToolChoiceCrossesTheProtocolBoundary(t *testing.T) {
 	none, err := Request(ProtoChat, ProviderAnthropic, "frontier", []byte(`{"tool_choice":"none","tools":[{"type":"function","function":{"name":"lookup"}}],"messages":[{"role":"user","content":"hi"}]}`))
 	if err != nil || !strings.Contains(string(none.Body), `"tool_choice":{"type":"none"}`) {
