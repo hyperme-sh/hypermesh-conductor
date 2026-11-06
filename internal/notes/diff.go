@@ -25,11 +25,14 @@ func MarkdownDiffs(list []Note) string {
 			continue
 		}
 		fmt.Fprintf(&b, "--- a/%s\n+++ b/%s\n@@\n+%s\n", keep.Path, keep.Path, "Merged with [["+drop.ID+"]].")
-		fmt.Fprintf(&b, "--- a/%s\n+++ b/%s\n@@\n-status: %s\n+status: drop\n", drop.Path, drop.Path, drop.Status)
+		fmt.Fprintf(&b, "--- a/%s\n+++ b/%s\n@@\n-status: %s\n+status: dropped\n", drop.Path, drop.Path, drop.Status)
 	}
 	for _, note := range list {
 		linked := map[string]struct{}{}
 		for _, target := range note.Links {
+			linked[fold(target)] = struct{}{}
+		}
+		for _, target := range wikiLinks(note.Body) {
 			linked[fold(target)] = struct{}{}
 		}
 		for _, other := range list {

@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -85,38 +86,60 @@ type Status struct {
 
 // Rebuild drops derived rows and indexes the directory again.
 func (s *Store) Rebuild(dir string) (Stats, error) {
-	if _, err := s.db.Exec(`DELETE FROM notes; DELETE FROM links; DELETE FROM notes_fts;`); err != nil {
-		return Stats{}, err
-	}
-	return s.Sync(dir)
+	return s.syncDir(dir, true)
 }
 
 // Sync reindexes files whose content hash changed and removes deleted files.
 func (s *Store) Sync(dir string) (Stats, error) {
+	return s.syncDir(dir, false)
+}
+
+// syncDir publishes note rows and the resolved link graph in one transaction.
+// A reader therefore never observes a new content generation whose wikilinks
+// are still unresolved.
+func (s *Store) syncDir(dir string, replace bool) (Stats, error) {
 	files, err := markdownFiles(dir)
 	if err != nil {
 		return Stats{}, err
 	}
-	seen := map[string]struct{}{}
-	var stats Stats
-	for _, path := range files {
-		data, err := os.ReadFile(path)
-		if err != nil {
-			return stats, err
+	incoming, warnings, err := readNotes(dir, files)
+	if err != nil {
+		return Stats{}, err
+	}
+	tx, err := s.db.Begin()
+	if err != nil {
+		return Stats{}, err
+	}
+	defer func() { _ = tx.Rollback() }()
+	if replace {
+		if _, err := tx.Exec(`DELETE FROM notes; DELETE FROM links; DELETE FROM notes_fts;`); err != nil {
+			return Stats{}, err
 		}
-		note := Parse(path, data)
-		seen[path] = struct{}{}
+	}
+	var stats Stats
+	stats.Warnings = warnings
+	seen := map[string]struct{}{}
+	for _, note := range incoming {
+		seen[note.Path] = struct{}{}
 		var existing string
-		err = s.db.QueryRow(`SELECT content_hash FROM notes WHERE path = ?`, path).Scan(&existing)
+		err = tx.QueryRow(`SELECT content_hash FROM notes WHERE path = ?`, note.Path).Scan(&existing)
 		if err == nil && existing == note.Hash {
 			continue
 		}
-		if err := s.upsert(note); err != nil {
+		if err != nil && !errors.Is(err, sql.ErrNoRows) {
+			return stats, err
+		}
+		if err := upsert(tx, note); err != nil {
+			var collision idCollision
+			if errors.As(err, &collision) {
+				stats.Warnings = append(stats.Warnings, collision.Error())
+				continue
+			}
 			return stats, err
 		}
 		stats.Updated++
 	}
-	rows, err := s.db.Query(`SELECT path FROM notes`)
+	rows, err := tx.Query(`SELECT path FROM notes`)
 	if err != nil {
 		return stats, err
 	}
@@ -131,34 +154,103 @@ func (s *Store) Sync(dir string) (Stats, error) {
 			gone = append(gone, path)
 		}
 	}
+	if err := rows.Err(); err != nil {
+		_ = rows.Close()
+		return stats, err
+	}
 	_ = rows.Close()
 	for _, path := range gone {
-		if err := s.deletePath(path); err != nil {
+		if err := deletePath(tx, path); err != nil {
 			return stats, err
 		}
 		stats.Removed++
 	}
-	if err := s.resolveLinks(); err != nil {
+	if err := resolveLinks(tx); err != nil {
 		return stats, err
 	}
-	if err := s.db.QueryRow(`SELECT COUNT(*) FROM notes`).Scan(&stats.Notes); err != nil {
+	if err := tx.QueryRow(`SELECT COUNT(*) FROM notes`).Scan(&stats.Notes); err != nil {
 		return stats, err
 	}
-	if err := s.db.QueryRow(`SELECT COUNT(*) FROM links`).Scan(&stats.Links); err != nil {
+	if err := tx.QueryRow(`SELECT COUNT(*) FROM links`).Scan(&stats.Links); err != nil {
 		return stats, err
 	}
-	stats.Warnings, err = s.Violations()
-	return stats, err
+	violations, err := violations(tx)
+	if err != nil {
+		return stats, err
+	}
+	stats.Warnings = append(stats.Warnings, violations...)
+	if err := tx.Commit(); err != nil {
+		return stats, err
+	}
+	return stats, nil
 }
 
-func (s *Store) upsert(note Note) error {
-	tx, err := s.db.Begin()
-	if err != nil {
+type idCollision struct {
+	id, owner, path string
+}
+
+func (e idCollision) Error() string {
+	return fmt.Sprintf("note id %s belongs to %s and %s", e.id, e.owner, e.path)
+}
+
+func readNotes(dir string, files []string) ([]Note, []string, error) {
+	incoming := make([]Note, 0, len(files))
+	counts := map[string]int{}
+	for _, path := range files {
+		data, err := os.ReadFile(path)
+		if err != nil {
+			return nil, nil, err
+		}
+		note := Parse(path, data)
+		incoming = append(incoming, note)
+		if note.idFromName {
+			counts[note.ID]++
+		}
+	}
+	var warnings []string
+	for i, note := range incoming {
+		if !note.idFromName || counts[note.ID] < 2 {
+			continue
+		}
+		next := relativeNoteID(dir, note.Path)
+		if next == note.ID {
+			continue
+		}
+		warnings = append(warnings, fmt.Sprintf("note id %s is shared by %s; indexed as %s", note.ID, note.Path, next))
+		incoming[i].ID = next
+	}
+	return incoming, warnings, nil
+}
+
+func relativeNoteID(dir, path string) string {
+	rel, err := filepath.Rel(dir, path)
+	if err != nil || rel == "." || strings.HasPrefix(rel, "..") {
+		rel = filepath.Base(path)
+	}
+	rel = filepath.ToSlash(rel)
+	return strings.TrimSuffix(rel, filepath.Ext(rel))
+}
+
+type sqlDB interface {
+	Exec(query string, args ...any) (sql.Result, error)
+	Query(query string, args ...any) (*sql.Rows, error)
+	QueryRow(query string, args ...any) *sql.Row
+}
+
+func upsert(tx sqlDB, note Note) error {
+	var owner string
+	err := tx.QueryRow(`SELECT path FROM notes WHERE id = ?`, note.ID).Scan(&owner)
+	if err == nil && owner != note.Path {
+		return idCollision{id: note.ID, owner: owner, path: note.Path}
+	}
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
 		return err
 	}
-	defer func() { _ = tx.Rollback() }()
 	var oldID string
-	_ = tx.QueryRow(`SELECT id FROM notes WHERE path = ?`, note.Path).Scan(&oldID)
+	err = tx.QueryRow(`SELECT id FROM notes WHERE path = ?`, note.Path).Scan(&oldID)
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return err
+	}
 	if oldID != "" && oldID != note.ID {
 		if _, err := tx.Exec(`DELETE FROM links WHERE src = ?`, oldID); err != nil {
 			return err
@@ -171,13 +263,16 @@ func (s *Store) upsert(note Note) error {
 		}
 	}
 	tags := strings.Join(note.Tags, " ")
-	if _, err := tx.Exec(`
+	if owner == note.Path {
+		if _, err := tx.Exec(`
+UPDATE notes SET title = ?, type = ?, status = ?, step_order = ?, tags = ?, body = ?, content_hash = ?, embedding = NULL
+WHERE id = ? AND path = ?`,
+			note.Title, note.Type, note.Status, note.Order, tags, note.Body, note.Hash, note.ID, note.Path); err != nil {
+			return err
+		}
+	} else if _, err := tx.Exec(`
 INSERT INTO notes (id, path, title, type, status, step_order, tags, body, content_hash, embedding)
-VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NULL)
-ON CONFLICT(id) DO UPDATE SET
-  path = excluded.path, title = excluded.title, type = excluded.type, status = excluded.status,
-  step_order = excluded.step_order, tags = excluded.tags, body = excluded.body,
-  content_hash = excluded.content_hash, embedding = NULL`,
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NULL)`,
 		note.ID, note.Path, note.Title, note.Type, note.Status, note.Order, tags, note.Body, note.Hash); err != nil {
 		return err
 	}
@@ -195,26 +290,29 @@ ON CONFLICT(id) DO UPDATE SET
 			return err
 		}
 	}
-	return tx.Commit()
+	return nil
 }
 
-func (s *Store) deletePath(path string) error {
+func deletePath(tx sqlDB, path string) error {
 	var id string
-	if err := s.db.QueryRow(`SELECT id FROM notes WHERE path = ?`, path).Scan(&id); err != nil {
-		return nil
-	}
-	if _, err := s.db.Exec(`DELETE FROM notes_fts WHERE id = ?`, id); err != nil {
+	if err := tx.QueryRow(`SELECT id FROM notes WHERE path = ?`, path).Scan(&id); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil
+		}
 		return err
 	}
-	if _, err := s.db.Exec(`DELETE FROM links WHERE src = ?`, id); err != nil {
+	if _, err := tx.Exec(`DELETE FROM notes_fts WHERE id = ?`, id); err != nil {
 		return err
 	}
-	_, err := s.db.Exec(`DELETE FROM notes WHERE id = ?`, id)
+	if _, err := tx.Exec(`DELETE FROM links WHERE src = ?`, id); err != nil {
+		return err
+	}
+	_, err := tx.Exec(`DELETE FROM notes WHERE id = ?`, id)
 	return err
 }
 
-func (s *Store) resolveLinks() error {
-	_, err := s.db.Exec(`
+func resolveLinks(tx sqlDB) error {
+	_, err := tx.Exec(`
 UPDATE links SET dst = (
   SELECT notes.id FROM notes
   WHERE notes.id = links.target OR lower(notes.title) = lower(links.target)
@@ -225,13 +323,17 @@ UPDATE links SET dst = (
 
 // Violations reports goals marked done while a linked step is still open.
 func (s *Store) Violations() ([]string, error) {
-	rows, err := s.db.Query(`
+	return violations(s.db)
+}
+
+func violations(db sqlDB) ([]string, error) {
+	rows, err := db.Query(`
 SELECT g.id, s.id, s.status
 FROM notes g
 JOIN links l ON l.src = g.id OR l.dst = g.id
 JOIN notes s ON s.id = CASE WHEN l.src = g.id THEN l.dst ELSE l.src END
 WHERE g.type = 'goal' AND g.status IN ('done', 'closed')
-  AND s.type = 'steps' AND s.status NOT IN ('done', 'closed', 'dropped')
+  AND s.type = 'steps' AND s.status NOT IN ('done', 'closed', 'dropped', 'drop')
   AND s.id != g.id
 ORDER BY g.id, s.id`)
 	if err != nil {
@@ -380,7 +482,37 @@ func (s *Store) All() ([]Note, error) {
 		}
 		notes = append(notes, note)
 	}
-	return notes, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	links, err := linksBySource(s.db)
+	if err != nil {
+		return nil, err
+	}
+	for i := range notes {
+		notes[i].Links = links[notes[i].ID]
+	}
+	return notes, nil
+}
+
+func linksBySource(db sqlDB) (map[string][]string, error) {
+	rows, err := db.Query(`SELECT src, target FROM links ORDER BY src, target`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := map[string][]string{}
+	for rows.Next() {
+		var src, target string
+		if err := rows.Scan(&src, &target); err != nil {
+			return nil, err
+		}
+		out[src] = append(out[src], target)
+	}
+	return out, rows.Err()
 }
 
 // MissingEmbeddings returns notes that do not yet have a vector.
@@ -433,7 +565,7 @@ func markdownFiles(dir string) ([]string, error) {
 		}
 		name := entry.Name()
 		if entry.IsDir() {
-			if name != "." && strings.HasPrefix(name, ".") {
+			if filepath.Clean(path) != filepath.Clean(dir) && name != "." && strings.HasPrefix(name, ".") {
 				return filepath.SkipDir
 			}
 			return nil

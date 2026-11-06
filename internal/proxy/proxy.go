@@ -224,7 +224,7 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if hash, err := hashBody(proto, prepared); err == nil {
 		prelimHash = hash
 	}
-	next, didCompact, compactErr := p.maybeCompact(r.Context(), r, proto, prepared, taskID, stepID, prelimHash, tier)
+	next, didCompact, memLookups, memHits, compactErr := p.maybeCompact(r.Context(), r, proto, prepared, taskID, stepID, prelimHash, tier)
 	if compactErr != nil {
 		var denied proxyAuthError
 		if errors.As(compactErr, &denied) {
@@ -238,20 +238,19 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		base.Compacted = &yes
 	}
 	beforeNotes := prepared
-	var memLookups, memHits int
-	if p.Notes != nil && p.Notes.Cache != nil {
-		memLookups, memHits = p.Notes.Cache.Snapshot()
-	}
-	if p.Notes != nil {
-		if updated, err := p.insertNotes(prepared, userQuery(prepared), taskID, stepID); err == nil {
+	if p.Notes != nil && acceptsNotes(proto) {
+		trustIDs := authorizeProxy(r) == nil
+		updated, got, err := p.insertNotes(prepared, userQuery(prepared), taskID, stepID, trustIDs)
+		memLookups += got.Lookups
+		memHits += got.Hits
+		if err == nil {
 			prepared = updated
 		}
-		if p.Notes.Cache != nil {
-			afterL, afterH := p.Notes.Cache.Snapshot()
-			lookups, hits := afterL-memLookups, afterH-memHits
-			base.MemoryLookups = &lookups
-			base.MemoryHits = &hits
-		}
+	}
+	if p.Notes != nil && p.Notes.Cache != nil {
+		lookups, hits := memLookups, memHits
+		base.MemoryLookups = &lookups
+		base.MemoryHits = &hits
 	}
 	if didCompact || !bytes.Equal(beforeNotes, prepared) {
 		var halted bool
@@ -1051,12 +1050,20 @@ func stampRun(w http.ResponseWriter, record metrics.StepRecord) {
 	}
 }
 
-func (p *Proxy) insertNotes(body []byte, query, taskID, stepID string) ([]byte, error) {
-	result, err := p.Notes.Retrieve(query, taskID, stepID)
+func acceptsNotes(proto string) bool {
+	return proto == translate.ProtoChat || proto == translate.ProtoMessages
+}
+
+func (p *Proxy) insertNotes(body []byte, query, taskID, stepID string, trustIDs bool) ([]byte, notes.Result, error) {
+	result, err := p.Notes.Retrieve(query, taskID, stepID, trustIDs)
 	if err != nil || result.Block == "" {
-		return body, err
+		return body, result, err
 	}
-	return notes.InsertAfterPrefix(body, result.Block)
+	updated, err := notes.InsertAfterPrefix(body, result.Block)
+	if err != nil {
+		return body, result, err
+	}
+	return updated, result, nil
 }
 
 func userQuery(body []byte) string {
@@ -1065,22 +1072,51 @@ func userQuery(body []byte) string {
 		return ""
 	}
 	messages, _ := root["messages"].([]any)
+	seenUser := false
 	var last string
 	for _, item := range messages {
 		msg, _ := item.(map[string]any)
 		if msg["role"] != "user" {
 			continue
 		}
-		if text, ok := msg["content"].(string); ok {
-			last = text
+		text, ok := contentText(msg["content"])
+		if !ok {
+			continue
 		}
+		seenUser = true
+		last = text
 	}
-	if last == "" {
-		if input, ok := root["input"].(string); ok {
-			last = input
+	if seenUser {
+		return last
+	}
+	if input, ok := root["input"].(string); ok {
+		return input
+	}
+	return ""
+}
+
+func contentText(content any) (string, bool) {
+	switch value := content.(type) {
+	case string:
+		return value, true
+	case []any:
+		var b strings.Builder
+		for _, part := range value {
+			switch item := part.(type) {
+			case string:
+				b.WriteString(item)
+			case map[string]any:
+				kind, _ := item["type"].(string)
+				text, isText := item["text"].(string)
+				if kind == "text" || kind == "input_text" || kind == "output_text" || (kind == "" && isText) {
+					b.WriteString(text)
+				}
+			}
 		}
+		return b.String(), true
+	default:
+		return "", false
 	}
-	return last
 }
 
 func writeJSON(w http.ResponseWriter, status int, payload any) {

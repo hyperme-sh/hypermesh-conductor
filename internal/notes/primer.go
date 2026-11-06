@@ -65,12 +65,44 @@ func Primer(store *Store, budget int) (string, error) {
 	for _, fact := range facts {
 		fmt.Fprintf(&b, "- fact: %s\n", fact.Title)
 	}
-	text := b.String()
-	for compact.EstimateTokens(text) > budget && strings.Count(text, "\n") > 2 {
-		text = text[:strings.LastIndex(text, "\n")]
-		text += "\n"
+	return strings.TrimSpace(trimToBudget(b.String(), budget)), nil
+}
+
+// trimToBudget drops trailing lines, then shortens the last line, until the
+// estimate fits. Each pass keeps a strictly shorter string: stripping only the
+// final newline does not, because the builder already ends with one.
+func trimToBudget(text string, budget int) string {
+	if budget < 0 {
+		budget = 0
 	}
-	return strings.TrimSpace(text), nil
+	for compact.EstimateTokens(text) > budget {
+		trimmed := strings.TrimRight(text, "\n")
+		cut := strings.LastIndex(trimmed, "\n")
+		if cut < 0 {
+			return truncateToBudget(trimmed, budget)
+		}
+		next := trimmed[:cut+1]
+		if len(next) >= len(text) {
+			return truncateToBudget(trimmed, budget)
+		}
+		text = next
+	}
+	return text
+}
+
+func truncateToBudget(text string, budget int) string {
+	if budget <= 0 || text == "" {
+		return ""
+	}
+	runes := []rune(text)
+	maxRunes := budget * 4
+	if maxRunes < len(runes) {
+		runes = runes[:maxRunes]
+	}
+	for len(runes) > 0 && compact.EstimateTokens(string(runes)) > budget {
+		runes = runes[:len(runes)-1]
+	}
+	return string(runes)
 }
 
 func linkedSteps(store *Store, goal string, byID map[string]Note) ([]Note, error) {

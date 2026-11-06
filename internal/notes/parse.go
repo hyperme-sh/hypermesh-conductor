@@ -42,6 +42,8 @@ type Note struct {
 	Body   string
 	Hash   string
 	Links  []string
+	// idFromName is true when the file omitted an id and the basename was used.
+	idFromName bool
 }
 
 // Parse reads Obsidian-style markdown: YAML frontmatter, a title, and wikilinks.
@@ -51,8 +53,10 @@ func Parse(path string, data []byte) Note {
 	meta, body := splitFrontmatter(text)
 	title := titleOf(body, path)
 	id := strings.TrimSpace(meta["id"])
+	fromName := false
 	if id == "" {
 		id = strings.TrimSuffix(filepath.Base(path), filepath.Ext(path))
+		fromName = true
 	}
 	kind := Types[strings.ToLower(strings.TrimSpace(meta["type"]))]
 	if kind == "" {
@@ -76,7 +80,7 @@ func Parse(path string, data []byte) Note {
 	return Note{
 		ID: id, Path: path, Title: title, Type: kind, Status: status, Order: order,
 		Tags: parseTags(meta["tags"]), Body: strings.TrimSpace(body),
-		Hash: hex.EncodeToString(sum[:]), Links: wikiLinks(text),
+		Hash: hex.EncodeToString(sum[:]), Links: wikiLinks(text), idFromName: fromName,
 	}
 }
 
@@ -95,11 +99,37 @@ func splitFrontmatter(text string) (map[string]string, string) {
 		if !ok {
 			continue
 		}
-		meta[strings.ToLower(strings.TrimSpace(key))] = strings.TrimSpace(value)
+		meta[strings.ToLower(strings.TrimSpace(key))] = yamlScalar(value)
 	}
 	body := rest[end+4:]
 	body = strings.TrimPrefix(body, "\n")
 	return meta, body
+}
+
+// yamlScalar decodes one frontmatter value. Quoted scalars are values, not
+// the quote characters stored around them.
+func yamlScalar(raw string) string {
+	value := strings.TrimSpace(raw)
+	if len(value) < 2 {
+		return value
+	}
+	switch value[0] {
+	case '"':
+		if value[len(value)-1] != '"' {
+			return value
+		}
+		if unquoted, err := strconv.Unquote(value); err == nil {
+			return unquoted
+		}
+		return value[1 : len(value)-1]
+	case '\'':
+		if value[len(value)-1] != '\'' {
+			return value
+		}
+		return strings.ReplaceAll(value[1:len(value)-1], "''", "'")
+	default:
+		return value
+	}
 }
 
 func parseTags(raw string) []string {
@@ -149,7 +179,7 @@ func wikiLinks(text string) []string {
 // Closed reports whether a status means the note is finished.
 func Closed(status string) bool {
 	switch strings.ToLower(status) {
-	case "done", "closed", "dropped":
+	case "done", "closed", "dropped", "drop":
 		return true
 	default:
 		return false
