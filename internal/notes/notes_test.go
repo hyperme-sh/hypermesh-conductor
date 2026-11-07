@@ -955,3 +955,43 @@ func TestPrimerRetainsBlockedGoalWithSpacesInID(t *testing.T) {
 		t.Fatal(err, primer)
 	}
 }
+
+func TestNoteReadRejectsSparseFileBeforeAllocation(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "huge.md")
+	file, err := os.Create(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := file.Truncate(1 << 30); err != nil {
+		t.Fatal(err)
+	}
+	file.Close()
+	root, err := os.OpenRoot(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer root.Close()
+	if body, err := readRootNote(root, dir, path); err == nil || len(body) != 0 {
+		t.Fatal(err, len(body))
+	}
+}
+func TestSyncRejectsAggregateSizeBeforeReplacingExistingIndex(t *testing.T) {
+	old := maxSyncBytes
+	maxSyncBytes = 200
+	t.Cleanup(func() { maxSyncBytes = old })
+	dir := t.TempDir()
+	writeNote(t, dir, "one.md", strings.Repeat("a", 120))
+	store := openTestStore(t, dir)
+	if _, err := store.Rebuild(dir); err != nil {
+		t.Fatal(err)
+	}
+	writeNote(t, dir, "two.md", strings.Repeat("b", 120))
+	if _, err := store.Sync(dir); err == nil {
+		t.Fatal("aggregate quota not enforced")
+	}
+	all, err := store.All()
+	if err != nil || len(all) != 1 {
+		t.Fatal(err, all)
+	}
+}

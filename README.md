@@ -132,3 +132,8 @@ MIT. See [LICENSE](LICENSE).
 ## Security
 
 Please report security problems to security@hyperme.sh, not in a public issue. Report other bugs to bugs@hyperme.sh. See [SECURITY.md](SECURITY.md).
+
+Notes synchronization accepts at most 10,000 Markdown files, 1 MiB per file,
+and 32 MiB of source bytes per sync. Oversized or growing files fail the sync
+before replacing the existing index. Named pipes and other nonregular files
+are excluded, and rooted reads cannot follow paths outside the notes directory.

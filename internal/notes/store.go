@@ -19,6 +19,11 @@ import (
 	_ "modernc.org/sqlite"
 )
 
+var maxNoteBytes int64 = 1 << 20
+var maxSyncBytes int64 = 32 << 20
+
+const maxSyncFiles = 10000
+
 // Store is the derived SQLite index. Deleting the database and rebuilding
 // reproduces it from Markdown.
 type Store struct {
@@ -304,6 +309,10 @@ func readNotes(dir string, files []string) ([]Note, []string, error) {
 	defer root.Close()
 	incoming := make([]Note, 0, len(files))
 	counts := map[string]int{}
+	var total int64
+	if len(files) > maxSyncFiles {
+		return nil, nil, fmt.Errorf("note count exceeds sync quota")
+	}
 	for _, path := range files {
 		info, err := os.Lstat(path)
 		if err != nil {
@@ -312,10 +321,14 @@ func readNotes(dir string, files []string) ([]Note, []string, error) {
 		if !info.Mode().IsRegular() {
 			continue
 		}
-		data, err := readRootNote(root, dir, path)
+		if info.Size() > maxNoteBytes || info.Size() > maxSyncBytes-total {
+			return nil, nil, fmt.Errorf("notes exceed sync byte quota")
+		}
+		data, err := readRootNoteLimit(root, dir, path, min(maxNoteBytes, maxSyncBytes-total))
 		if err != nil {
 			return nil, nil, err
 		}
+		total += int64(len(data))
 		note := Parse(path, data)
 		incoming = append(incoming, note)
 		if note.idFromName {
@@ -340,6 +353,10 @@ func readNotes(dir string, files []string) ([]Note, []string, error) {
 // Open under a directory handle: renaming a parent or swapping in a symlink
 // cannot redirect the read outside the configured notes root.
 func readRootNote(root *os.Root, dir, path string) ([]byte, error) {
+	return readRootNoteLimit(root, dir, path, maxNoteBytes)
+}
+
+func readRootNoteLimit(root *os.Root, dir, path string, limit int64) ([]byte, error) {
 	relative, err := filepath.Rel(dir, path)
 	if err != nil {
 		return nil, err
@@ -363,7 +380,17 @@ func readRootNote(root *os.Root, dir, path string) ([]byte, error) {
 	if !info.Mode().IsRegular() {
 		return nil, fmt.Errorf("note is not a regular file")
 	}
-	return io.ReadAll(file)
+	if info.Size() > limit {
+		return nil, fmt.Errorf("note exceeds byte quota")
+	}
+	data, err := io.ReadAll(io.LimitReader(file, limit+1))
+	if err != nil {
+		return nil, err
+	}
+	if int64(len(data)) > limit {
+		return nil, fmt.Errorf("note grew beyond byte quota")
+	}
+	return data, nil
 }
 
 func relativeNoteID(dir, path string) string {
@@ -764,6 +791,9 @@ func markdownFiles(dir string) ([]string, error) {
 			return nil
 		}
 		if strings.EqualFold(filepath.Ext(name), ".md") {
+			if len(files) >= maxSyncFiles {
+				return fmt.Errorf("note count exceeds sync quota")
+			}
 			files = append(files, path)
 		}
 		return nil
