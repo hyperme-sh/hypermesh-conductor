@@ -113,6 +113,56 @@ func TestSummaryCommand(t *testing.T) {
 	}
 }
 
+func TestTaskSummaryComparesEstimatedAndMeasuredUsage(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "journal.jsonl")
+	journal, err := metrics.OpenJournal(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	estimate, input, output := 12, 10, 3
+	row := metrics.StepRecord{TaskID: "lease", StepID: "first", JobClass: "code", Tier: "frontier", ModelID: "coding", PrefixSHA256: "hash", EstimatedInputTokens: &estimate, InputTokens: &input, OutputTokens: &output, UsageStatus: metrics.StatusMeasured}
+	appendRow := func() {
+		t.Helper()
+		if err := journal.Append(row); err != nil {
+			t.Fatal(err)
+		}
+	}
+	appendRow()
+	row.TaskID = "other"
+	appendRow()
+	check := func(wantEstimate, wantInput any) {
+		t.Helper()
+		var out, stderr bytes.Buffer
+		if Main([]string{"summary", "--journal", path, "--task", "lease"}, &out, &stderr) != 0 {
+			t.Fatal(stderr.String())
+		}
+		var report struct {
+			Totals map[string]any
+			Tasks  []struct {
+				TaskID string `json:"task_id"`
+			}
+		}
+		if err := json.Unmarshal(out.Bytes(), &report); err != nil {
+			t.Fatal(err)
+		}
+		if len(report.Tasks) != 1 || report.Tasks[0].TaskID != "lease" || report.Totals["estimated_input_tokens"] != wantEstimate || report.Totals["input_tokens"] != wantInput {
+			t.Fatal(report)
+		}
+	}
+	check(float64(12), float64(10))
+	row.TaskID, row.StepID, row.UsageStatus = "lease", "interrupted", metrics.StatusUncertain
+	row.InputTokens, row.OutputTokens = nil, nil
+	appendRow()
+	check(float64(24), nil)
+	row.StepID, row.EstimatedInputTokens = "legacy", nil
+	appendRow()
+	check(nil, nil)
+	var out, stderr bytes.Buffer
+	if Main([]string{"summary", "--journal", path, "--task", "absent"}, &out, &stderr) == 0 || out.Len() != 0 {
+		t.Fatal("missing task produced a report")
+	}
+}
+
 func TestRunStopsBeforeTheProviderWhenTheJournalDirectoryIsMissing(t *testing.T) {
 	hits := 0
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

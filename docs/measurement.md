@@ -53,3 +53,5 @@ A journal line that is not the step schema, or a measured row with null tokens, 
 Accuracy stays null. Compaction-mode scores belong to that bench issue. This summary does not add a speed figure.
 
 `numbers_policy` on every summary repeats the same rule: unmeasured fields stay null, uncertain usage is never recorded as zero, and a cost figure is a labeled proxy or null.
+
+Use `conductor summary --journal journal.jsonl --task "$lease_id"` for one managed Visor lease. The command reads both retained journal segments and reports an error if the task is absent. Each summary block includes the summed `estimated_input_tokens` when every included step has an estimate. Missing estimates leave it null. Compare it with `input_tokens` for complete provider usage, or inspect `measured_input_tokens` and `uncertain_steps` when a step was interrupted.
