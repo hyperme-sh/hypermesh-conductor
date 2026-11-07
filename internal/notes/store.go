@@ -71,23 +71,45 @@ func Open(path string) (*Store, error) {
 }
 
 func prepareIndexDir(dir string) error {
-	info, err := os.Stat(dir)
+	// Resolve the parent once; all creation and permission changes use its fd.
+	parent, err := os.OpenRoot(filepath.Dir(dir))
+	if err != nil {
+		return err
+	}
+	defer parent.Close()
+	name := filepath.Base(dir)
+	info, err := parent.Lstat(name)
+	created := false
 	if os.IsNotExist(err) {
-		if err := os.MkdirAll(dir, 0o700); err != nil {
+		if err := parent.Mkdir(name, 0o700); err != nil {
 			return err
 		}
-		return os.Chmod(dir, 0o700)
+		created = true
+		info, err = parent.Lstat(name)
 	}
 	if err != nil {
 		return err
 	}
-	if !info.IsDir() {
-		return fmt.Errorf("note index directory %s is not a directory", dir)
+	if !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
+		return fmt.Errorf("note index directory %s must be a real directory", dir)
 	}
-	if filepath.Base(dir) != ".conductor" {
-		return nil
+	// O_NOFOLLOW rejects a replacement symlink before opening or chmodding it.
+	file, err := parent.OpenFile(name, indexDirOpenFlags, 0)
+	if err != nil {
+		return err
 	}
-	return os.Chmod(dir, 0o700)
+	defer file.Close()
+	opened, err := file.Stat()
+	if err != nil {
+		return err
+	}
+	if !opened.IsDir() || !os.SameFile(info, opened) {
+		return fmt.Errorf("note index directory changed during setup")
+	}
+	if created || name == ".conductor" {
+		return file.Chmod(0o700)
+	}
+	return nil
 }
 
 func sqliteDSN(path string) (string, error) {

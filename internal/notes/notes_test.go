@@ -1009,3 +1009,29 @@ func TestNotesPreserveLeadingDeveloperPrefix(t *testing.T) {
 		}
 	}
 }
+
+func TestIndexRejectsSymlinkDirectoryWithoutChangingTarget(t *testing.T) {
+	root, victim := t.TempDir(), t.TempDir()
+	if err := os.Chmod(victim, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(victim, filepath.Join(root, ".conductor")); err != nil {
+		t.Skip(err)
+	}
+	store, err := Open(filepath.Join(root, ".conductor", "index.db"))
+	if err == nil {
+		store.Close()
+		t.Fatal("accepted symlinked index directory")
+	}
+	info, err := os.Stat(victim)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if runtime.GOOS != "windows" && info.Mode().Perm() != 0o755 {
+		t.Fatal(info.Mode())
+	}
+	entries, err := os.ReadDir(victim)
+	if err != nil || len(entries) != 0 {
+		t.Fatal(err, entries)
+	}
+}
