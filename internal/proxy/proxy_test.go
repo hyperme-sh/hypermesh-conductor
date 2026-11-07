@@ -2040,3 +2040,22 @@ func TestStreamingErrorBodiesCannotHoldTheHandler(t *testing.T) {
 		})
 	}
 }
+
+func TestNonstreamingProviderFailureIsUncertain(t *testing.T) {
+	for _, failure := range []string{`"status":"failed"`, `"error":{"message":"failed"}`, `"type":"error"`} {
+		t.Run(failure, func(t *testing.T) {
+			upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				_, _ = io.WriteString(w, `{`+failure+`,"usage":{"input_tokens":20,"output_tokens":5}}`)
+			}))
+			defer upstream.Close()
+			dir := t.TempDir()
+			cfg := loadTestConfig(t, dir, upstream.URL+"/v1", upstream.URL+"/v1", config.AuthPassthrough, config.ProviderOpenAICompatible)
+			journal := openJournal(t, dir)
+			rec := do(New(cfg, aiuditor.Stub{}, journal), "/v1/responses", "parse", "task-1", "failed", "", `{"input":"hello"}`)
+			records, err := metrics.ReadJournal(journal.Path())
+			if rec.Code != http.StatusBadGateway || err != nil || len(records) != 1 || records[0].UsageStatus != metrics.StatusUncertain || records[0].InputTokens != nil || records[0].OutputTokens != nil || records[0].Error == nil {
+				t.Fatal(rec.Code, err, records)
+			}
+		})
+	}
+}

@@ -361,6 +361,13 @@ func (p *Proxy) forward(w http.ResponseWriter, client *http.Request, upstream *h
 		p.finish(w, client, http.StatusBadGateway, nil, record, secrets, false)
 		return
 	}
+	if providerError(raw) {
+		msg := "provider response failed"
+		record.Error = &msg
+		record.UsageStatus = metrics.StatusUncertain
+		p.finish(w, client, http.StatusBadGateway, nil, record, secrets, false)
+		return
+	}
 	converted, err := translate.Response(protocolOfRequest(client), wire.Protocol, raw)
 	if err != nil {
 		msg := err.Error()
@@ -954,7 +961,7 @@ func providerError(payload []byte) bool {
 		return false
 	}
 	kind, _ := obj["type"].(string)
-	if kind == "error" || kind == "response.failed" {
+	if kind == "error" || kind == "response.failed" || obj["status"] == "failed" {
 		return true
 	}
 	if _, ok := obj["error"].(map[string]any); ok {
