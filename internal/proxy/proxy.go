@@ -246,7 +246,11 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if hash, err := hashBody(proto, prepared); err == nil {
 		prelimHash = hash
 	}
-	query := userQuery(prepared)
+	useNotes := p.Notes != nil && acceptsNotes(proto) && authorizeProxy(r) == nil
+	var query string
+	if useNotes {
+		query = userQuery(prepared)
+	}
 	next, didCompact, memLookups, memHits, compactErr := p.maybeCompact(r.Context(), r, proto, prepared, taskID, stepID, prelimHash, tier)
 	if compactErr != nil {
 		var denied proxyAuthError
@@ -265,7 +269,7 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		base.Compacted = &yes
 	}
 	beforeNotes := prepared
-	if p.Notes != nil && acceptsNotes(proto) && authorizeProxy(r) == nil {
+	if useNotes {
 		updated, got, err := p.insertNotes(prepared, query, taskID, stepID, true)
 		memLookups += got.Lookups
 		memHits += got.Hits
@@ -1237,19 +1241,27 @@ func (p *Proxy) insertNotes(body []byte, query, taskID, stepID string, trustIDs 
 }
 
 func userQuery(body []byte) string {
-	var root map[string]any
+	var root struct {
+		Messages []struct {
+			Role    string
+			Content json.RawMessage
+		}
+		Input json.RawMessage
+	}
 	if err := json.Unmarshal(body, &root); err != nil {
 		return ""
 	}
-	messages, _ := root["messages"].([]any)
 	seenUser := false
 	var last string
-	for _, item := range messages {
-		msg, _ := item.(map[string]any)
-		if msg["role"] != "user" {
+	for _, msg := range root.Messages {
+		if msg.Role != "user" {
 			continue
 		}
-		text, ok := contentText(msg["content"])
+		var content any
+		if json.Unmarshal(msg.Content, &content) != nil {
+			continue
+		}
+		text, ok := contentText(content)
 		if !ok {
 			continue
 		}
@@ -1259,7 +1271,8 @@ func userQuery(body []byte) string {
 	if seenUser {
 		return last
 	}
-	if input, ok := root["input"].(string); ok {
+	var input string
+	if json.Unmarshal(root.Input, &input) == nil {
 		return input
 	}
 	return ""
