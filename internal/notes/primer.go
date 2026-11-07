@@ -17,17 +17,13 @@ func Primer(store *Store, budget int) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	violations, err := store.Violations()
+	violations, err := goalViolations(store.db)
 	if err != nil {
 		return "", err
 	}
 	blocked := map[string]struct{}{}
-	for _, line := range violations {
-		// "goal <id> cannot close..."
-		fields := strings.Fields(line)
-		if len(fields) >= 2 {
-			blocked[fields[1]] = struct{}{}
-		}
+	for _, violation := range violations {
+		blocked[violation.GoalID] = struct{}{}
 	}
 	byID := map[string]Note{}
 	var goals, facts []Note

@@ -915,3 +915,43 @@ func TestRootedNoteReadRejectsSwappedSymlinksAndParentEscape(t *testing.T) {
 		}
 	}
 }
+
+func TestRenameInvalidatesCachedResolvedNeighborhood(t *testing.T) {
+	dir := t.TempDir()
+	writeNote(t, dir, "old.md", "---\nid: target\ntype: note\n---\nTARGETBODY\n")
+	writeNote(t, dir, "link.md", "---\nid: linker\ntype: note\n---\n# Link\n[[new]]\n")
+	store := openTestStore(t, dir)
+	if _, err := store.Rebuild(dir); err != nil {
+		t.Fatal(err)
+	}
+	service := NewService(store)
+	service.Primer = false
+	before, err := service.Retrieve("", "linker", "", true)
+	if err != nil || strings.Contains(before.Block, "TARGETBODY") {
+		t.Fatal(err, before)
+	}
+	if err := os.Rename(filepath.Join(dir, "old.md"), filepath.Join(dir, "new.md")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Sync(dir); err != nil {
+		t.Fatal(err)
+	}
+	after, err := service.Retrieve("", "linker", "", true)
+	if err != nil || after.Hits != 0 || !strings.Contains(after.Block, "TARGETBODY") {
+		t.Fatal(err, after)
+	}
+}
+
+func TestPrimerRetainsBlockedGoalWithSpacesInID(t *testing.T) {
+	dir := t.TempDir()
+	writeNote(t, dir, "Ship release.md", "---\ntype: goal\nstatus: done\n---\n# Shipping\n[[openstep]]\n")
+	writeNote(t, dir, "openstep.md", "---\ntype: steps\nstatus: open\n---\n# Unfinished work\n")
+	store := openTestStore(t, dir)
+	if _, err := store.Rebuild(dir); err != nil {
+		t.Fatal(err)
+	}
+	primer, err := Primer(store, 200)
+	if err != nil || !strings.Contains(primer, "Shipping") || !strings.Contains(primer, "Unfinished work") {
+		t.Fatal(err, primer)
+	}
+}

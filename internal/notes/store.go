@@ -309,7 +309,7 @@ func readNotes(dir string, files []string) ([]Note, []string, error) {
 		if err != nil {
 			return nil, nil, err
 		}
-		if info.Mode()&os.ModeSymlink != 0 {
+		if !info.Mode().IsRegular() {
 			continue
 		}
 		data, err := readRootNote(root, dir, path)
@@ -344,12 +344,19 @@ func readRootNote(root *os.Root, dir, path string) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	file, err := root.Open(relative)
+	info, err := root.Lstat(relative)
+	if err != nil {
+		return nil, err
+	}
+	if !info.Mode().IsRegular() {
+		return nil, fmt.Errorf("note is not a regular file")
+	}
+	file, err := root.OpenFile(relative, noteOpenFlags, 0)
 	if err != nil {
 		return nil, err
 	}
 	defer file.Close()
-	info, err := file.Stat()
+	info, err = file.Stat()
 	if err != nil {
 		return nil, err
 	}
@@ -493,7 +500,21 @@ func (s *Store) Violations() ([]string, error) {
 	return violations(s.db)
 }
 
+type goalViolation struct{ GoalID, StepID, Status string }
+
 func violations(db sqlDB) ([]string, error) {
+	details, err := goalViolations(db)
+	if err != nil {
+		return nil, err
+	}
+	var lines []string
+	for _, v := range details {
+		lines = append(lines, fmt.Sprintf("goal %s cannot close while step %s is %s", v.GoalID, v.StepID, v.Status))
+	}
+	return lines, nil
+}
+
+func goalViolations(db sqlDB) ([]goalViolation, error) {
 	rows, err := db.Query(`
 SELECT g.id, s.id, s.status
 FROM notes g
@@ -507,14 +528,14 @@ ORDER BY g.id, s.id`)
 		return nil, err
 	}
 	defer rows.Close()
-	var out []string
-	seen := map[string]struct{}{}
+	var out []goalViolation
+	seen := map[goalViolation]struct{}{}
 	for rows.Next() {
 		var goal, step, status string
 		if err := rows.Scan(&goal, &step, &status); err != nil {
 			return nil, err
 		}
-		line := fmt.Sprintf("goal %s cannot close while step %s is %s", goal, step, status)
+		line := goalViolation{goal, step, status}
 		if _, ok := seen[line]; ok {
 			continue
 		}
@@ -545,22 +566,21 @@ func (s *Store) Status() (Status, error) {
 	return status, err
 }
 
-// Generation is a hash of every note content hash. An edit changes it.
+// Generation covers content and filename-derived metadata used by graph resolution.
 func (s *Store) Generation() (string, error) {
-	rows, err := s.db.Query(`SELECT id, content_hash FROM notes ORDER BY id`)
+	rows, err := s.db.Query(`SELECT id, path, title, content_hash FROM notes ORDER BY id`)
 	if err != nil {
 		return "", err
 	}
 	defer rows.Close()
 	h := sha256.New()
 	for rows.Next() {
-		var id, hash string
-		if err := rows.Scan(&id, &hash); err != nil {
+		var id, path, title, hash string
+		if err := rows.Scan(&id, &path, &title, &hash); err != nil {
 			return "", err
 		}
-		_, _ = h.Write([]byte(id))
-		_, _ = h.Write([]byte{0})
-		_, _ = h.Write([]byte(hash))
+		row, _ := json.Marshal([]string{id, path, title, hash})
+		_, _ = h.Write(row)
 		_, _ = h.Write([]byte{'\n'})
 	}
 	return hex.EncodeToString(h.Sum(nil)), rows.Err()
