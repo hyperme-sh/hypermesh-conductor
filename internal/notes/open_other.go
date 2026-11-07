@@ -11,3 +11,5 @@ const indexDirOpenFlags = os.O_RDONLY
 const indexFileOpenFlags = os.O_RDWR
 
 func singleIndexLink(info os.FileInfo) bool { return true }
+
+func trustedIndexDirectory(info os.FileInfo, leaf bool) bool { return true }

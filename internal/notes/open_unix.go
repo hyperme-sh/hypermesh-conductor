@@ -18,3 +18,11 @@ func singleIndexLink(info os.FileInfo) bool {
 	stat, ok := info.Sys().(*syscall.Stat_t)
 	return ok && stat.Nlink == 1
 }
+
+func trustedIndexDirectory(info os.FileInfo, leaf bool) bool {
+	stat, ok := info.Sys().(*syscall.Stat_t)
+	if !ok || (int(stat.Uid) != os.Geteuid() && (leaf || stat.Uid != 0)) {
+		return false
+	}
+	return info.Mode().Perm()&0o022 == 0 || (!leaf && info.Mode()&os.ModeSticky != 0)
+}

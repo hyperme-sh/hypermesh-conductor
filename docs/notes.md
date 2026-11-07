@@ -17,3 +17,5 @@ An in-memory LRU keeps neighborhoods and compaction summaries. Neighborhood keys
 `notes.embed` is off by default. The index has an embedding column for a cheap-tier vector. Nothing in the notes directory is sent anywhere except the retrieved neighborhood inside a model request the proxy was already going to make. The metrics journal does not store note bodies.
 
 `conductor dream --notes <dir>` writes a markdown diff of proposed links and merges next to the inactive JSON proposal. The notes on disk are left as they are.
+
+The derived SQLite index lives in the user's local cache under `hypermesh-conductor/notes`, keyed by the canonical collection path. The CLI and server use the same index. An old `.conductor/index.db` inside the notes tree is ignored; a sync rebuilds the derived data from Markdown. Explicit `--db` and `notes.db` paths must also be outside the collection, in an owner-controlled directory. On Windows they must be under the user's local cache.

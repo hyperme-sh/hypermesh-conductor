@@ -1146,3 +1146,44 @@ func TestBacklinksUseDestinationIndex(t *testing.T) {
 		t.Fatal(err, detail)
 	}
 }
+
+func TestCollectionIndexCannotBeRedirectedFromNotes(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("isolated XDG cache")
+	}
+	cache, dir, victim := t.TempDir(), t.TempDir(), t.TempDir()
+	t.Setenv("XDG_CACHE_HOME", cache)
+	if err := os.Symlink(victim, filepath.Join(dir, ".conductor")); err != nil {
+		t.Fatal(err)
+	}
+	writeNote(t, dir, "alpha.md", "# Alpha\nPrivate content\n")
+	store, err := OpenCollection(dir, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Sync(dir); err != nil {
+		t.Fatal(err)
+	}
+	store.Close()
+	if entries, err := os.ReadDir(victim); err != nil || len(entries) != 0 {
+		t.Fatal(err, entries)
+	}
+	if _, err := OpenCollection(dir, filepath.Join(dir, ".conductor", "index.db")); err == nil {
+		t.Fatal("accepted an in-tree index")
+	}
+	alias := filepath.Join(t.TempDir(), "alias")
+	if err := os.Symlink(dir, alias); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := OpenCollection(dir, filepath.Join(alias, "new", "index.db")); err == nil {
+		t.Fatal("accepted an alias into the collection")
+	}
+	store, err = OpenCollection(dir, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	if _, ok, err := store.Get("alpha"); err != nil || !ok {
+		t.Fatal(err, ok)
+	}
+}

@@ -11,7 +11,6 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
-	"path/filepath"
 	"strings"
 
 	"github.com/hyperme-sh/hypermesh-conductor/internal/aiuditor"
@@ -374,7 +373,7 @@ func dreamCmd(args []string, stdout, stderr io.Writer) int {
 }
 
 func writeNoteDiff(dir, path string) error {
-	store, err := notes.Open(filepath.Join(dir, ".conductor", "index.db"))
+	store, err := notes.OpenCollection(dir, "")
 	if err != nil {
 		return err
 	}
@@ -405,10 +404,7 @@ func indexCmd(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintln(stderr, "notes directory is required")
 		return 2
 	}
-	if *dbPath == "" {
-		*dbPath = filepath.Join(*dir, ".conductor", "index.db")
-	}
-	store, err := notes.Open(*dbPath)
+	store, err := notes.OpenCollection(*dir, *dbPath)
 	if err != nil {
 		fmt.Fprintln(stderr, err.Error())
 		return 2
@@ -458,10 +454,7 @@ func primerCmd(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintln(stderr, "notes directory is required")
 		return 2
 	}
-	if *dbPath == "" {
-		*dbPath = filepath.Join(*dir, ".conductor", "index.db")
-	}
-	store, err := notes.Open(*dbPath)
+	store, err := notes.OpenCollection(*dir, *dbPath)
 	if err != nil {
 		fmt.Fprintln(stderr, err.Error())
 		return 2
@@ -484,11 +477,7 @@ func openNotes(cfg config.Config) (*notes.Service, *notes.Store, error) {
 	if cfg.Notes.Dir == "" {
 		return nil, nil, nil
 	}
-	dbPath := cfg.Notes.DB
-	if dbPath == "" {
-		dbPath = filepath.Join(cfg.Notes.Dir, ".conductor", "index.db")
-	}
-	store, err := notes.Open(dbPath)
+	store, err := notes.OpenCollection(cfg.Notes.Dir, cfg.Notes.DB)
 	if err != nil {
 		return nil, nil, err
 	}
