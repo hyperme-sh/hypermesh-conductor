@@ -196,3 +196,21 @@ func TestParallelToolResultsRetainCallIDs(t *testing.T) {
 		}
 	}
 }
+
+func TestSummaryPreservesSpeakerRolesAndBoundaries(t *testing.T) {
+	summaries := []string{}
+	for _, roles := range [][2]string{{"user", "assistant"}, {"assistant", "user"}} {
+		raw := []byte(`[{"role":"` + roles[0] + `","content":"balance 1000"},{"role":"` + roles[1] + `","content":"balance 2000"},{"role":"user","content":"What balance did I give you?"}]`)
+		plan, err := PlanMessages(raw, 1, 1)
+		if err != nil || !plan.Needed {
+			t.Fatal(err, plan)
+		}
+		if !strings.Contains(plan.SummaryInput, "[message "+roles[0]+"]\nbalance 1000") || !strings.Contains(plan.SummaryInput, "[message "+roles[1]+"]\nbalance 2000") || strings.Count(plan.SummaryInput, "[/message]") != 2 {
+			t.Fatal(plan.SummaryInput)
+		}
+		summaries = append(summaries, plan.SummaryInput)
+	}
+	if summaries[0] == summaries[1] {
+		t.Fatal("speaker distinction lost")
+	}
+}
