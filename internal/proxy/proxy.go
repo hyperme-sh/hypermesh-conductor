@@ -95,6 +95,15 @@ func (p *Proxy) ListenAndServe() error {
 	if err != nil {
 		return err
 	}
+	return p.ServeListener(listener)
+}
+
+// ServeListener applies the same loopback policy and connection limits to an inherited listener.
+func (p *Proxy) ServeListener(listener net.Listener) error {
+	addr, ok := listener.Addr().(*net.TCPAddr)
+	if !ok || !addr.IP.IsLoopback() {
+		return fmt.Errorf("listener must be a loopback TCP socket")
+	}
 	return p.server().Serve(limitConns(listener, maxConns))
 }
 
