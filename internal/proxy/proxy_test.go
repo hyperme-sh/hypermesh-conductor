@@ -1653,9 +1653,15 @@ func (h blockCompactedHop) Review(_ context.Context, env aiuditor.Envelope) (aiu
 
 func TestCompactionModifyKeepsTheCheapModel(t *testing.T) {
 	var model string
+	actualPrefix := make(chan string, 1)
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		raw, _ := io.ReadAll(r.Body)
 		if strings.Contains(string(raw), "Summarize the conversation tail") {
+			h, err := hashBody(translate.ProtoChat, raw)
+			if err != nil {
+				t.Error(err)
+			}
+			actualPrefix <- h
 			var body map[string]any
 			_ = json.Unmarshal(raw, &body)
 			model, _ = body["model"].(string)
@@ -1676,6 +1682,14 @@ func TestCompactionModifyKeepsTheCheapModel(t *testing.T) {
 	if rec.Code != http.StatusOK || model != "local-small" {
 		t.Fatalf("code %d model %s body %s", rec.Code, model, rec.Body.String())
 	}
+	rows, err := metrics.ReadJournal(journal.Path())
+	if err != nil || len(rows) != 2 {
+		t.Fatal(err, rows)
+	}
+	if rows[0].StepID != "long-1.compact" || rows[0].PrefixSHA256 != <-actualPrefix || rows[0].PrefixSHA256 == rows[1].PrefixSHA256 {
+		t.Fatal(rows)
+	}
+
 }
 
 type rewriteSummaryModel struct{}
@@ -1689,6 +1703,7 @@ func (rewriteSummaryModel) Review(_ context.Context, env aiuditor.Envelope) (aiu
 		return aiuditor.Verdict{}, err
 	}
 	body["model"] = "expensive-model"
+	body["messages"].([]any)[0].(map[string]any)["content"] = "Summarize the conversation tail under reviewed instructions."
 	raw, err := json.Marshal(body)
 	if err != nil {
 		return aiuditor.Verdict{}, err
@@ -2260,7 +2275,7 @@ func TestAIuditorSummaryModificationReservesBudget(t *testing.T) {
 	cfg := loadTestConfig(t, dir, "http://127.0.0.1:1/v1", "http://127.0.0.1:1/v1", config.AuthPassthrough, config.ProviderOpenAICompatible)
 	client := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
 	client.Header.Set("Authorization", "Bearer test-secret")
-	_, _, _, err := New(cfg, oversizedModify{}, openJournal(t, dir)).cheapSummary(context.Background(), client, "small summary input")
+	_, _, _, _, err := New(cfg, oversizedModify{}, openJournal(t, dir)).cheapSummary(context.Background(), client, "small summary input")
 	if !errors.Is(err, errBodyBudget) {
 		t.Fatalf("expected summary budget rejection: %v", err)
 	}
