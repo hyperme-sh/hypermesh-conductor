@@ -139,6 +139,19 @@ func (c *trackedConn) Close() error {
 
 // ServeHTTP implements the local API.
 func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	// Native API clients omit browser provenance headers. Only same-origin
+	// browser requests may reach local providers.
+	scheme := "http"
+	if r.TLS != nil {
+		scheme = "https"
+	}
+	origins := r.Header.Values("Origin")
+	sites := r.Header.Values("Sec-Fetch-Site")
+	if (len(origins) != 0 && (len(origins) != 1 || !strings.EqualFold(origins[0], scheme+"://"+r.Host))) ||
+		(len(sites) != 0 && (len(sites) != 1 || (sites[0] != "same-origin" && sites[0] != "none"))) {
+		http.Error(w, "cross-origin request denied", http.StatusForbidden)
+		return
+	}
 	w = deadlineWriter{ResponseWriter: w, idle: writeIdle}
 	proto, ok := protocolOf(r.Method, r.URL.Path)
 	if !ok {
