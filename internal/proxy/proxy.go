@@ -6,6 +6,7 @@ package proxy
 
 import (
 	"bytes"
+	"context"
 	"crypto/rand"
 	"crypto/subtle"
 	"encoding/hex"
@@ -313,7 +314,16 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 func (p *Proxy) forward(w http.ResponseWriter, client *http.Request, upstream *http.Request, tier config.Tier, wire translate.Wire, stream bool, secrets []string, record metrics.StepRecord) {
 	start := time.Now()
+	ctx, cancel := context.WithCancel(upstream.Context())
+	defer cancel()
+	upstream = upstream.WithContext(ctx)
+	headerTimeout := tier.Timeout
+	if headerTimeout <= 0 {
+		headerTimeout = 60 * time.Second
+	}
+	headerTimer := time.AfterFunc(headerTimeout, cancel)
 	resp, err := p.upstreamClient(tier.Timeout, stream).Do(upstream)
+	headerTimer.Stop()
 	if err != nil {
 		ms := elapsedMS(start)
 		record.LatencyMS = &ms

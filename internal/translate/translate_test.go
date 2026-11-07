@@ -601,3 +601,16 @@ func TestMalformedToolArgumentsAreNotReplaced(t *testing.T) {
 		}
 	}
 }
+
+func TestChatRefusalSurvivesMessagesTranslation(t *testing.T) {
+	out, err := Response(ProtoMessages, ProtoChat, []byte(`{"choices":[{"message":{"content":null,"refusal":"Cannot comply"},"finish_reason":"stop"}]}`))
+	if err != nil || !strings.Contains(string(out), "Cannot comply") {
+		t.Fatal(err, string(out))
+	}
+	stream := NewStream(ProtoMessages, ProtoChat)
+	defer stream.Close()
+	streamed := stream.Consume([]byte("data: {\"choices\":[{\"delta\":{\"refusal\":\"Cannot comply\"}}]}\n\n"))
+	if !strings.Contains(string(streamed), "Cannot comply") {
+		t.Fatal(string(streamed))
+	}
+}

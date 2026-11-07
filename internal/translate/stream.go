@@ -405,7 +405,11 @@ func (s *Stream) chatToAnthropic(obj map[string]any) []byte {
 	}
 	choice, _ := choices[0].(map[string]any)
 	delta, _ := choice["delta"].(map[string]any)
-	if text, ok := delta["content"].(string); ok && text != "" {
+	text, _ := delta["content"].(string)
+	if refusal, ok := delta["refusal"].(string); ok {
+		text += refusal
+	}
+	if text != "" {
 		out.WriteString("event: content_block_delta\n")
 		out.Write(sseData(map[string]any{
 			"type": "content_block_delta", "index": 0,
