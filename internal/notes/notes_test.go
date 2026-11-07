@@ -1094,3 +1094,33 @@ func TestTitleResolutionUsesIndex(t *testing.T) {
 		t.Fatal(details)
 	}
 }
+
+func TestIndexRejectsLinkedArtifacts(t *testing.T) {
+	for _, suffix := range []string{"", "-wal", "-shm", "-journal"} {
+		t.Run(suffix, func(t *testing.T) {
+			dir := t.TempDir()
+			victim := filepath.Join(t.TempDir(), "victim")
+			if err := os.WriteFile(victim, []byte("keep unchanged"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			path := filepath.Join(dir, "index.db")
+			if err := os.Symlink(victim, path+suffix); err != nil {
+				t.Skip(err)
+			}
+			if store, err := Open(path); err == nil {
+				store.Close()
+				t.Fatal("accepted linked artifact")
+			}
+			if got := read(t, victim); got != "keep unchanged" {
+				t.Fatal(got)
+			}
+			info, err := os.Stat(victim)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if runtime.GOOS != "windows" && info.Mode().Perm() != 0o644 {
+				t.Fatal(info.Mode())
+			}
+		})
+	}
+}

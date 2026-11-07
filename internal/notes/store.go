@@ -42,16 +42,17 @@ func Open(path string) (*Store, error) {
 	if err != nil {
 		return nil, err
 	}
-	// Create with private permissions before SQLite can write any page. Existing
-	// files and sidecars are restricted before schema access, not only afterward.
-	file, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR, 0o600)
+	root, err := os.OpenRoot(filepath.Dir(path))
 	if err != nil {
 		return nil, err
 	}
-	if err := file.Close(); err != nil {
+	defer root.Close()
+	name := filepath.Base(path)
+	// Validate every existing artifact before SQLite can read or migrate it.
+	if err := restrictIndex(root, name); err != nil {
 		return nil, err
 	}
-	if err := restrictIndex(path); err != nil {
+	if err := privateIndexFile(root, name, true); err != nil {
 		return nil, err
 	}
 	db, err := sql.Open("sqlite", dsn)
@@ -63,7 +64,7 @@ func Open(path string) (*Store, error) {
 		_ = db.Close()
 		return nil, err
 	}
-	if err := restrictIndex(path); err != nil {
+	if err := restrictIndex(root, name); err != nil {
 		_ = db.Close()
 		return nil, err
 	}
@@ -125,29 +126,51 @@ func sqliteDSN(path string) (string, error) {
 	return uri + "?_pragma=busy_timeout(5000)", nil
 }
 
-func restrictIndex(path string) error {
-	for _, candidate := range []string{path, path + "-wal", path + "-shm", path + "-journal"} {
-		info, err := os.Stat(candidate)
+func restrictIndex(root *os.Root, name string) error {
+	for _, candidate := range []string{name, name + "-wal", name + "-shm", name + "-journal"} {
+		if err := privateIndexFile(root, candidate, false); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func privateIndexFile(root *os.Root, name string, create bool) error {
+	info, err := root.Lstat(name)
+	if err != nil && !os.IsNotExist(err) {
+		return err
+	}
+	if os.IsNotExist(err) && !create {
+		return nil
+	}
+	if err == nil && !info.Mode().IsRegular() {
+		return fmt.Errorf("index artifact must be a regular file: %s", name)
+	}
+	flags := indexFileOpenFlags
+	if create {
+		flags |= os.O_CREATE
+	}
+	file, err := root.OpenFile(name, flags, 0o600)
+	if err != nil {
+		return err
+	}
+	defer file.Close()
+	opened, err := file.Stat()
+	if err != nil {
+		return err
+	}
+	if !opened.Mode().IsRegular() || !singleIndexLink(opened) || (info != nil && !os.SameFile(info, opened)) {
+		return fmt.Errorf("index artifact is linked or changed: %s", name)
+	}
+	if err := file.Chmod(0o600); err != nil {
+		return err
+	}
+	if runtime.GOOS != "windows" {
+		opened, err = file.Stat()
 		if err != nil {
-			if os.IsNotExist(err) {
-				continue
-			}
 			return err
 		}
-		if info.IsDir() {
-			continue
-		}
-		if err := os.Chmod(candidate, 0o600); err != nil {
-			return err
-		}
-		if runtime.GOOS == "windows" {
-			continue
-		}
-		info, err = os.Stat(candidate)
-		if err != nil {
-			return err
-		}
-		if info.Mode().Perm()&0o077 != 0 {
+		if opened.Mode().Perm()&0o077 != 0 {
 			return fmt.Errorf("note index is readable by other users")
 		}
 	}
