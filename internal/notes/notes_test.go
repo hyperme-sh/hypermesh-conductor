@@ -1051,3 +1051,46 @@ func TestSearchRanksRelevantNotesBeforeLimitingSeeds(t *testing.T) {
 		t.Fatal(err, ids)
 	}
 }
+
+func TestChangedIDCollisionDoesNotRetainOldContent(t *testing.T) {
+	dir := t.TempDir()
+	writeNote(t, dir, "a.md", "---\nid: a\n---\n# A\nOBSOLETECONTENT\n[[b]]\n")
+	writeNote(t, dir, "b.md", "---\nid: b\n---\n# B\nCurrent\n")
+	store := openTestStore(t, dir)
+	if _, err := store.Rebuild(dir); err != nil {
+		t.Fatal(err)
+	}
+	writeNote(t, dir, "a.md", "---\nid: b\n---\n# Changed\nNew content\n")
+	for i := 0; i < 2; i++ {
+		if _, err := store.Sync(dir); err != nil {
+			t.Fatal(err)
+		}
+		if _, ok, err := store.Get("a"); err != nil || ok {
+			t.Fatal(err, ok)
+		}
+		if ids, err := store.Search("OBSOLETECONTENT", 5); err != nil || len(ids) != 0 {
+			t.Fatal(err, ids)
+		}
+	}
+}
+
+func TestTitleResolutionUsesIndex(t *testing.T) {
+	store := openTestStore(t, t.TempDir())
+	rows, err := store.db.Query(`EXPLAIN QUERY PLAN SELECT id FROM notes WHERE lower(title)=lower(?) ORDER BY id LIMIT 1`, "title")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+	var details string
+	for rows.Next() {
+		var id, parent, unused int
+		var detail string
+		if err := rows.Scan(&id, &parent, &unused, &detail); err != nil {
+			t.Fatal(err)
+		}
+		details += detail
+	}
+	if !strings.Contains(details, "notes_title_folded") {
+		t.Fatal(details)
+	}
+}

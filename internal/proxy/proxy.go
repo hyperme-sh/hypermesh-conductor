@@ -1249,6 +1249,17 @@ func contentText(content any) (string, bool) {
 	case string:
 		return value, true
 	case []any:
+		toolResultsOnly := len(value) > 0
+		for _, part := range value {
+			item, ok := part.(map[string]any)
+			if !ok || item["type"] != "tool_result" {
+				toolResultsOnly = false
+				break
+			}
+		}
+		if toolResultsOnly {
+			return "", false
+		}
 		var b strings.Builder
 		for _, part := range value {
 			switch item := part.(type) {

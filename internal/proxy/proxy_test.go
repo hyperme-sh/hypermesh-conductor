@@ -2480,3 +2480,10 @@ func TestStreamingHeaderWaitUsesSelectedTierTimeout(t *testing.T) {
 		t.Fatal(rec.Code, rec.Body.String())
 	}
 }
+
+func TestToolResultsPreserveTheRetrievalQuery(t *testing.T) {
+	body := []byte(`{"messages":[{"role":"user","content":"uniquealpha"},{"role":"assistant","content":[{"type":"tool_use","id":"c"}]},{"role":"user","content":[{"type":"tool_result","tool_use_id":"c","content":"result"}]}]}`)
+	if got := userQuery(body); got != "uniquealpha" {
+		t.Fatal(got)
+	}
+}

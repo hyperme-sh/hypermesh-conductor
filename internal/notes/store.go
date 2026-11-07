@@ -171,6 +171,7 @@ CREATE TABLE IF NOT EXISTS notes (
   content_hash TEXT NOT NULL,
   embedding TEXT
 );
+CREATE INDEX IF NOT EXISTS notes_title_folded ON notes(lower(title), id);
 CREATE TABLE IF NOT EXISTS links (
   src TEXT NOT NULL,
   target TEXT NOT NULL,
@@ -262,6 +263,9 @@ func (s *Store) syncDir(dir string, replace bool) (Stats, error) {
 		if err := upsert(tx, note); err != nil {
 			var collision idCollision
 			if errors.As(err, &collision) {
+				if err := deletePath(tx, note.Path); err != nil {
+					return stats, err
+				}
 				stats.Warnings = append(stats.Warnings, collision.Error())
 				continue
 			}
