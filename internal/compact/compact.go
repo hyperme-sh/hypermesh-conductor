@@ -197,6 +197,9 @@ func textOfAll(items []json.RawMessage) string {
 				buf.WriteString("[tool_use " + name + " " + id + "] " + args + "\n")
 			}
 		}
+		if id, ok := obj["tool_call_id"].(string); ok {
+			buf.WriteString("[tool_result " + id + "] ")
+		}
 		writeSummaryContent(&buf, obj["content"])
 	}
 	return buf.String()
