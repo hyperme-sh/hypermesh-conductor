@@ -863,25 +863,32 @@ func hashBody(proto string, body []byte) (string, error) {
 		}
 		system = text
 		tools, _ = root["tools"].([]any)
-	case translate.ProtoResponses:
-		system, _ = root["instructions"].(string)
+	case translate.ProtoResponses, translate.ProtoChat:
+		var parts []string
+		key := "messages"
+		if proto == translate.ProtoResponses {
+			key = "input"
+			if instructions, ok := root["instructions"].(string); ok && instructions != "" {
+				parts = append(parts, instructions)
+			}
+		}
+		messages, _ := root[key].([]any)
+		for _, item := range messages {
+			msg, _ := item.(map[string]any)
+			text, instruction, err := translate.InstructionText(msg)
+			if err != nil {
+				return "", err
+			}
+			if instruction && text != "" {
+				parts = append(parts, text)
+			}
+		}
+		system = strings.Join(parts, "\n")
 		tools, _ = root["tools"].([]any)
 	default:
-		if messages, ok := root["messages"].([]any); ok {
-			var parts []string
-			for _, item := range messages {
-				msg, _ := item.(map[string]any)
-				if msg["role"] != "system" && msg["role"] != "developer" {
-					continue
-				}
-				if text, ok := msg["content"].(string); ok {
-					parts = append(parts, text)
-				}
-			}
-			system = strings.Join(parts, "\n")
-		}
 		tools, _ = root["tools"].([]any)
 	}
+
 	if system == "" && len(tools) == 0 {
 		return prefix.HashRequest("", []any{})
 	}

@@ -232,7 +232,7 @@ func responsesToAnthropic(body []byte, model string) ([]byte, error) {
 			if !ok {
 				return nil, fmt.Errorf("unsupported content for protocol translation")
 			}
-			instruction, isInstruction, err := responsesInstruction(msg)
+			instruction, isInstruction, err := InstructionText(msg)
 			if err != nil {
 				return nil, err
 			}
@@ -527,7 +527,8 @@ func userBlocksToOpenAI(blocks []any) ([]any, error) {
 	return out, nil
 }
 
-func responsesInstruction(msg map[string]any) (string, bool, error) {
+// InstructionText extracts system/developer text from a message for translation and prefix hashing.
+func InstructionText(msg map[string]any) (string, bool, error) {
 	kind, _ := msg["type"].(string)
 	if kind != "" && kind != "message" {
 		return "", false, nil
