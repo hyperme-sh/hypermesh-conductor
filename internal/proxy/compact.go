@@ -193,6 +193,10 @@ func (p *Proxy) cheapSummary(ctx context.Context, client *http.Request, tail str
 			return "", usage.UncertainUsage(), 0, measuredPrefix, err
 		}
 	}
+	bodyToSend, err = limitOutput(wire.Protocol, bodyToSend, tier.OutputLimit)
+	if err != nil {
+		return "", usage.UncertainUsage(), 0, measuredPrefix, err
+	}
 	if !replaceReservation(held, len(bodyToSend)) {
 		held = 0
 		return "", usage.UncertainUsage(), 0, measuredPrefix, errBodyBudget

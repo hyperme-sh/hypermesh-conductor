@@ -35,27 +35,29 @@ type Accuracy struct {
 
 // StepRecord is one journal row. Token fields are nil when unmeasured.
 type StepRecord struct {
-	TaskID             string   `json:"task_id"`
-	StepID             string   `json:"step_id"`
-	JobClass           string   `json:"job_class"`
-	Tier               string   `json:"tier"`
-	ModelID            string   `json:"model_id"`
-	Reason             string   `json:"reason"`
-	SuggestionTier     *string  `json:"suggestion_tier"`
-	SuggestionAccepted *bool    `json:"suggestion_accepted"`
-	InputTokens        *int     `json:"input_tokens"`
-	OutputTokens       *int     `json:"output_tokens"`
-	CacheHitTokens     *int     `json:"cache_hit_tokens"`
-	LatencyMS          *int     `json:"latency_ms"`
-	PrefixSHA256       string   `json:"prefix_sha256"`
-	UsageStatus        string   `json:"usage_status"`
-	Error              *string  `json:"error"`
-	CostProxy          *float64 `json:"cost_proxy"`
-	CostProxyLabel     *string  `json:"cost_proxy_label"`
-	Compacted          *bool    `json:"compacted,omitempty"`
-	PrefixCacheMatch   *bool    `json:"prefix_cache_match,omitempty"`
-	MemoryLookups      *int     `json:"memory_lookups,omitempty"`
-	MemoryHits         *int     `json:"memory_hits,omitempty"`
+	EstimatedInputTokens *int     `json:"estimated_input_tokens,omitempty"`
+	RecipeSHA256         string   `json:"recipe_sha256,omitempty"`
+	TaskID               string   `json:"task_id"`
+	StepID               string   `json:"step_id"`
+	JobClass             string   `json:"job_class"`
+	Tier                 string   `json:"tier"`
+	ModelID              string   `json:"model_id"`
+	Reason               string   `json:"reason"`
+	SuggestionTier       *string  `json:"suggestion_tier"`
+	SuggestionAccepted   *bool    `json:"suggestion_accepted"`
+	InputTokens          *int     `json:"input_tokens"`
+	OutputTokens         *int     `json:"output_tokens"`
+	CacheHitTokens       *int     `json:"cache_hit_tokens"`
+	LatencyMS            *int     `json:"latency_ms"`
+	PrefixSHA256         string   `json:"prefix_sha256"`
+	UsageStatus          string   `json:"usage_status"`
+	Error                *string  `json:"error"`
+	CostProxy            *float64 `json:"cost_proxy"`
+	CostProxyLabel       *string  `json:"cost_proxy_label"`
+	Compacted            *bool    `json:"compacted,omitempty"`
+	PrefixCacheMatch     *bool    `json:"prefix_cache_match,omitempty"`
+	MemoryLookups        *int     `json:"memory_lookups,omitempty"`
+	MemoryHits           *int     `json:"memory_hits,omitempty"`
 }
 
 // Validate checks the row before it is written or summarized.
@@ -93,31 +95,33 @@ func (r StepRecord) Validate() error {
 }
 
 type wireRecord struct {
-	Schema             string    `json:"schema"`
-	TaskID             string    `json:"task_id"`
-	StepID             string    `json:"step_id"`
-	JobClass           string    `json:"job_class"`
-	Tier               string    `json:"tier"`
-	ModelID            string    `json:"model_id"`
-	Reason             string    `json:"reason"`
-	SuggestionTier     *string   `json:"suggestion_tier"`
-	SuggestionAccepted *bool     `json:"suggestion_accepted"`
-	InputTokens        *int      `json:"input_tokens"`
-	OutputTokens       *int      `json:"output_tokens"`
-	CacheHitTokens     *int      `json:"cache_hit_tokens"`
-	LatencyMS          *int      `json:"latency_ms"`
-	PrefixSHA256       string    `json:"prefix_sha256"`
-	UsageStatus        string    `json:"usage_status"`
-	Error              *string   `json:"error"`
-	CostProxy          *float64  `json:"cost_proxy"`
-	CostProxyLabel     *string   `json:"cost_proxy_label"`
-	Compacted          *bool     `json:"compacted,omitempty"`
-	PrefixCacheMatch   *bool     `json:"prefix_cache_match,omitempty"`
-	MemoryLookups      *int      `json:"memory_lookups,omitempty"`
-	MemoryHits         *int      `json:"memory_hits,omitempty"`
-	PeakContextTokens  *int      `json:"peak_context_tokens"`
-	CostPerStep        *float64  `json:"cost_per_step"`
-	Accuracy           *Accuracy `json:"accuracy"`
+	EstimatedInputTokens *int      `json:"estimated_input_tokens,omitempty"`
+	RecipeSHA256         string    `json:"recipe_sha256,omitempty"`
+	Schema               string    `json:"schema"`
+	TaskID               string    `json:"task_id"`
+	StepID               string    `json:"step_id"`
+	JobClass             string    `json:"job_class"`
+	Tier                 string    `json:"tier"`
+	ModelID              string    `json:"model_id"`
+	Reason               string    `json:"reason"`
+	SuggestionTier       *string   `json:"suggestion_tier"`
+	SuggestionAccepted   *bool     `json:"suggestion_accepted"`
+	InputTokens          *int      `json:"input_tokens"`
+	OutputTokens         *int      `json:"output_tokens"`
+	CacheHitTokens       *int      `json:"cache_hit_tokens"`
+	LatencyMS            *int      `json:"latency_ms"`
+	PrefixSHA256         string    `json:"prefix_sha256"`
+	UsageStatus          string    `json:"usage_status"`
+	Error                *string   `json:"error"`
+	CostProxy            *float64  `json:"cost_proxy"`
+	CostProxyLabel       *string   `json:"cost_proxy_label"`
+	Compacted            *bool     `json:"compacted,omitempty"`
+	PrefixCacheMatch     *bool     `json:"prefix_cache_match,omitempty"`
+	MemoryLookups        *int      `json:"memory_lookups,omitempty"`
+	MemoryHits           *int      `json:"memory_hits,omitempty"`
+	PeakContextTokens    *int      `json:"peak_context_tokens"`
+	CostPerStep          *float64  `json:"cost_per_step"`
+	Accuracy             *Accuracy `json:"accuracy"`
 }
 
 // Wire converts a row to the journal object, including null accuracy fields.
@@ -127,7 +131,7 @@ func (r StepRecord) Wire() wireRecord {
 		peak = r.InputTokens
 	}
 	return wireRecord{
-		Schema:             SchemaStep,
+		Schema: SchemaStep, EstimatedInputTokens: r.EstimatedInputTokens, RecipeSHA256: r.RecipeSHA256,
 		TaskID:             r.TaskID,
 		StepID:             r.StepID,
 		JobClass:           r.JobClass,
@@ -302,7 +306,7 @@ func parseLine(line []byte, lineNo int) (StepRecord, error) {
 		return StepRecord{}, fmt.Errorf("journal line %d has a bad field", lineNo)
 	}
 	record := StepRecord{
-		TaskID: wire.TaskID, StepID: wire.StepID, JobClass: wire.JobClass, Tier: wire.Tier,
+		EstimatedInputTokens: wire.EstimatedInputTokens, RecipeSHA256: wire.RecipeSHA256, TaskID: wire.TaskID, StepID: wire.StepID, JobClass: wire.JobClass, Tier: wire.Tier,
 		ModelID: wire.ModelID, Reason: wire.Reason, SuggestionTier: wire.SuggestionTier,
 		SuggestionAccepted: wire.SuggestionAccepted, InputTokens: wire.InputTokens,
 		OutputTokens: wire.OutputTokens, CacheHitTokens: wire.CacheHitTokens,
