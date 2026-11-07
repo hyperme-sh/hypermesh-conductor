@@ -39,12 +39,12 @@ func (p *Proxy) maybeCompact(ctx context.Context, client *http.Request, proto st
 	if err := authorizeCompaction(compactionClient, p.Config.Cheap); err != nil {
 		return prepared, false, err
 	}
-	summary, parsed, latency, err := p.cheapSummary(ctx, compactionClient, plan.SummaryInput)
+	summary, parsed, latency, measuredPrefix, err := p.cheapSummary(ctx, compactionClient, plan.SummaryInput)
 	compactID := stepID + ".compact"
 	record := metrics.StepRecord{
 		TaskID: taskID, StepID: compactID, JobClass: "summarize", Tier: "cheap",
 		ModelID: p.Config.Cheap.Model, Reason: "compaction of the tail on the cheap tier",
-		PrefixSHA256: prefixHash, LatencyMS: &latency, UsageStatus: metrics.StatusUncertain,
+		PrefixSHA256: measuredPrefix, LatencyMS: &latency, UsageStatus: metrics.StatusUncertain,
 	}
 	if err != nil {
 		var denied proxyAuthError
@@ -107,7 +107,8 @@ func authorizeCompaction(client *http.Request, tier config.Tier) error {
 	return authorizeProxy(client)
 }
 
-func (p *Proxy) cheapSummary(ctx context.Context, client *http.Request, tail string) (string, usage.Usage, int, error) {
+func (p *Proxy) cheapSummary(ctx context.Context, client *http.Request, tail string) (string, usage.Usage, int, string, error) {
+	measuredPrefix := ""
 	tier := p.Config.Cheap
 	payload := map[string]any{
 		"model": tier.Model,
@@ -118,15 +119,19 @@ func (p *Proxy) cheapSummary(ctx context.Context, client *http.Request, tail str
 	}
 	raw, err := json.Marshal(payload)
 	if err != nil {
-		return "", usage.UncertainUsage(), 0, err
+		return "", usage.UncertainUsage(), 0, measuredPrefix, err
 	}
 	wire, err := translate.Request(translate.ProtoChat, tier.Provider, tier.Model, raw)
 	if err != nil {
-		return "", usage.UncertainUsage(), 0, err
+		return "", usage.UncertainUsage(), 0, measuredPrefix, err
+	}
+	measuredPrefix, err = hashBody(wire.Protocol, wire.Body)
+	if err != nil {
+		return "", usage.UncertainUsage(), 0, measuredPrefix, err
 	}
 	held := len(wire.Body)
 	if !reserveBody(held) {
-		return "", usage.UncertainUsage(), 0, errBodyBudget
+		return "", usage.UncertainUsage(), 0, measuredPrefix, errBodyBudget
 	}
 	defer func() { releaseBody(held) }()
 	verdict, hopErr := p.Hop.Review(aiuditor.WithResponseBudget(ctx, reserveBody, releaseBody), aiuditor.Envelope{
@@ -146,37 +151,41 @@ func (p *Proxy) cheapSummary(ctx context.Context, client *http.Request, tail str
 	bodyToSend := wire.Body
 	if hopErr != nil {
 		if errors.Is(hopErr, aiuditor.ErrResponseBudget) {
-			return "", usage.UncertainUsage(), 0, errBodyBudget
+			return "", usage.UncertainUsage(), 0, measuredPrefix, errBodyBudget
 		}
 		if p.Config.AIU.FailClosed {
-			return "", usage.UncertainUsage(), 0, hopErr
+			return "", usage.UncertainUsage(), 0, measuredPrefix, hopErr
 		}
 	} else if verdict.Action == aiuditor.Deny {
-		return "", usage.UncertainUsage(), 0, fmt.Errorf("aiuditor deny: %s", aiuditor.ReasonText(verdict.Reason))
+		return "", usage.UncertainUsage(), 0, measuredPrefix, fmt.Errorf("aiuditor deny: %s", aiuditor.ReasonText(verdict.Reason))
 	} else if verdict.Action == aiuditor.Modify {
 		if !json.Valid(verdict.Body) {
-			return "", usage.UncertainUsage(), 0, fmt.Errorf("aiuditor modify was not JSON")
+			return "", usage.UncertainUsage(), 0, measuredPrefix, fmt.Errorf("aiuditor modify was not JSON")
 		}
 		forced, err := forceModel(verdict.Body, tier.Model)
 		if err != nil {
-			return "", usage.UncertainUsage(), 0, err
+			return "", usage.UncertainUsage(), 0, measuredPrefix, err
 		}
 		bodyToSend = forced
+		measuredPrefix, err = hashBody(wire.Protocol, forced)
+		if err != nil {
+			return "", usage.UncertainUsage(), 0, measuredPrefix, err
+		}
 	}
 	if !replaceReservation(held, len(bodyToSend)) {
 		held = 0
-		return "", usage.UncertainUsage(), 0, errBodyBudget
+		return "", usage.UncertainUsage(), 0, measuredPrefix, errBodyBudget
 	}
 	held = len(bodyToSend)
 	raw = nil
 	wire.Body = nil
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, tier.BaseURL+"/"+wire.Path, bytes.NewReader(bodyToSend))
 	if err != nil {
-		return "", usage.UncertainUsage(), 0, err
+		return "", usage.UncertainUsage(), 0, measuredPrefix, err
 	}
 	req.Header.Set("Content-Type", "application/json")
 	if _, err := applyAuth(req, client, tier); err != nil {
-		return "", usage.UncertainUsage(), 0, err
+		return "", usage.UncertainUsage(), 0, measuredPrefix, err
 	}
 	if tier.Provider == config.ProviderAnthropic || wire.Protocol == translate.ProtoMessages {
 		version := client.Header.Get("anthropic-version")
@@ -188,7 +197,7 @@ func (p *Proxy) cheapSummary(ctx context.Context, client *http.Request, tail str
 	start := time.Now()
 	resp, err := p.upstreamClient(tier.Timeout, false).Do(req)
 	if err != nil {
-		return "", usage.UncertainUsage(), elapsedMS(start), err
+		return "", usage.UncertainUsage(), elapsedMS(start), measuredPrefix, err
 	}
 	defer resp.Body.Close()
 	body, heldResp, err := readReserved(resp.Body, 1<<20)
@@ -196,13 +205,13 @@ func (p *Proxy) cheapSummary(ctx context.Context, client *http.Request, tail str
 	latency := elapsedMS(start)
 	if errors.Is(err, errBodyBudget) {
 		_ = resp.Body.Close()
-		return "", usage.UncertainUsage(), latency, err
+		return "", usage.UncertainUsage(), latency, measuredPrefix, err
 	}
 	if err != nil || resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		if err == nil {
 			err = fmt.Errorf("provider HTTP %d", resp.StatusCode)
 		}
-		return "", usage.UncertainUsage(), latency, err
+		return "", usage.UncertainUsage(), latency, measuredPrefix, err
 	}
 	anthropic := tier.Provider == config.ProviderAnthropic || wire.Protocol == translate.ProtoMessages
 	parsed := usage.ParseOpenAI(body, false)
@@ -211,16 +220,16 @@ func (p *Proxy) cheapSummary(ctx context.Context, client *http.Request, tail str
 	}
 	var root map[string]any
 	if err := json.Unmarshal(body, &root); err != nil {
-		return "", parsed, latency, err
+		return "", parsed, latency, measuredPrefix, err
 	}
 	text := assistantText(root)
 	if anthropic {
 		text = anthropicSummaryText(root)
 	}
 	if strings.TrimSpace(text) == "" {
-		return "", parsed, latency, fmt.Errorf("compaction summary was empty")
+		return "", parsed, latency, measuredPrefix, fmt.Errorf("compaction summary was empty")
 	}
-	return text, parsed, latency, nil
+	return text, parsed, latency, measuredPrefix, nil
 }
 
 func anthropicSummaryText(root map[string]any) string {
