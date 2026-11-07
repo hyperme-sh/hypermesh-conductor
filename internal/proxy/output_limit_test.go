@@ -10,6 +10,15 @@ import (
 func TestRecipeOutputLimit(t *testing.T) {
 	for _, tc := range []struct{ proto, body, want string }{
 		{translate.ProtoChat, "{}", `{"max_tokens":5}`},
+		{translate.ProtoChat, `{"n":2}`, `{"max_tokens":2,"n":2}`},
+		{translate.ProtoChat, `{"best_of":3,"n":2}`, `{"best_of":3,"max_tokens":1,"n":2}`},
+		{translate.ProtoChat, `{"n":2,"max_completion_tokens":2}`, `{"n":2,"max_completion_tokens":2}`},
+		{translate.ProtoChat, `{"n":2,"max_completion_tokens":3}`, ""},
+		{translate.ProtoChat, `{"best_of":4,"max_tokens":2}`, ""},
+		{translate.ProtoChat, `{"best_of":1,"n":2}`, ""},
+		{translate.ProtoChat, `{"n":6}`, ""},
+		{translate.ProtoChat, `{"n":null}`, ""},
+		{translate.ProtoChat, `{"best_of":1.5}`, ""},
 		{translate.ProtoMessages, `{"max_tokens":3}`, `{"max_tokens":3}`},
 		{translate.ProtoResponses, "{}", `{"max_output_tokens":5}`},
 		{translate.ProtoEmbeddings, "{}", "{}"},
