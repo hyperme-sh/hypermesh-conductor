@@ -76,3 +76,5 @@ Journal retention is bounded to the current 32 MiB segment and one previous
 segment (`.1`). Summaries read both retained segments; older segments are
 replaced on rotation. Archive them externally before rotation if longer history
 is required. AIuditor denial explanations are capped at 1,024 bytes.
+
+For chat generation, the recipe's output allowance covers all candidates in the request. With an allowance of 100 tokens and `n: 4`, the default per-candidate cap is 25. If the provider supports `best_of`, Conductor budgets every generated candidate, including candidates the provider discards. An explicit per-candidate limit that exceeds the allowance is rejected before dispatch.

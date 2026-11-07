@@ -33,6 +33,19 @@ func limitOutput(protocol string, body []byte, limit int) ([]byte, error) {
 	field := "max_tokens"
 	switch protocol {
 	case translate.ProtoChat:
+		// Divide before comparing so the aggregate check cannot overflow.
+		n, err := candidateCount(obj, "n", 1)
+		if err != nil {
+			return nil, err
+		}
+		generated, err := candidateCount(obj, "best_of", n)
+		if err != nil {
+			return nil, err
+		}
+		if generated < n || generated > limit {
+			return nil, fmt.Errorf("generated candidate count must be between n and the recipe output limit")
+		}
+		limit /= generated
 		if _, ok := obj["max_completion_tokens"]; ok {
 			field = "max_completion_tokens"
 		}
@@ -55,4 +68,16 @@ func limitOutput(protocol string, body []byte, limit int) ([]byte, error) {
 	}
 	obj[field], _ = json.Marshal(limit)
 	return json.Marshal(obj)
+}
+
+func candidateCount(obj map[string]json.RawMessage, key string, fallback int) (int, error) {
+	raw, ok := obj[key]
+	if !ok {
+		return fallback, nil
+	}
+	var count int
+	if err := json.Unmarshal(raw, &count); err != nil || count < 1 {
+		return 0, fmt.Errorf("%s must be a positive integer", key)
+	}
+	return count, nil
 }
