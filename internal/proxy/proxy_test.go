@@ -2487,3 +2487,41 @@ func TestToolResultsPreserveTheRetrievalQuery(t *testing.T) {
 		t.Fatal(got)
 	}
 }
+
+func TestSplitCredentialNeverCompletesOnTheWire(t *testing.T) {
+	const key = "synthetic-credential-value"
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		for _, part := range []string{"synthetic-", "credential-", "value"} {
+			_, _ = fmt.Fprintf(w, "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":%q}}]}\n\n", part)
+			w.(http.Flusher).Flush()
+		}
+		_, _ = io.WriteString(w, "data: [DONE]\n\n")
+	}))
+	defer upstream.Close()
+	dir := t.TempDir()
+	t.Setenv("CONDUCTOR_CHEAP_API_KEY", key)
+	cfg := loadTestConfig(t, dir, upstream.URL+"/v1", upstream.URL+"/v1", config.AuthEnv, config.ProviderOpenAICompatible)
+	journal := openJournal(t, dir)
+	rec := do(New(cfg, aiuditor.Stub{}, journal), "/v1/chat/completions", "parse", "task", "step", "", `{"stream":true,"messages":[{"role":"user","content":"hello"}]}`)
+	if strings.Contains(rec.Body.String(), `"content":"value"`) {
+		t.Fatal("completing fragment emitted")
+	}
+	rows, err := metrics.ReadJournal(journal.Path())
+	if err != nil || len(rows) != 1 || rows[0].Error == nil || rows[0].UsageStatus != metrics.StatusUncertain {
+		t.Fatal(err, rows)
+	}
+}
+
+func TestDecodedCredentialGuardsAllStreamProtocols(t *testing.T) {
+	for _, pair := range [][2]string{
+		{`{"index":2,"delta":{"type":"text_delta","text":"example-"}}`, `{"index":2,"delta":{"type":"text_delta","text":"\u0076alue"}}`},
+		{`{"type":"response.output_text.delta","output_index":1,"delta":"example-"}`, `{"type":"response.output_text.delta","output_index":1,"delta":"value"}`},
+		{`{"choices":[{"index":1,"delta":{"tool_calls":[{"index":0,"function":{"arguments":"example-"}}]}}]}`, `{"choices":[{"index":1,"delta":{"tool_calls":[{"index":0,"function":{"arguments":"value"}}]}}]}`},
+	} {
+		guard := newStreamCredentials([]string{"example-value"})
+		if !guard.safeEvents([]byte("data: "+pair[0]+"\n\n")) || guard.safeEvents([]byte("data: "+pair[1]+"\n\n")) {
+			t.Fatal(pair)
+		}
+	}
+}
