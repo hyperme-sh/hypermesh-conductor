@@ -317,7 +317,7 @@ Gamma detail.
 		t.Fatal(err, stdout.String())
 	}
 	text := string(diff)
-	if strings.Contains(text, "[[beta]]") || !strings.Contains(text, "[[gamma]]") {
+	if strings.Contains(text, "+See [[beta]]") || !strings.Contains(text, "[[gamma]]") {
 		t.Fatal(text)
 	}
 	got, err := os.ReadFile(filepath.Join(notesDir, "alpha.md"))

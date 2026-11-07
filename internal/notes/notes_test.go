@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -167,9 +168,18 @@ The widget catalog is local.
 	if err != nil {
 		t.Fatal(err)
 	}
-	diff := MarkdownDiffs(list)
+	diff, err := MarkdownDiffs(dir, list)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if !strings.Contains(diff, "status: dropped") || !strings.Contains(diff, "[[two]]") && !strings.Contains(diff, "[[one]]") {
 		t.Fatal(diff)
+	}
+	cmd := exec.Command("git", "apply", "--check", "-")
+	cmd.Dir = dir
+	cmd.Stdin = strings.NewReader(diff)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("%v: %s\n%s", err, out, diff)
 	}
 	if strings.Contains(read(t, filepath.Join(dir, "one.md")), "status: drop") {
 		t.Fatal("diff was applied to the note")
@@ -597,8 +607,11 @@ Gamma detail.
 	if len(alpha.Links) != 1 || alpha.Links[0] != "beta" {
 		t.Fatalf("%+v", alpha.Links)
 	}
-	diff := MarkdownDiffs(list)
-	if strings.Contains(diff, "[[beta]]") || !strings.Contains(diff, "[[gamma]]") {
+	diff, err := MarkdownDiffs(dir, list)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(diff, "+See [[beta]]") || !strings.Contains(diff, "[[gamma]]") {
 		t.Fatal(diff)
 	}
 	// The dream path used to hand MarkdownDiffs notes whose Links field was
@@ -608,8 +621,11 @@ Gamma detail.
 	for i := range stripped {
 		stripped[i].Links = nil
 	}
-	again := MarkdownDiffs(stripped)
-	if strings.Contains(again, "[[beta]]") || !strings.Contains(again, "[[gamma]]") {
+	again, err := MarkdownDiffs(dir, stripped)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(again, "+See [[beta]]") || !strings.Contains(again, "[[gamma]]") {
 		t.Fatal(again)
 	}
 }

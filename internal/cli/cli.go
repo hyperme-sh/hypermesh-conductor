@@ -385,7 +385,11 @@ func writeNoteDiff(dir, path string) error {
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(path, []byte(notes.MarkdownDiffs(list)), 0o644)
+	patch, err := notes.MarkdownDiffs(dir, list)
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(path, []byte(patch), 0o600)
 }
 
 func indexCmd(args []string, stdout, stderr io.Writer) int {
