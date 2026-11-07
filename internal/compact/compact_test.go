@@ -185,3 +185,14 @@ func TestSummaryPreservesLargeToolInputIntegers(t *testing.T) {
 		t.Fatal(got)
 	}
 }
+
+func TestParallelToolResultsRetainCallIDs(t *testing.T) {
+	calls := `{"role":"assistant","tool_calls":[{"id":"alice","function":{"name":"lookup","arguments":"Alice"}},{"id":"bob","function":{"name":"lookup","arguments":"Bob"}}]}`
+	for _, ids := range [][2]string{{"alice", "bob"}, {"bob", "alice"}} {
+		raw := []byte(`[` + calls + `,{"role":"tool","tool_call_id":"` + ids[0] + `","content":"account-1"},{"role":"tool","tool_call_id":"` + ids[1] + `","content":"account-2"}]`)
+		plan, err := PlanMessages(raw, 1, 0)
+		if err != nil || !plan.Needed || !strings.Contains(plan.SummaryInput, "[tool_result "+ids[0]+"] account-1") || !strings.Contains(plan.SummaryInput, "[tool_result "+ids[1]+"] account-2") {
+			t.Fatal(err, plan.SummaryInput)
+		}
+	}
+}
