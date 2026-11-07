@@ -3,6 +3,7 @@ package translate
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"strings"
 	"sync/atomic"
 )
@@ -29,6 +30,7 @@ type Stream struct {
 	respText     strings.Builder
 	textOpen     bool
 	textIndex    int
+	closedTexts  []responseText
 	nextOut      int
 	respCalls    []responseCall
 	respStop     string
@@ -36,6 +38,11 @@ type Stream struct {
 	finishReason string
 	translated   int
 	tooLarge     bool
+}
+
+type responseText struct {
+	index int
+	text  string
 }
 
 type responseCall struct {
@@ -101,6 +108,7 @@ func (s *Stream) Close() {
 	s.buf = nil
 	s.respText.Reset()
 	s.respCalls = nil
+	s.closedTexts = nil
 	s.toolSlots = nil
 	s.chatTools = nil
 	s.chatUsage = nil
@@ -198,6 +206,7 @@ func (s *Stream) failLarge(out *bytes.Buffer) []byte {
 	s.buf = nil
 	s.respText.Reset()
 	s.respCalls = nil
+	s.closedTexts = nil
 	s.toolSlots = nil
 	s.chatTools = nil
 	out.Write(s.clientError(map[string]any{
@@ -510,7 +519,15 @@ func (s *Stream) anthropicToResponses(kind string, obj map[string]any) []byte {
 		if block["type"] != "tool_use" {
 			return nil
 		}
-		return s.openFunctionCall(obj, block)
+		var out bytes.Buffer
+		if s.textOpen {
+			if !s.noteTranslated(3 * s.respText.Len()) {
+				return s.failLarge(&out)
+			}
+			out.Write(s.closeResponseText())
+		}
+		out.Write(s.openFunctionCall(obj, block))
+		return out.Bytes()
 	case "content_block_delta":
 		delta, _ := obj["delta"].(map[string]any)
 		switch delta["type"] {
@@ -623,19 +640,7 @@ func (s *Stream) finishResponses() []byte {
 	if !s.respOpened {
 		out.Write(s.openResponses())
 	}
-	if s.textOpen {
-		out.Write(sseData(map[string]any{
-			"type": "response.output_text.done", "output_index": s.textIndex, "content_index": 0, "text": text,
-		}))
-		out.Write(sseData(map[string]any{
-			"type": "response.content_part.done", "output_index": s.textIndex, "content_index": 0,
-			"part": map[string]any{"type": "output_text", "text": text},
-		}))
-		out.Write(sseData(map[string]any{
-			"type": "response.output_item.done", "output_index": s.textIndex,
-			"item": s.responsesMessage(text),
-		}))
-	}
+	out.Write(s.closeResponseText())
 	for i := range s.respCalls {
 		call := &s.respCalls[i]
 		args := call.args.String()
@@ -667,6 +672,30 @@ func (s *Stream) finishResponses() []byte {
 	return out.Bytes()
 }
 
+func (s *Stream) closeResponseText() []byte {
+	var out bytes.Buffer
+	text := s.respText.String()
+	if s.textOpen {
+		out.Write(sseData(map[string]any{
+			"type": "response.output_text.done", "output_index": s.textIndex, "content_index": 0, "text": text,
+		}))
+		out.Write(sseData(map[string]any{
+			"type": "response.content_part.done", "output_index": s.textIndex, "content_index": 0,
+			"part": map[string]any{"type": "output_text", "text": text},
+		}))
+		out.Write(sseData(map[string]any{
+			"type": "response.output_item.done", "output_index": s.textIndex,
+			"item": s.responsesMessage(text),
+		}))
+	}
+	if s.textOpen {
+		s.closedTexts = append(s.closedTexts, responseText{s.textIndex, text})
+		s.textOpen = false
+		s.respText.Reset()
+	}
+	return out.Bytes()
+}
+
 func (s *Stream) ensureResponse() []byte {
 	if s.respOpened {
 		return nil
@@ -693,7 +722,7 @@ func (s *Stream) openResponses() []byte {
 	s.textIndex = s.allocOut()
 	out.Write(sseData(map[string]any{
 		"type": "response.output_item.added", "output_index": s.textIndex,
-		"item": map[string]any{"id": s.id, "type": "message", "role": "assistant", "content": []any{}},
+		"item": map[string]any{"id": s.textID(s.textIndex), "type": "message", "role": "assistant", "content": []any{}},
 	}))
 	out.Write(sseData(map[string]any{
 		"type": "response.content_part.added", "output_index": s.textIndex, "content_index": 0,
@@ -702,9 +731,15 @@ func (s *Stream) openResponses() []byte {
 	return out.Bytes()
 }
 
+func (s *Stream) textID(index int) string { return fmt.Sprintf("%s_message_%d", s.id, index) }
+
 func (s *Stream) responsesMessage(text string) map[string]any {
+	return s.responsesMessageAt(text, s.textIndex)
+}
+
+func (s *Stream) responsesMessageAt(text string, index int) map[string]any {
 	return map[string]any{
-		"id": s.id, "type": "message", "role": "assistant",
+		"id": s.textID(index), "type": "message", "role": "assistant",
 		"content": []any{map[string]any{"type": "output_text", "text": text}},
 	}
 }
@@ -722,6 +757,9 @@ func (s *Stream) responseOutput(text string) []any {
 		item  any
 	}
 	var slots []slot
+	for _, text := range s.closedTexts {
+		slots = append(slots, slot{text.index, s.responsesMessageAt(text.text, text.index)})
+	}
 	if s.textOpen {
 		slots = append(slots, slot{s.textIndex, s.responsesMessage(text)})
 	}

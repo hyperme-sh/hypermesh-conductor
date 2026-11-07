@@ -1,6 +1,7 @@
 package translate
 
 import (
+	"encoding/json"
 	"fmt"
 	"strings"
 	"testing"
@@ -548,4 +549,40 @@ func TestAnthropicHonorsParallelToolProhibition(t *testing.T) {
 			}
 		}
 	}
+}
+
+func TestResponsesStreamPreservesTextToolTextOrder(t *testing.T) {
+	stream := NewStream(ProtoResponses, ProtoMessages)
+	defer stream.Close()
+	var output string
+	for _, event := range []string{
+		`{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"before"}}`,
+		`{"type":"content_block_start","index":1,"content_block":{"type":"tool_use","id":"call_1","name":"lookup"}}`,
+		`{"type":"content_block_delta","index":2,"delta":{"type":"text_delta","text":"after"}}`,
+		`{"type":"message_stop"}`,
+	} {
+		output += string(stream.Consume([]byte("data: " + event + "\n\n")))
+	}
+	for _, line := range strings.Split(output, "\n") {
+		if !strings.HasPrefix(line, "data: ") {
+			continue
+		}
+		var obj map[string]any
+		if err := json.Unmarshal([]byte(strings.TrimPrefix(line, "data: ")), &obj); err != nil {
+			t.Fatal(err)
+		}
+		if obj["type"] != "response.completed" {
+			continue
+		}
+		items := obj["response"].(map[string]any)["output"].([]any)
+		if len(items) != 3 {
+			t.Fatal(items)
+		}
+		first, middle, last := items[0].(map[string]any), items[1].(map[string]any), items[2].(map[string]any)
+		if first["content"].([]any)[0].(map[string]any)["text"] != "before" || middle["type"] != "function_call" || last["content"].([]any)[0].(map[string]any)["text"] != "after" || first["id"] == last["id"] {
+			t.Fatal(items)
+		}
+		return
+	}
+	t.Fatal("missing terminal response", output)
 }
