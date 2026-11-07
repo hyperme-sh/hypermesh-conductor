@@ -75,7 +75,7 @@ func Dream(in DreamInput, active File, proposalsDir string) (Proposal, string, e
 			}
 			proposal.Routing.EscalateWhenPeakTokensAbove[class] = limit
 			proposal.Evidence = append(proposal.Evidence, Evidence{
-				Kind: "routing_threshold", JobClass: class, StepIDs: misses,
+				Kind: "routing_threshold", JobClass: class, StepIDs: misses, stepKeys: missKeys,
 				Count: len(misses), Total: len(rows), Prevalence: float64(len(misses)) / float64(len(rows)),
 			})
 		}
@@ -83,13 +83,14 @@ func Dream(in DreamInput, active File, proposalsDir string) (Proposal, string, e
 
 	cacheReported := 0
 	cacheHits := 0
-	var cacheSteps []string
+	var cacheSteps, cacheKeys []string
 	for _, row := range in.Records {
 		if row.CacheHitTokens == nil || row.InputTokens == nil || *row.InputTokens == 0 {
 			continue
 		}
 		cacheReported++
 		cacheSteps = append(cacheSteps, row.StepID)
+		cacheKeys = append(cacheKeys, outcomeKey(row.TaskID, row.StepID))
 		if *row.CacheHitTokens > 0 {
 			cacheHits++
 		}
@@ -99,7 +100,7 @@ func Dream(in DreamInput, active File, proposalsDir string) (Proposal, string, e
 		proposal.CachePrefix.ToolsInPrefix = true
 		proposal.CachePrefix.Note = "keep the system prompt and tool definitions in the prefix; compact only the tail"
 		proposal.Evidence = append(proposal.Evidence, Evidence{
-			Kind: "cache_prefix", StepIDs: cacheSteps, Count: cacheReported, Total: cacheReported, Prevalence: 1,
+			Kind: "cache_prefix", StepIDs: cacheSteps, stepKeys: cacheKeys, Count: cacheReported, Total: cacheReported, Prevalence: 1,
 		})
 	}
 
@@ -108,6 +109,8 @@ func Dream(in DreamInput, active File, proposalsDir string) (Proposal, string, e
 		journalSteps[outcomeKey(row.TaskID, row.StepID)] = true
 	}
 	linkAdds := map[string][]string{}
+	linkAddKeys := map[string][]string{}
+	linkDropKeys := map[string][]string{}
 	linkDrops := map[string][]string{}
 	for _, outcome := range in.Outcomes {
 		if !journalSteps[outcomeKey(outcome.TaskID, outcome.StepID)] {
@@ -117,8 +120,10 @@ func Dream(in DreamInput, active File, proposalsDir string) (Proposal, string, e
 		switch outcome.Kind {
 		case "link_used":
 			linkAdds[key] = append(linkAdds[key], outcome.StepID)
+			linkAddKeys[key] = append(linkAddKeys[key], outcomeKey(outcome.TaskID, outcome.StepID))
 		case "link_unused":
 			linkDrops[key] = append(linkDrops[key], outcome.StepID)
+			linkDropKeys[key] = append(linkDropKeys[key], outcomeKey(outcome.TaskID, outcome.StepID))
 		case "aiuditor_deny":
 			proposal.Observations = append(proposal.Observations, "aiuditor denied "+outcome.StepID+"; routing may change upstream of the hop")
 		}
@@ -130,7 +135,7 @@ func Dream(in DreamInput, active File, proposalsDir string) (Proposal, string, e
 		from, to, _ := stringsCut(key)
 		proposal.IndexLinks = append(proposal.IndexLinks, IndexLink{Op: "add", From: from, To: to})
 		proposal.Evidence = append(proposal.Evidence, Evidence{
-			Kind: "index_link", StepIDs: steps, Count: len(steps), Total: len(in.Outcomes), Prevalence: fraction(len(steps), len(in.Outcomes)),
+			Kind: "index_link", StepIDs: steps, stepKeys: linkAddKeys[key], Count: len(steps), Total: len(in.Outcomes), Prevalence: fraction(len(steps), len(in.Outcomes)),
 		})
 	}
 	for key, steps := range linkDrops {
@@ -140,7 +145,7 @@ func Dream(in DreamInput, active File, proposalsDir string) (Proposal, string, e
 		from, to, _ := stringsCut(key)
 		proposal.IndexLinks = append(proposal.IndexLinks, IndexLink{Op: "drop", From: from, To: to})
 		proposal.Evidence = append(proposal.Evidence, Evidence{
-			Kind: "index_link", StepIDs: steps, Count: len(steps), Total: len(in.Outcomes), Prevalence: fraction(len(steps), len(in.Outcomes)),
+			Kind: "index_link", StepIDs: steps, stepKeys: linkDropKeys[key], Count: len(steps), Total: len(in.Outcomes), Prevalence: fraction(len(steps), len(in.Outcomes)),
 		})
 	}
 	sort.Slice(proposal.IndexLinks, func(i, j int) bool {
@@ -155,7 +160,7 @@ func Dream(in DreamInput, active File, proposalsDir string) (Proposal, string, e
 
 	if in.Bodies {
 		for i := range proposal.Evidence {
-			excerpt := excerptFor(proposal.Evidence[i].StepIDs, in.History)
+			excerpt := excerptFor(proposal.Evidence[i].stepKeys, in.History)
 			proposal.Evidence[i].Excerpt = excerpt
 		}
 	}
@@ -220,7 +225,7 @@ func excerptFor(stepIDs []string, rows []history.Record) string {
 		wanted[id] = struct{}{}
 	}
 	for _, row := range rows {
-		if _, ok := wanted[row.StepID]; !ok {
+		if _, ok := wanted[outcomeKey(row.TaskID, row.StepID)]; !ok {
 			continue
 		}
 		text := row.Summary

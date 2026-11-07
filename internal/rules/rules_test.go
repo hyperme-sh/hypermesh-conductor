@@ -24,7 +24,7 @@ func TestDreamProposesWithoutActivatingOrReadingBodies(t *testing.T) {
 		{TaskID: "task-1", StepID: "s2", Kind: "escalation"},
 		{TaskID: "task-1", StepID: "s3", Kind: "aiuditor_deny"},
 	}
-	hist := []history.Record{{StepID: "s1", Summary: "PRIVATE-PROMPT-BODY"}}
+	hist := []history.Record{{TaskID: "task-1", StepID: "s1", Summary: "PRIVATE-PROMPT-BODY"}}
 	proposal, path, err := Dream(DreamInput{Records: records, Outcomes: outcomes, History: hist, Bodies: false}, Defaults(), filepath.Join(dir, "proposals"))
 	if err != nil {
 		t.Fatal(err)
@@ -226,7 +226,7 @@ func TestBodyProposalIsOwnerOnly(t *testing.T) {
 		{TaskID: "task-1", StepID: "s1", Kind: "test_failed"},
 		{TaskID: "task-1", StepID: "s2", Kind: "test_failed"},
 	}
-	hist := []history.Record{{StepID: "s1", Summary: "PRIVATE-PROMPT-BODY"}}
+	hist := []history.Record{{TaskID: "task-1", StepID: "s1", Summary: "PRIVATE-PROMPT-BODY"}}
 	_, path, err := Dream(DreamInput{Records: records, Outcomes: outcomes, History: hist, Bodies: true}, Defaults(), dir)
 	if err != nil {
 		t.Fatal(err)
@@ -351,5 +351,12 @@ func step(id, class, tier string, input *int) metrics.StepRecord {
 		TaskID: "task-1", StepID: id, JobClass: class, Tier: tier, ModelID: "m",
 		Reason: "policy", InputTokens: input, OutputTokens: &out, PrefixSHA256: "abc",
 		UsageStatus: metrics.StatusMeasured,
+	}
+}
+
+func TestExcerptRequiresMatchingTaskAndStep(t *testing.T) {
+	rows := []history.Record{{TaskID: "other", StepID: "step-1", Summary: "WRONG"}, {TaskID: "target", StepID: "step-1", Summary: "RIGHT"}}
+	if got := excerptFor([]string{outcomeKey("target", "step-1")}, rows); got != "RIGHT" {
+		t.Fatal(got)
 	}
 }

@@ -41,7 +41,7 @@ The preview does not include the endpoint URL or an API key.
 
 ## Endpoints
 
-`examples/endpoints.json` names an API root and a model id for each tier. `provider` is `openai`, `anthropic`, or `openai-compatible`. `base_url` is the API root, such as `http://127.0.0.1:8080/v1` or `https://api.anthropic.com`. Keys are not written in the file. `api_key_env` names the environment variable that holds a key. A URL with userinfo is rejected.
+`examples/endpoints.json` names an API root and a model id for each tier. `provider` is `openai`, `anthropic`, or `openai-compatible`. `base_url` is the API root, such as `http://127.0.0.1:8080/v1` or `https://api.anthropic.com/v1`. Keys are not written in the file. `api_key_env` names the environment variable that holds a key. A URL with userinfo is rejected.
 
 ## Prefix
 

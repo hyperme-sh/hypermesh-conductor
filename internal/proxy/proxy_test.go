@@ -2319,3 +2319,18 @@ func TestTerminalProviderEventsCloseOpenHTTPBody(t *testing.T) {
 		})
 	}
 }
+
+func TestKeylessEnvOnlyTierNeverForwardsCallerCredentials(t *testing.T) {
+	for _, provider := range []string{config.ProviderOpenAICompatible, config.ProviderAnthropic} {
+		dst, _ := http.NewRequest("POST", "http://localhost/v1/messages", nil)
+		src, _ := http.NewRequest("POST", "http://localhost/v1/messages", nil)
+		src.Header.Set("Authorization", "Bearer private-caller-key")
+		src.Header.Set("x-api-key", "private-caller-key")
+		if _, err := applyAuth(dst, src, config.Tier{Provider: provider, Auth: config.AuthEnv}); err != nil {
+			t.Fatal(err)
+		}
+		if dst.Header.Get("Authorization") != "" || dst.Header.Get("x-api-key") != "" {
+			t.Fatal(dst.Header)
+		}
+	}
+}
