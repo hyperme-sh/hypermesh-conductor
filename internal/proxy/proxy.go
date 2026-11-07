@@ -854,7 +854,7 @@ func hashBody(proto string, body []byte) (string, error) {
 			var parts []string
 			for _, item := range messages {
 				msg, _ := item.(map[string]any)
-				if msg["role"] != "system" {
+				if msg["role"] != "system" && msg["role"] != "developer" {
 					continue
 				}
 				if text, ok := msg["content"].(string); ok {

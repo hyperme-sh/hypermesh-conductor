@@ -2379,3 +2379,14 @@ func TestNonstreamingProviderFailureIsUncertain(t *testing.T) {
 		})
 	}
 }
+
+func TestDeveloperInstructionsAffectPrefixHash(t *testing.T) {
+	first, err := hashBody(translate.ProtoChat, []byte(`{"messages":[{"role":"system","content":"same"},{"role":"developer","content":"first"}]}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := hashBody(translate.ProtoChat, []byte(`{"messages":[{"role":"system","content":"same"},{"role":"developer","content":"second"}]}`))
+	if err != nil || first == second {
+		t.Fatal(err, first, second)
+	}
+}
