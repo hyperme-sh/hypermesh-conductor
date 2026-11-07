@@ -8,6 +8,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -132,6 +133,7 @@ func serveCmd(args []string, stdout, stderr io.Writer) int {
 	fs.SetOutput(stderr)
 	configPath := fs.String("config", "", "endpoints file")
 	journalPath := fs.String("journal", "", "measurement journal")
+	stdinListener := fs.Bool("stdin-listener", false, "serve a loopback TCP listener inherited on stdin")
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
@@ -174,8 +176,19 @@ func serveCmd(args []string, stdout, stderr io.Writer) int {
 	server.Logf = func(format string, args ...any) {
 		fmt.Fprintf(stderr, format+"\n", args...)
 	}
-	fmt.Fprintf(stdout, "listening on http://%s\n", cfg.Listen)
-	if err := server.ListenAndServe(); err != nil {
+	if *stdinListener {
+		listener, openErr := net.FileListener(os.Stdin)
+		if openErr != nil {
+			fmt.Fprintln(stderr, "stdin must be a listening TCP socket")
+			return 2
+		}
+		defer listener.Close()
+		err = server.ServeListener(listener)
+	} else {
+		fmt.Fprintf(stdout, "listening on http://%s\n", cfg.Listen)
+		err = server.ListenAndServe()
+	}
+	if err != nil {
 		fmt.Fprintln(stderr, err.Error())
 		return 1
 	}
