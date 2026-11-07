@@ -55,7 +55,19 @@ func TestRoutesTiersAndKeepsPrefixAndSecretsOutOfTheJournal(t *testing.T) {
 	server := New(cfg, aiuditor.Stub{}, journal)
 	server.Logf = func(format string, args ...any) { logs.WriteString(format) }
 
-	do(server, "/v1/chat/completions", "parse", "task-1", "parse-1", "", `{"model":"client-picked","messages":[{"role":"user","content":"name the fields"}]}`)
+	sendForModel := func(model string) int {
+		req := request("/v1/chat/completions", "parse", "task-1", "parse-1", "", `{"model":"client-picked","messages":[{"role":"user","content":"name the fields"}]}`)
+		req.Header.Set("X-Conductor-Expected-Model", model)
+		rec := httptest.NewRecorder()
+		server.ServeHTTP(rec, req)
+		return rec.Code
+	}
+	if code := sendForModel("frontier"); code != http.StatusConflict {
+		t.Fatalf("mismatched model returned %d", code)
+	}
+	if code := sendForModel("local-small"); code != http.StatusOK {
+		t.Fatalf("matching model returned %d", code)
+	}
 	do(server, "/v1/chat/completions", "code", "task-1", "code-1", "cheap", `{"messages":[{"role":"user","content":"implement the parser"}]}`)
 
 	mu.Lock()
