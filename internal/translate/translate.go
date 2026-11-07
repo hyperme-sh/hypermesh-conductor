@@ -7,6 +7,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"io"
 	"strings"
 
 	"github.com/hyperme-sh/hypermesh-conductor/internal/jsonbody"
@@ -376,12 +377,9 @@ func splitChatMessages(messages []any) (string, []any, error) {
 					obj, _ := call.(map[string]any)
 					fn, _ := obj["function"].(map[string]any)
 					name, _ := fn["name"].(string)
-					args, _ := fn["arguments"].(string)
-					var parsed any
-					if args != "" && decodeJSON([]byte(args), &parsed) == nil {
-						// parsed object
-					} else {
-						parsed = map[string]any{}
+					parsed, err := responsesArguments(fn["arguments"])
+					if err != nil {
+						return "", nil, err
 					}
 					id, _ := obj["id"].(string)
 					blocks = append(blocks, map[string]any{"type": "tool_use", "id": id, "name": name, "input": parsed})
@@ -803,10 +801,9 @@ func chatResponseToAnthropic(body []byte) ([]byte, error) {
 			for _, call := range calls {
 				obj, _ := call.(map[string]any)
 				fn, _ := obj["function"].(map[string]any)
-				args, _ := fn["arguments"].(string)
-				var parsed any = map[string]any{}
-				if args != "" {
-					_ = decodeJSON([]byte(args), &parsed)
+				parsed, err := responsesArguments(fn["arguments"])
+				if err != nil {
+					return nil, err
 				}
 				toolBlocks = append(toolBlocks, map[string]any{
 					"type":  "tool_use",
@@ -1335,7 +1332,14 @@ func ClientTools(proto string, tools []any) []any {
 func decodeJSON(raw []byte, dest any) error {
 	dec := json.NewDecoder(bytes.NewReader(raw))
 	dec.UseNumber()
-	return dec.Decode(dest)
+	if err := dec.Decode(dest); err != nil {
+		return err
+	}
+	var extra any
+	if err := dec.Decode(&extra); err != io.EOF {
+		return fmt.Errorf("expected one JSON value")
+	}
+	return nil
 }
 
 func stringField(obj map[string]any, key string) string {

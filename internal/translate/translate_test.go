@@ -586,3 +586,18 @@ func TestResponsesStreamPreservesTextToolTextOrder(t *testing.T) {
 	}
 	t.Fatal("missing terminal response", output)
 }
+
+func TestMalformedToolArgumentsAreNotReplaced(t *testing.T) {
+	for _, args := range []string{`{"record_id":9007199254740993`, `{} trailing`, `{} {}`, `[]`, `null`} {
+		encoded, _ := json.Marshal(args)
+		message := `{"role":"assistant","tool_calls":[{"id":"c1","function":{"name":"lookup","arguments":` + string(encoded) + `}}]}`
+		response := []byte(`{"choices":[{"finish_reason":"length","message":` + message + `}]}`)
+		if out, err := Response(ProtoMessages, ProtoChat, response); err == nil {
+			t.Fatal(args, string(out))
+		}
+		request := []byte(`{"messages":[` + message + `]}`)
+		if _, err := Request(ProtoChat, ProviderAnthropic, "model", request); err == nil {
+			t.Fatal("accepted request", args)
+		}
+	}
+}
