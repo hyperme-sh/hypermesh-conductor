@@ -36,6 +36,7 @@ Usage that is missing, partial, negative, or the wrong JSON type is `uncertain`.
 - `prefix_reuse_rate`, the fraction of steps that share the most common prefix hash, when the task has at least two steps
 - `cost_per_step`, the mean labeled proxy, when every step has one
 - `accuracy` left null
+- `memory.hit_rate` for the note and summary cache, null when nothing was looked up
 
 When any step in the group is uncertain, the group's `input_tokens`, `output_tokens`, `peak_context_tokens`, `cache_hit_rate`, and `cost_proxy` are null. `measured_input_tokens` and `measured_output_tokens` still hold the sum of the measured rows and are partial. An unused tier has `steps: 0` and null token totals.
 

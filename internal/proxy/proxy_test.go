@@ -22,6 +22,7 @@ import (
 	"github.com/hyperme-sh/hypermesh-conductor/internal/config"
 	"github.com/hyperme-sh/hypermesh-conductor/internal/history"
 	"github.com/hyperme-sh/hypermesh-conductor/internal/metrics"
+	"github.com/hyperme-sh/hypermesh-conductor/internal/notes"
 	"github.com/hyperme-sh/hypermesh-conductor/internal/prefix"
 	"github.com/hyperme-sh/hypermesh-conductor/internal/translate"
 )
@@ -1434,6 +1435,57 @@ func TestCompactionDoesNotSendTheFrontierCredential(t *testing.T) {
 	}
 }
 
+func TestCompactionRetrievesFromTheOriginalUserText(t *testing.T) {
+	var bodies []string
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		raw, _ := io.ReadAll(r.Body)
+		bodies = append(bodies, string(raw))
+		text := "ok"
+		if strings.Contains(string(raw), "Summarize the conversation tail") {
+			text = "SUMMARYTEXT"
+		}
+		_, _ = w.Write([]byte(`{"choices":[{"message":{"role":"assistant","content":"` + text + `"}}],"usage":{"prompt_tokens":4,"completion_tokens":1}}`))
+	}))
+	defer upstream.Close()
+	dir := t.TempDir()
+	notesDir := filepath.Join(dir, "notes")
+	if err := os.MkdirAll(notesDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(notesDir, "alpha.md"), []byte("---\nid: alpha\ntype: note\nstatus: open\n---\n# Alpha\nUNIQUEALPHA stays indexed.\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	store, err := notes.Open(filepath.Join(dir, "index.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	if _, err := store.Rebuild(notesDir); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("CONDUCTOR_CHEAP_API_KEY", "test-key-do-not-log")
+	cfg := loadTestConfig(t, dir, upstream.URL+"/v1", upstream.URL+"/v1", config.AuthEnv, config.ProviderOpenAICompatible)
+	cfg.Compaction.MaxTailTokens = 30
+	cfg.Compaction.RecentMessages = 0
+	journal := openJournal(t, dir)
+	server := New(cfg, aiuditor.Stub{}, journal)
+	server.Notes = notes.NewService(store)
+	long := "uniquealpha " + strings.Repeat("padding ", 80)
+	rec := do(server, "/v1/chat/completions", "parse", "task-1", "long-1", "", `{"messages":[{"role":"user","content":"`+long+`"}]}`)
+	if rec.Code != http.StatusOK {
+		t.Fatal(rec.Code, rec.Body.String())
+	}
+	var forwarded string
+	for _, body := range bodies {
+		if strings.Contains(body, "Compacted tail:") {
+			forwarded = body
+		}
+	}
+	if forwarded == "" || !strings.Contains(forwarded, "UNIQUEALPHA") {
+		t.Fatalf("%v", bodies)
+	}
+}
+
 func TestCompactionKeepsTheClientKeyOnTheCheapOrigin(t *testing.T) {
 	var auth string
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -1737,6 +1789,274 @@ func (b neverEnding) Read(p []byte) (int, error) {
 		p[i] = byte(b)
 	}
 	return len(p), nil
+}
+
+func TestRetrievedNotesFollowThePrefixAndStayOutOfTheJournal(t *testing.T) {
+	var bodies []string
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		raw, _ := io.ReadAll(r.Body)
+		bodies = append(bodies, string(raw))
+		_, _ = w.Write([]byte(`{"choices":[{"message":{"role":"assistant","content":"ok"}}],"usage":{"prompt_tokens":9,"completion_tokens":1}}`))
+	}))
+	defer upstream.Close()
+	dir := t.TempDir()
+	notesDir := filepath.Join(dir, "notes")
+	if err := os.MkdirAll(notesDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(notesDir, "fact.md"), []byte(`---
+id: fact-1
+type: fact
+status: open
+---
+# Local fact
+SENTENCEUNIQUE stays on disk.
+[[step-1]]
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(notesDir, "step.md"), []byte(`---
+id: step-1
+type: steps
+status: open
+order: 1
+---
+# Do the step
+Step detail STEPPAGE.
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	store, err := notes.Open(filepath.Join(dir, "index.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	if _, err := store.Rebuild(notesDir); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("CONDUCTOR_CHEAP_API_KEY", "test-key-do-not-log")
+	t.Setenv(config.ProxyTokenEnv, "proxy-token-for-tests")
+	cfg := loadTestConfig(t, dir, upstream.URL+"/v1", upstream.URL+"/v1", config.AuthEnv, config.ProviderOpenAICompatible)
+	journal := openJournal(t, dir)
+	server := New(cfg, aiuditor.Stub{}, journal)
+	server.Notes = notes.NewService(store)
+	system := `{"role":"system","name":"keep","content":"Stay stable."}`
+	requestBody := `{"messages":[` + system + `,{"role":"user","content":"sentenceunique"}]}`
+	if rec := do(server, "/v1/chat/completions", "parse", "task-9", "req-1", "", requestBody); rec.Code != http.StatusOK {
+		t.Fatal(rec.Code, rec.Body.String())
+	}
+	if rec := do(server, "/v1/chat/completions", "parse", "task-9", "req-2", "", requestBody); rec.Code != http.StatusOK {
+		t.Fatal(rec.Code, rec.Body.String())
+	}
+	if len(bodies) != 2 || !strings.Contains(bodies[0], system) || !strings.Contains(bodies[0], "SENTENCEUNIQUE") || !strings.Contains(bodies[0], "STEPPAGE") {
+		t.Fatalf("%v", bodies)
+	}
+	if strings.Index(bodies[0], system) > strings.Index(bodies[0], "SENTENCEUNIQUE") {
+		t.Fatal(bodies[0])
+	}
+	stored := readFile(t, journal.Path())
+	if strings.Contains(stored, "SENTENCEUNIQUE") || strings.Contains(stored, "STEPPAGE") {
+		t.Fatal(stored)
+	}
+	records, err := metrics.ReadJournal(journal.Path())
+	if err != nil {
+		t.Fatal(err)
+	}
+	summary := metrics.Summarize(records)
+	if summary.Memory.Lookups == 0 || summary.Memory.HitRate == nil || *summary.Memory.HitRate <= 0 {
+		t.Fatalf("%+v", summary.Memory)
+	}
+}
+
+func TestUserQueryUsesLatestTextBlock(t *testing.T) {
+	body := []byte(`{"messages":[{"role":"user","content":"older string"},{"role":"assistant","content":"skip"},{"role":"user","content":[{"type":"text","text":"uniquealpha"},{"type":"text","text":" more"}]}]}`)
+	if got := userQuery(body); got != "uniquealpha more" {
+		t.Fatal(got)
+	}
+	older := []byte(`{"messages":[{"role":"user","content":"older string"},{"role":"user","content":[{"type":"image_url","image_url":{"url":"http://example"}}]}]}`)
+	if got := userQuery(older); got != "" {
+		t.Fatal(got)
+	}
+}
+
+func TestNotesStayOffResponsesAndEmbeddings(t *testing.T) {
+	var mu sync.Mutex
+	bodies := map[string]string{}
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		raw, _ := io.ReadAll(r.Body)
+		mu.Lock()
+		bodies[r.URL.Path] = string(raw)
+		mu.Unlock()
+		_, _ = w.Write([]byte(`{"usage":{"prompt_tokens":2,"completion_tokens":1,"total_tokens":3}}`))
+	}))
+	defer upstream.Close()
+	dir := t.TempDir()
+	notesDir := filepath.Join(dir, "notes")
+	if err := os.MkdirAll(notesDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(notesDir, "fact.md"), []byte("---\nid: fact-1\ntype: fact\nstatus: open\n---\n# Local fact\nSENTENCEUNIQUE\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	store, err := notes.Open(filepath.Join(dir, "index.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	if _, err := store.Rebuild(notesDir); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("CONDUCTOR_CHEAP_API_KEY", "test-key-do-not-log")
+	t.Setenv(config.ProxyTokenEnv, "proxy-token-for-tests")
+	cfg := loadTestConfig(t, dir, upstream.URL+"/v1", upstream.URL+"/v1", config.AuthEnv, config.ProviderOpenAICompatible)
+	server := New(cfg, aiuditor.Stub{}, nil)
+	server.Notes = notes.NewService(store)
+	if rec := do(server, "/v1/responses", "parse", "task-1", "resp-1", "", `{"input":"hello"}`); rec.Code != http.StatusOK {
+		t.Fatal(rec.Code, rec.Body.String())
+	}
+	if rec := do(server, "/v1/embeddings", "embed", "task-1", "emb-1", "", `{"input":"hello"}`); rec.Code != http.StatusOK {
+		t.Fatal(rec.Code, rec.Body.String())
+	}
+	arrayBody := `{"messages":[{"role":"user","content":[{"type":"text","text":"sentenceunique"}]}]}`
+	if rec := do(server, "/v1/chat/completions", "parse", "task-1", "chat-1", "", arrayBody); rec.Code != http.StatusOK {
+		t.Fatal(rec.Code, rec.Body.String())
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if strings.Contains(bodies["/v1/responses"], `"messages"`) || strings.Contains(bodies["/v1/responses"], "SENTENCEUNIQUE") {
+		t.Fatal(bodies["/v1/responses"])
+	}
+	if strings.Contains(bodies["/v1/embeddings"], `"messages"`) || strings.Contains(bodies["/v1/embeddings"], "SENTENCEUNIQUE") {
+		t.Fatal(bodies["/v1/embeddings"])
+	}
+	if !strings.Contains(bodies["/v1/chat/completions"], "SENTENCEUNIQUE") {
+		t.Fatal(bodies["/v1/chat/completions"])
+	}
+}
+
+func TestOverlappingRequestsKeepTheirOwnCacheCounts(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"choices":[{"message":{"role":"assistant","content":"ok"}}],"usage":{"prompt_tokens":4,"completion_tokens":1}}`))
+	}))
+	defer upstream.Close()
+	dir := t.TempDir()
+	notesDir := filepath.Join(dir, "notes")
+	if err := os.MkdirAll(notesDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(notesDir, "fact.md"), []byte("---\nid: fact-1\ntype: fact\nstatus: open\n---\n# Local fact\nSENTENCEUNIQUE\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	store, err := notes.Open(filepath.Join(dir, "index.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	if _, err := store.Rebuild(notesDir); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("CONDUCTOR_CHEAP_API_KEY", "test-key-do-not-log")
+	t.Setenv(config.ProxyTokenEnv, "proxy-token-for-tests")
+	cfg := loadTestConfig(t, dir, upstream.URL+"/v1", upstream.URL+"/v1", config.AuthEnv, config.ProviderOpenAICompatible)
+	journal := openJournal(t, dir)
+	hop := &holdHop{ready: make(chan struct{}), release: make(chan struct{})}
+	server := New(cfg, hop, journal)
+	server.Notes = notes.NewService(store)
+	body := `{"messages":[{"role":"user","content":"sentenceunique"}]}`
+	var wg sync.WaitGroup
+	codes := make([]int, 2)
+	for i := 0; i < 2; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			rec := do(server, "/v1/chat/completions", "parse", "task-9", fmt.Sprintf("req-%d", i), "", body)
+			codes[i] = rec.Code
+		}(i)
+	}
+	select {
+	case <-hop.ready:
+	case <-time.After(5 * time.Second):
+		t.Fatal("requests did not reach review")
+	}
+	close(hop.release)
+	wg.Wait()
+	if codes[0] != http.StatusOK || codes[1] != http.StatusOK {
+		t.Fatal(codes)
+	}
+	records, err := metrics.ReadJournal(journal.Path())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(records) != 2 {
+		t.Fatalf("%d records", len(records))
+	}
+	for _, record := range records {
+		if record.MemoryLookups == nil || *record.MemoryLookups != 1 {
+			t.Fatalf("%+v", record.MemoryLookups)
+		}
+	}
+}
+
+type holdHop struct {
+	mu      sync.Mutex
+	arrived int
+	ready   chan struct{}
+	release chan struct{}
+}
+
+func (h *holdHop) Review(context.Context, aiuditor.Envelope) (aiuditor.Verdict, error) {
+	h.mu.Lock()
+	h.arrived++
+	if h.arrived == 2 {
+		close(h.ready)
+	}
+	h.mu.Unlock()
+	<-h.release
+	return aiuditor.Verdict{Action: aiuditor.Allow}, nil
+}
+
+func TestTaskIDDoesNotReadNotesWithoutProxyToken(t *testing.T) {
+	var body string
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		raw, _ := io.ReadAll(r.Body)
+		body = string(raw)
+		_, _ = w.Write([]byte(`{"choices":[{"message":{"role":"assistant","content":"ok"}}],"usage":{"prompt_tokens":2,"completion_tokens":1}}`))
+	}))
+	defer upstream.Close()
+	dir := t.TempDir()
+	notesDir := filepath.Join(dir, "notes")
+	if err := os.MkdirAll(notesDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(notesDir, "secret.md"), []byte("---\nid: secret-note\ntype: fact\nstatus: open\n---\n# Secret\nSECRETNOTEBODY\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	store, err := notes.Open(filepath.Join(dir, "index.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	if _, err := store.Rebuild(notesDir); err != nil {
+		t.Fatal(err)
+	}
+	cfg := loadTestConfig(t, dir, upstream.URL+"/v1", upstream.URL+"/v1", config.AuthPassthrough, config.ProviderOpenAICompatible)
+	t.Setenv(config.ProxyTokenEnv, "")
+	server := New(cfg, aiuditor.Stub{}, nil)
+	server.Notes = notes.NewService(store)
+	requestBody := `{"messages":[{"role":"user","content":"hello"}]}`
+	if rec := do(server, "/v1/chat/completions", "parse", "secret-note", "secret-note", "", requestBody); rec.Code != http.StatusOK || strings.Contains(body, "SECRETNOTEBODY") {
+		t.Fatalf("code %d body %s", rec.Code, body)
+	}
+	// Text search and the primer must not bypass the same owner authorization.
+	server.Notes.Primer = true
+	searchBody := `{"messages":[{"role":"user","content":"SECRETNOTEBODY"}]}`
+	if rec := do(server, "/v1/chat/completions", "parse", "other", "other", "", searchBody); rec.Code != http.StatusOK || (strings.Contains(body, "# Secret") || strings.Contains(body, "Session primer")) {
+		t.Fatalf("unauthorized text search returned notes: code %d body %s", rec.Code, body)
+	}
+	t.Setenv(config.ProxyTokenEnv, "proxy-token-for-tests")
+	if rec := do(server, "/v1/chat/completions", "parse", "secret-note", "other", "", requestBody); rec.Code != http.StatusOK || !strings.Contains(body, "SECRETNOTEBODY") {
+		t.Fatalf("code %d body %s", rec.Code, body)
+	}
 }
 
 func TestModelsAndUnknownClass(t *testing.T) {
@@ -2174,6 +2494,13 @@ func TestStreamingHeaderWaitUsesSelectedTierTimeout(t *testing.T) {
 	rec := do(New(cfg, aiuditor.Stub{}, openJournal(t, dir)), "/v1/chat/completions", "parse", "task", "step", "", `{"stream":true,"messages":[{"role":"user","content":"hello"}]}`)
 	if rec.Code != http.StatusBadGateway {
 		t.Fatal(rec.Code, rec.Body.String())
+	}
+}
+
+func TestToolResultsPreserveTheRetrievalQuery(t *testing.T) {
+	body := []byte(`{"messages":[{"role":"user","content":"uniquealpha"},{"role":"assistant","content":[{"type":"tool_use","id":"c"}]},{"role":"user","content":[{"type":"tool_result","tool_use_id":"c","content":"result"}]}]}`)
+	if got := userQuery(body); got != "uniquealpha" {
+		t.Fatal(got)
 	}
 }
 

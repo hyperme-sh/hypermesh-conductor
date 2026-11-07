@@ -9,7 +9,7 @@ jobs:
   test:
     runs-on: ubuntu-24.04
     container:
-      image: golang:1.22-bookworm
+      image: golang:1.25-bookworm
     steps:
       - name: Install git
         run: apt-get update && apt-get install -y --no-install-recommends git && rm -rf /var/lib/apt/lists/*
@@ -29,7 +29,7 @@ jobs:
   packages:
     runs-on: ubuntu-24.04
     container:
-      image: golang:1.22-bookworm
+      image: golang:1.25-bookworm
     steps:
       - name: Install packagers
         run: |
@@ -58,7 +58,7 @@ jobs:
   raw-binaries:
     runs-on: ubuntu-24.04
     container:
-      image: golang:1.22-bookworm
+      image: golang:1.25-bookworm
     strategy:
       fail-fast: false
       matrix:

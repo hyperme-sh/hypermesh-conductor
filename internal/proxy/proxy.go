@@ -27,6 +27,7 @@ import (
 	"github.com/hyperme-sh/hypermesh-conductor/internal/config"
 	"github.com/hyperme-sh/hypermesh-conductor/internal/jsonbody"
 	"github.com/hyperme-sh/hypermesh-conductor/internal/metrics"
+	"github.com/hyperme-sh/hypermesh-conductor/internal/notes"
 	"github.com/hyperme-sh/hypermesh-conductor/internal/prefix"
 	"github.com/hyperme-sh/hypermesh-conductor/internal/routing"
 	"github.com/hyperme-sh/hypermesh-conductor/internal/rules"
@@ -62,6 +63,7 @@ type Proxy struct {
 	Config  config.Config
 	Hop     aiuditor.Hop
 	Journal *metrics.Journal
+	Notes   *notes.Service
 	Logf    func(string, ...any)
 
 	transportOnce sync.Once
@@ -244,7 +246,12 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if hash, err := hashBody(proto, prepared); err == nil {
 		prelimHash = hash
 	}
-	next, didCompact, compactErr := p.maybeCompact(r.Context(), r, proto, prepared, taskID, stepID, prelimHash, tier)
+	useNotes := p.Notes != nil && acceptsNotes(proto) && authorizeProxy(r) == nil
+	var query string
+	if useNotes {
+		query = userQuery(prepared)
+	}
+	next, didCompact, memLookups, memHits, compactErr := p.maybeCompact(r.Context(), r, proto, prepared, taskID, stepID, prelimHash, tier)
 	if compactErr != nil {
 		var denied proxyAuthError
 		if errors.As(compactErr, &denied) {
@@ -260,6 +267,23 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		prepared = next
 		yes := true
 		base.Compacted = &yes
+	}
+	beforeNotes := prepared
+	if useNotes {
+		updated, got, err := p.insertNotes(prepared, query, taskID, stepID, true)
+		memLookups += got.Lookups
+		memHits += got.Hits
+		if err == nil {
+			prepared = updated
+		}
+	}
+	if p.Notes != nil && p.Notes.Cache != nil {
+		lookups, hits := memLookups, memHits
+		base.MemoryLookups = &lookups
+		base.MemoryHits = &hits
+	}
+	if didCompact || !bytes.Equal(beforeNotes, prepared) {
+		var halted bool
 		var secondRelease func()
 		prepared, halted, secondRelease = p.applyReview(w, r, &base, proto, prepared, stream, decision, tier, base.PrefixSHA256)
 		defer secondRelease()
@@ -530,6 +554,9 @@ func (p *Proxy) stream(w http.ResponseWriter, client *http.Request, resp *http.R
 				break
 			}
 			if passthrough {
+				if terminal && !sseEventClosed(ready) {
+					ready = append(ready, '\n')
+				}
 				if !writeClient(ready) {
 					break
 				}
@@ -997,6 +1024,10 @@ func authorizeProxy(src *http.Request) error {
 	return nil
 }
 
+func sseEventClosed(ready []byte) bool {
+	return bytes.HasSuffix(ready, []byte("\n\n")) || bytes.HasSuffix(ready, []byte("\n\r\n"))
+}
+
 func streamDone(line []byte) bool {
 	text := strings.TrimSpace(string(line))
 	if !strings.HasPrefix(text, "data:") {
@@ -1190,6 +1221,95 @@ func stampRun(w http.ResponseWriter, record metrics.StepRecord) {
 	}
 	if record.StepID != "" {
 		w.Header().Set("X-Conductor-Step", record.StepID)
+	}
+}
+
+func acceptsNotes(proto string) bool {
+	return proto == translate.ProtoChat || proto == translate.ProtoMessages
+}
+
+func (p *Proxy) insertNotes(body []byte, query, taskID, stepID string, trustIDs bool) ([]byte, notes.Result, error) {
+	result, err := p.Notes.Retrieve(query, taskID, stepID, trustIDs)
+	if err != nil || result.Block == "" {
+		return body, result, err
+	}
+	updated, err := notes.InsertAfterPrefix(body, result.Block)
+	if err != nil {
+		return body, result, err
+	}
+	return updated, result, nil
+}
+
+func userQuery(body []byte) string {
+	var root struct {
+		Messages []struct {
+			Role    string
+			Content json.RawMessage
+		}
+		Input json.RawMessage
+	}
+	if err := json.Unmarshal(body, &root); err != nil {
+		return ""
+	}
+	seenUser := false
+	var last string
+	for _, msg := range root.Messages {
+		if msg.Role != "user" {
+			continue
+		}
+		var content any
+		if json.Unmarshal(msg.Content, &content) != nil {
+			continue
+		}
+		text, ok := contentText(content)
+		if !ok {
+			continue
+		}
+		seenUser = true
+		last = text
+	}
+	if seenUser {
+		return last
+	}
+	var input string
+	if json.Unmarshal(root.Input, &input) == nil {
+		return input
+	}
+	return ""
+}
+
+func contentText(content any) (string, bool) {
+	switch value := content.(type) {
+	case string:
+		return value, true
+	case []any:
+		toolResultsOnly := len(value) > 0
+		for _, part := range value {
+			item, ok := part.(map[string]any)
+			if !ok || item["type"] != "tool_result" {
+				toolResultsOnly = false
+				break
+			}
+		}
+		if toolResultsOnly {
+			return "", false
+		}
+		var b strings.Builder
+		for _, part := range value {
+			switch item := part.(type) {
+			case string:
+				b.WriteString(item)
+			case map[string]any:
+				kind, _ := item["type"].(string)
+				text, isText := item["text"].(string)
+				if kind == "text" || kind == "input_text" || kind == "output_text" || (kind == "" && isText) {
+					b.WriteString(text)
+				}
+			}
+		}
+		return b.String(), true
+	default:
+		return "", false
 	}
 }
 

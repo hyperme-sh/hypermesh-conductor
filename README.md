@@ -113,11 +113,13 @@ mkdir -p runs
 ./conductor summary --journal runs/journal.jsonl
 ```
 
-`examples/endpoints.json` names loopback and provider placeholders. `serve` and `run` check that the journal directory exists before a provider call. Set `CONDUCTOR_CHEAP_API_KEY` when the cheap tier must use an environment key. Set `CONDUCTOR_PROXY_TOKEN` as well, and send it as `X-Conductor-Token` on any call that should use that key. A client that sends its own provider credential does not send the proxy token.
+`examples/endpoints.json` names loopback and provider placeholders. `serve` and `run` check that the journal directory exists before a provider call. Set `CONDUCTOR_CHEAP_API_KEY` when the cheap tier must use an environment key. Set `CONDUCTOR_PROXY_TOKEN` as well, and send it as `X-Conductor-Token` on any call that should use that key. A client using its own provider credential only needs the proxy token when requesting local note retrieval.
 
 Tails longer than `compaction.max_tail_tokens` are summarized on the cheap tier. The original tail is stored in `history.jsonl` next to the metrics journal. The system prompt and tools stay the prefix that is hashed.
 
-`conductor dream` replays the journal and writes an inactive rule proposal. `conductor rules diff`, `apply`, and `rollback` review that file. Proposals cannot loosen AIuditor rules. Prompt bodies are included only with `dream --bodies`.
+`conductor dream` replays the journal and writes an inactive rule proposal. `conductor rules diff`, `apply`, and `rollback` review that file. Proposals cannot loosen AIuditor rules. Prompt bodies are included only with `dream --bodies`. With `--notes`, dream also writes a markdown diff of proposed links and merges and does not change the notes.
+
+Linked notes live as Markdown under `notes.dir`. `conductor index rebuild` and `conductor index status` maintain a local SQLite index of wikilinks, backlinks, and full text. An authenticated request with `X-Conductor-Token` matching `CONDUCTOR_PROXY_TOKEN` inserts a small neighborhood after the stable prefix. This authorizes the configured local note collection; untrusted callers receive no note IDs, text-search results, or primer. `conductor summary` includes the memory-cache hit rate. See [docs/notes.md](docs/notes.md).
 
 ## Contributing
 
@@ -130,3 +132,8 @@ MIT. See [LICENSE](LICENSE).
 ## Security
 
 Please report security problems to security@hyperme.sh, not in a public issue. Report other bugs to bugs@hyperme.sh. See [SECURITY.md](SECURITY.md).
+
+Notes synchronization accepts at most 10,000 Markdown files, 1 MiB per file,
+and 32 MiB of source bytes per sync. Oversized or growing files fail the sync
+before replacing the existing index. Named pipes and other nonregular files
+are excluded, and rooted reads cannot follow paths outside the notes directory.

@@ -16,70 +16,76 @@ import (
 	"github.com/hyperme-sh/hypermesh-conductor/internal/history"
 	"github.com/hyperme-sh/hypermesh-conductor/internal/jsonbody"
 	"github.com/hyperme-sh/hypermesh-conductor/internal/metrics"
+	"github.com/hyperme-sh/hypermesh-conductor/internal/notes"
 	"github.com/hyperme-sh/hypermesh-conductor/internal/translate"
 	"github.com/hyperme-sh/hypermesh-conductor/internal/usage"
 )
 
-func (p *Proxy) maybeCompact(ctx context.Context, client *http.Request, proto string, prepared []byte, taskID, stepID, prefixHash string, selected config.Tier) ([]byte, bool, error) {
+func (p *Proxy) maybeCompact(ctx context.Context, client *http.Request, proto string, prepared []byte, taskID, stepID, prefixHash string, selected config.Tier) ([]byte, bool, int, int, error) {
 	if p.Journal == nil || p.Config.Compaction.MaxTailTokens <= 0 {
-		return prepared, false, nil
+		return prepared, false, 0, 0, nil
 	}
 	if proto != "openai.chat" && proto != "anthropic.messages" {
-		return prepared, false, nil
+		return prepared, false, 0, 0, nil
 	}
 	obj, err := jsonbody.Parse(prepared)
 	if err != nil {
-		return prepared, false, nil
+		return prepared, false, 0, 0, nil
 	}
 	plan, err := compact.PlanMessages(obj.Values["messages"], p.Config.Compaction.MaxTailTokens, p.Config.Compaction.RecentMessages)
 	if err != nil || !plan.Needed {
-		return prepared, false, nil
+		return prepared, false, 0, 0, nil
 	}
 	compactionClient := clientForCompaction(client, p.Config.Cheap, selected)
 	if err := authorizeCompaction(compactionClient, p.Config.Cheap); err != nil {
-		return prepared, false, err
+		return prepared, false, 0, 0, err
 	}
-	summary, parsed, latency, measuredPrefix, err := p.cheapSummary(ctx, compactionClient, plan.SummaryInput)
-	compactID := stepID + ".compact"
-	record := metrics.StepRecord{
-		TaskID: taskID, StepID: compactID, JobClass: "summarize", Tier: "cheap",
-		ModelID: p.Config.Cheap.Model, Reason: "compaction of the tail on the cheap tier",
-		PrefixSHA256: measuredPrefix, LatencyMS: &latency, UsageStatus: metrics.StatusUncertain,
+	summary, parsed, latency, measuredPrefix, lookups, hits, cached, err := p.tailSummary(ctx, compactionClient, prefixHash, plan.SummaryInput)
+	if !cached {
+		compactID := stepID + ".compact"
+		record := metrics.StepRecord{
+			TaskID: taskID, StepID: compactID, JobClass: "summarize", Tier: "cheap",
+			ModelID: p.Config.Cheap.Model, Reason: "compaction of the tail on the cheap tier",
+			PrefixSHA256: measuredPrefix, LatencyMS: &latency, UsageStatus: metrics.StatusUncertain,
+		}
+		if err != nil {
+			var denied proxyAuthError
+			if errors.As(err, &denied) || errors.Is(err, errBodyBudget) {
+				return prepared, false, lookups, hits, err
+			}
+			msg := "compaction request failed"
+			record.Error = &msg
+			p.journal(record)
+			return prepared, false, lookups, hits, nil
+		}
+		applyUsage(&record, parsed, p.Config, "cheap")
+		p.journal(record)
 	}
 	if err != nil {
-		var denied proxyAuthError
-		if errors.As(err, &denied) || errors.Is(err, errBodyBudget) {
-			return prepared, false, err
-		}
-		msg := "compaction request failed"
-		record.Error = &msg
-		p.journal(record)
-		return prepared, false, nil
+		return prepared, false, lookups, hits, nil
 	}
-	applyUsage(&record, parsed, p.Config, "cheap")
-	p.journal(record)
 	rewritten, err := compact.ApplyMessages(plan, summary)
 	if err != nil {
-		return prepared, false, nil
+		return prepared, false, lookups, hits, nil
 	}
 	if err := obj.Set("messages", json.RawMessage(rewritten)); err != nil {
-		return prepared, false, nil
+		return prepared, false, lookups, hits, nil
 	}
 	next, err := obj.Marshal()
 	if err != nil {
-		return prepared, false, nil
+		return prepared, false, lookups, hits, nil
 	}
 	store, err := history.Open(history.PathFor(p.Journal.Path()))
 	if err != nil {
-		return prepared, false, nil
+		return prepared, false, lookups, hits, nil
 	}
 	if err := store.Append(history.Record{
 		TaskID: taskID, StepID: stepID, PrefixSHA256: prefixHash, Summary: summary,
 		OriginalTail: joinRaw(plan.TailRaw),
 	}); err != nil {
-		return prepared, false, nil
+		return prepared, false, lookups, hits, nil
 	}
-	return next, true, nil
+	return next, true, lookups, hits, nil
 }
 
 // clientForCompaction keeps a caller credential on the cheap call only when
@@ -105,6 +111,21 @@ func authorizeCompaction(client *http.Request, tier config.Tier) error {
 		return nil
 	}
 	return authorizeProxy(client)
+}
+
+func (p *Proxy) tailSummary(ctx context.Context, client *http.Request, prefixHash, tail string) (string, usage.Usage, int, string, int, int, bool, error) {
+	lookups, hits := 0, 0
+	if p.Notes != nil && p.Notes.Cache != nil {
+		lookups = 1
+		if cached, ok := p.Notes.Cache.Get("sum:" + notes.SummaryKey(prefixHash, tail)); ok && cached != "" {
+			return cached, usage.UncertainUsage(), 0, "", lookups, 1, true, nil
+		}
+	}
+	summary, parsed, latency, measuredPrefix, err := p.cheapSummary(ctx, client, tail)
+	if err == nil && p.Notes != nil && p.Notes.Cache != nil {
+		p.Notes.Cache.Put("sum:"+notes.SummaryKey(prefixHash, tail), summary)
+	}
+	return summary, parsed, latency, measuredPrefix, lookups, hits, false, err
 }
 
 func (p *Proxy) cheapSummary(ctx context.Context, client *http.Request, tail string) (string, usage.Usage, int, string, error) {

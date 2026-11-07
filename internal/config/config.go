@@ -113,6 +113,19 @@ type Config struct {
 	AIU          AIU
 	Compaction   Compaction
 	RulesFile    string
+	Notes        NotesConfig
+}
+
+// NotesConfig is the on-disk linked-note index. An empty Dir leaves it off.
+type NotesConfig struct {
+	Dir         string
+	DB          string
+	Hops        int
+	TokenBudget int
+	Embed       bool
+	Watch       bool
+	Primer      bool
+	WatchEvery  time.Duration
 }
 
 // Compaction controls tail summarization. A zero max leaves the tail unchanged.
@@ -229,6 +242,10 @@ func Load(path string) (Config, error) {
 		return Config{}, err
 	}
 	rulesFile, _ := raw["rules_file"].(string)
+	notesCfg, err := parseNotes(raw["notes"])
+	if err != nil {
+		return Config{}, err
+	}
 	return Config{
 		Listen:       listen,
 		Journal:      journal,
@@ -241,7 +258,48 @@ func Load(path string) (Config, error) {
 		AIU:          aiu,
 		Compaction:   compaction,
 		RulesFile:    rulesFile,
+		Notes:        notesCfg,
 	}, nil
+}
+
+func parseNotes(value any) (NotesConfig, error) {
+	out := NotesConfig{Hops: 2, TokenBudget: 800, Watch: true, Primer: true, WatchEvery: time.Second}
+	if value == nil {
+		return NotesConfig{}, nil
+	}
+	obj, ok := value.(map[string]any)
+	if !ok {
+		return NotesConfig{}, fmt.Errorf("notes must be an object")
+	}
+	out.Dir, _ = obj["dir"].(string)
+	out.DB, _ = obj["db"].(string)
+	if raw, ok := obj["hops"]; ok && raw != nil {
+		number, ok := asFloat(raw)
+		if !ok || number < 0 {
+			return NotesConfig{}, fmt.Errorf("notes.hops must be a non-negative number")
+		}
+		out.Hops = int(number)
+	}
+	if raw, ok := obj["token_budget"]; ok && raw != nil {
+		number, ok := asFloat(raw)
+		if !ok || number < 0 {
+			return NotesConfig{}, fmt.Errorf("notes.token_budget must be a non-negative number")
+		}
+		out.TokenBudget = int(number)
+	}
+	if flag, ok := obj["embed"].(bool); ok {
+		out.Embed = flag
+	}
+	if flag, ok := obj["watch"].(bool); ok {
+		out.Watch = flag
+	}
+	if flag, ok := obj["primer"].(bool); ok {
+		out.Primer = flag
+	}
+	if out.Dir == "" {
+		return NotesConfig{}, nil
+	}
+	return out, nil
 }
 
 func parseCompaction(value any) (Compaction, error) {

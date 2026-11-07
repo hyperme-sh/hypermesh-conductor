@@ -261,3 +261,70 @@ func TestHelpHasNoKeyFlag(t *testing.T) {
 		t.Fatal(stdout.String())
 	}
 }
+
+func TestDreamNotesDiffKeepsExistingLinks(t *testing.T) {
+	// A derived index belongs to this test, never to the runner user.
+	t.Setenv("XDG_CACHE_HOME", t.TempDir())
+	dir := t.TempDir()
+	notesDir := filepath.Join(dir, "notes")
+	if err := os.MkdirAll(notesDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	alpha := []byte(`---
+id: alpha
+type: note
+status: open
+---
+# Alpha
+Mentions beta and gamma.
+[[beta]]
+`)
+	if err := os.WriteFile(filepath.Join(notesDir, "alpha.md"), alpha, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(notesDir, "beta.md"), []byte(`---
+id: beta
+type: note
+status: open
+---
+# Beta
+Beta detail.
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(notesDir, "gamma.md"), []byte(`---
+id: gamma
+type: note
+status: open
+---
+# Gamma
+Gamma detail.
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	journal := filepath.Join(dir, "journal.jsonl")
+	if err := os.WriteFile(journal, nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	proposals := filepath.Join(dir, "proposals")
+	var stdout, stderr bytes.Buffer
+	code := Main([]string{"dream", "--journal", journal, "--proposals", proposals, "--notes", notesDir}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("code %d stderr %s stdout %s", code, stderr.String(), stdout.String())
+	}
+	diff, err := os.ReadFile(filepath.Join(proposals, "0001.notes.diff"))
+	if err != nil {
+		t.Fatal(err, stdout.String())
+	}
+	text := string(diff)
+	if strings.Contains(text, "+See [[beta]]") || !strings.Contains(text, "[[gamma]]") {
+		t.Fatal(text)
+	}
+	got, err := os.ReadFile(filepath.Join(notesDir, "alpha.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != string(alpha) {
+		t.Fatal("dream applied the note diff")
+	}
+}
