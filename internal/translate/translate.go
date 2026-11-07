@@ -378,6 +378,9 @@ func splitChatMessages(messages []any) (string, []any, error) {
 			if text != "" {
 				blocks = append(blocks, map[string]any{"type": "text", "text": text})
 			}
+			if refusal, ok := msg["refusal"].(string); ok && refusal != "" {
+				blocks = append(blocks, map[string]any{"type": "text", "text": refusal})
+			}
 			if calls, ok := msg["tool_calls"].([]any); ok {
 				for _, call := range calls {
 					obj, _ := call.(map[string]any)
@@ -396,7 +399,7 @@ func splitChatMessages(messages []any) (string, []any, error) {
 			}
 			if len(blocks) == 1 {
 				if textBlock, ok := blocks[0].(map[string]any); ok && textBlock["type"] == "text" {
-					out = append(out, map[string]any{"role": "assistant", "content": text})
+					out = append(out, map[string]any{"role": "assistant", "content": textBlock["text"]})
 					continue
 				}
 			}
