@@ -80,3 +80,12 @@ func TestAnthropicUsageAndStreamFold(t *testing.T) {
 		t.Fatalf("%+v", folded)
 	}
 }
+
+func TestCacheOnlyInputDoesNotBecomeMeasuredUsage(t *testing.T) {
+	for _, body := range []string{`{"usage":{"cache_read_input_tokens":80,"output_tokens":5}}`, `{"usage":{"cache_creation_input_tokens":80,"output_tokens":5}}`} {
+		parsed := ParseOpenAI([]byte(body), false)
+		if parsed.Status != Uncertain || parsed.Input != nil {
+			t.Fatalf("%+v", parsed)
+		}
+	}
+}

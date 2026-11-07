@@ -178,10 +178,10 @@ func expandAnthropicInput(usage map[string]any, input *int, inputOK bool) (*int,
 	if !keyPresent(usage, "input_tokens", "cache_read_input_tokens", "cache_creation_input_tokens") {
 		return input, inputOK, false
 	}
-	total := 0
-	if inputOK && input != nil {
-		total = *input
+	if !inputOK || input == nil {
+		return nil, false, true
 	}
+	total := *input
 	for _, key := range []string{"cache_read_input_tokens", "cache_creation_input_tokens"} {
 		if !keyPresent(usage, key) {
 			continue

@@ -681,6 +681,9 @@ func (p *Proxy) upstreamRequest(client *http.Request, tier config.Tier, wire tra
 func applyAuth(dst, src *http.Request, tier config.Tier) ([]string, error) {
 	var secrets []string
 	clientKey := clientCredential(src, tier.Provider)
+	if tier.Auth == config.AuthEnv {
+		clientKey = ""
+	}
 	var envKey string
 	var err error
 	needEnv := tier.APIKeyEnv != "" && (tier.Auth == config.AuthEnv || (tier.Auth == config.AuthPassthroughOrEnv && clientKey == ""))

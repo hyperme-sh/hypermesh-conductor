@@ -57,6 +57,7 @@ type Proposal struct {
 
 // Evidence cites journal rows and a prevalence fraction.
 type Evidence struct {
+	stepKeys   []string
 	Kind       string   `json:"kind"`
 	JobClass   string   `json:"job_class,omitempty"`
 	StepIDs    []string `json:"step_ids"`
