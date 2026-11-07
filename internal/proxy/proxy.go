@@ -336,6 +336,11 @@ func (p *Proxy) forward(w http.ResponseWriter, client *http.Request, upstream *h
 		return
 	}
 	if stream {
+		timeout := tier.Timeout
+		if timeout <= 0 {
+			timeout = 60 * time.Second
+		}
+		resp.Body = &idleReadBody{ReadCloser: resp.Body, timeout: timeout}
 		p.stream(w, client, resp, wire, start, secrets, record)
 		return
 	}
@@ -382,6 +387,18 @@ func (p *Proxy) forward(w http.ResponseWriter, client *http.Request, upstream *h
 	}
 	applyUsage(&record, parsed, p.Config, record.Tier)
 	p.finish(w, client, http.StatusOK, redact(converted, secrets), record, secrets, false)
+}
+
+// idleReadBody permits long streams while bounding each stalled upstream read.
+type idleReadBody struct {
+	io.ReadCloser
+	timeout time.Duration
+}
+
+func (b *idleReadBody) Read(p []byte) (int, error) {
+	timer := time.AfterFunc(b.timeout, func() { _ = b.ReadCloser.Close() })
+	defer timer.Stop()
+	return b.ReadCloser.Read(p)
 }
 
 func (p *Proxy) stream(w http.ResponseWriter, client *http.Request, resp *http.Response, wire translate.Wire, start time.Time, secrets []string, record metrics.StepRecord) {

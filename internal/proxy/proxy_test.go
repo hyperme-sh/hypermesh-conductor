@@ -2015,8 +2015,8 @@ func TestKeylessEnvOnlyTierNeverForwardsCallerCredentials(t *testing.T) {
 	}
 }
 
-func TestStreamingErrorBodiesCannotHoldTheHandler(t *testing.T) {
-	for _, status := range []int{302, 400, 500} {
+func TestStalledStreamingBodiesCannotHoldTheHandler(t *testing.T) {
+	for _, status := range []int{200, 302, 400, 500} {
 		t.Run(fmt.Sprint(status), func(t *testing.T) {
 			upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				w.WriteHeader(status)
@@ -2035,7 +2035,7 @@ func TestStreamingErrorBodiesCannotHoldTheHandler(t *testing.T) {
 			select {
 			case <-done:
 			case <-time.After(time.Second):
-				t.Fatal("error response held handler")
+				t.Fatal("stalled response held handler")
 			}
 		})
 	}
@@ -2068,5 +2068,24 @@ func TestDeveloperInstructionsAffectPrefixHash(t *testing.T) {
 	second, err := hashBody(translate.ProtoChat, []byte(`{"messages":[{"role":"system","content":"same"},{"role":"developer","content":"second"}]}`))
 	if err != nil || first == second {
 		t.Fatal(err, first, second)
+	}
+}
+
+func TestStreamingIdleTimeoutResetsAfterProgress(t *testing.T) {
+	reader, writer := io.Pipe()
+	defer reader.Close()
+	body := &idleReadBody{ReadCloser: reader, timeout: 100 * time.Millisecond}
+	go func() {
+		defer writer.Close()
+		for i := 0; i < 10; i++ {
+			time.Sleep(20 * time.Millisecond)
+			if _, err := writer.Write([]byte("x")); err != nil {
+				return
+			}
+		}
+	}()
+	data, err := io.ReadAll(body)
+	if err != nil || string(data) != strings.Repeat("x", 10) {
+		t.Fatal(string(data), err)
 	}
 }
