@@ -113,6 +113,7 @@ func summaryCmd(args []string, stdout, stderr io.Writer) int {
 	fs := flag.NewFlagSet("summary", flag.ContinueOnError)
 	fs.SetOutput(stderr)
 	journal := fs.String("journal", "", "measurement journal")
+	task := fs.String("task", "", "restrict summary to one journal task or Visor lease UUID")
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
@@ -124,6 +125,19 @@ func summaryCmd(args []string, stdout, stderr io.Writer) int {
 	if err != nil {
 		fmt.Fprintln(stderr, err.Error())
 		return 2
+	}
+	if *task != "" {
+		selected := records[:0]
+		for _, row := range records {
+			if row.TaskID == *task {
+				selected = append(selected, row)
+			}
+		}
+		if len(selected) == 0 {
+			fmt.Fprintln(stderr, "task not found in retained journal")
+			return 2
+		}
+		records = selected
 	}
 	return writePretty(stdout, metrics.Summarize(records))
 }

@@ -384,6 +384,7 @@ func bytesTrim(b []byte) []byte {
 
 // Block is one aggregation, either a task, a tier, or the whole journal.
 type Block struct {
+	EstimatedInputTokens   *int     `json:"estimated_input_tokens"`
 	Steps                  int      `json:"steps"`
 	UncertainSteps         int      `json:"uncertain_steps"`
 	InputTokens            *int     `json:"input_tokens"`
@@ -498,9 +499,14 @@ func measure(rows []StepRecord) Block {
 	if len(rows) == 0 {
 		return Block{}
 	}
+	estimated, estimateCount := 0, 0
 	uncertain := 0
 	var measured []StepRecord
 	for _, row := range rows {
+		if row.EstimatedInputTokens != nil {
+			estimated += *row.EstimatedInputTokens
+			estimateCount++
+		}
 		if row.UsageStatus != StatusMeasured {
 			uncertain++
 			continue
@@ -520,6 +526,9 @@ func measure(rows []StepRecord) Block {
 		TokensComplete:       tokensComplete,
 		MeasuredInputTokens:  intPtr(measuredInput),
 		MeasuredOutputTokens: intPtr(measuredOutput),
+	}
+	if estimateCount == len(rows) {
+		block.EstimatedInputTokens = intPtr(estimated)
 	}
 	if tokensComplete {
 		block.InputTokens = intPtr(measuredInput)
