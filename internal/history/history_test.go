@@ -202,3 +202,27 @@ func TestConcurrentStoresPreserveAppendsDuringEviction(t *testing.T) {
 		}
 	}
 }
+
+func TestPerTaskEvictionPreservesOtherTasks(t *testing.T) {
+	previous, previousTask := maxHistoryBytes, maxTaskHistoryBytes
+	maxHistoryBytes, maxTaskHistoryBytes = 10000, 700
+	defer func() { maxHistoryBytes, maxTaskHistoryBytes = previous, previousTask }()
+	path := filepath.Join(t.TempDir(), "history.jsonl")
+	store, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, record := range []Record{
+		{TaskID: "other", StepID: "only", OriginalTail: json.RawMessage(`"keep"`)},
+		{TaskID: "busy", StepID: "old", OriginalTail: json.RawMessage(`"` + strings.Repeat("x", 400) + `"`)},
+		{TaskID: "busy", StepID: "new", OriginalTail: json.RawMessage(`"` + strings.Repeat("y", 400) + `"`)},
+	} {
+		if err := store.Append(record); err != nil {
+			t.Fatal(err)
+		}
+	}
+	rows, err := Read(path)
+	if err != nil || len(rows) != 2 || rows[0].TaskID != "other" || rows[1].StepID != "new" {
+		t.Fatal(err, rows)
+	}
+}
