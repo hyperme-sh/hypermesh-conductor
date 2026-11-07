@@ -10,6 +10,7 @@ import (
 	"net"
 	"net/url"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -41,6 +42,8 @@ var forbiddenKeys = map[string]struct{}{
 
 // Tier is one configured destination.
 type Tier struct {
+	RecipeDigest string
+	OutputLimit  int
 	Name         string
 	Provider     string
 	BaseURL      string
@@ -192,6 +195,18 @@ func Load(path string) (Config, error) {
 	frontier, err := parseTier(routing.Frontier, tiers[routing.Frontier])
 	if err != nil {
 		return Config{}, err
+	}
+	if recipe, present := raw["recipe_file"]; present {
+		name, ok := recipe.(string)
+		if !ok || strings.TrimSpace(name) == "" {
+			return Config{}, fmt.Errorf("recipe_file must name a recipe")
+		}
+		if !filepath.IsAbs(name) {
+			name = filepath.Join(filepath.Dir(path), name)
+		}
+		if err := loadRecipe(name, &cheap, &frontier); err != nil {
+			return Config{}, err
+		}
 	}
 	prefixBlock, _ := raw["prefix"].(map[string]any)
 	if prefixBlock == nil {

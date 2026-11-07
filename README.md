@@ -137,3 +137,25 @@ Notes synchronization accepts at most 10,000 Markdown files, 1 MiB per file,
 and 32 MiB of source bytes per sync. Oversized or growing files fail the sync
 before replacing the existing index. Named pipes and other nonregular files
 are excluded, and rooted reads cannot follow paths outside the notes directory.
+
+### Output limits for generation requests
+
+Set `recipe_file` in the endpoints JSON to a file relative to that configuration.
+Conductor validates it at startup. Each model ID must match its configured tier.
+For example, a recipe for the example endpoints is:
+
+```json
+{
+  "schema": "hypermesh.conductor.recipe.v1",
+  "cheap": {"model": "local-small", "max_output_tokens": 256},
+  "frontier": {"model": "frontier", "max_output_tokens": 1024}
+}
+```
+
+The proxy applies the tier limit to each completion after translation and review.
+It supplies an omitted limit and rejects a higher requested limit. Embeddings
+have no generation allowance. Main request journal rows carry the recipe file
+SHA-256 and an approximate input size computed from the final serialized payload
+with the existing character-based estimator. Provider-reported usage remains
+separate. These limits apply per completion; cumulative task budgets require
+durable reservations.

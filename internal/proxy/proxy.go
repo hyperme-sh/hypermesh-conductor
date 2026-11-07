@@ -302,7 +302,12 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"error": map[string]any{"message": err.Error()}})
 		return
 	}
-	wire, err := translate.Request(proto, tier.Provider, tier.Model, forced)
+	wire, err := translateTierRequest(proto, tier, forced)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": map[string]any{"message": err.Error()}})
+		return
+	}
+	wire.Body, err = limitOutput(wire.Protocol, wire.Body, tier.OutputLimit)
 	if err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"error": map[string]any{"message": err.Error()}})
 		return
@@ -326,6 +331,9 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, status, map[string]any{"error": map[string]any{"message": err.Error()}})
 		return
 	}
+	estimated := compact.EstimateTokens(string(wire.Body))
+	base.EstimatedInputTokens = &estimated
+	base.RecipeSHA256 = tier.RecipeDigest
 	p.forward(w, r, authReq, tier, wire, stream, secrets, base)
 }
 

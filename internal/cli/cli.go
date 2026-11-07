@@ -101,6 +101,10 @@ func routeCmd(args []string, stdout, stderr io.Writer) int {
 		"suggestion_accepted": decision.SuggestionAccepted,
 		"prefix_sha256":       hash,
 	}
+	if tier.RecipeDigest != "" {
+		payload["recipe_sha256"] = tier.RecipeDigest
+		payload["max_output_tokens"] = tier.OutputLimit
+	}
 	return writePretty(stdout, payload)
 }
 
