@@ -443,11 +443,19 @@ func (p *Proxy) stream(w http.ResponseWriter, client *http.Request, resp *http.R
 	failed := false
 	terminal := false
 	clientGone := false
+	credentialGuard := newStreamCredentials(secrets)
 	writeClient := func(p []byte) bool {
 		if clientGone || len(p) == 0 {
 			return !clientGone
 		}
-		if _, err := w.Write(redact(p, secrets)); err != nil {
+		safe := redact(p, secrets)
+		if !credentialGuard.safeEvents(safe) {
+			failed = true
+			readErr = fmt.Errorf("provider stream contained credential material")
+			_ = resp.Body.Close()
+			return false
+		}
+		if _, err := w.Write(safe); err != nil {
 			clientGone = true
 			readErr = err
 			_ = resp.Body.Close()
