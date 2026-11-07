@@ -348,7 +348,7 @@ func (p *Proxy) forward(w http.ResponseWriter, client *http.Request, upstream *h
 		msg := fmt.Sprintf("provider HTTP %d", resp.StatusCode)
 		record.Error = &msg
 		record.UsageStatus = metrics.StatusUncertain
-		p.finish(w, client, resp.StatusCode, redact(raw, secrets), record, secrets, false)
+		p.finish(w, client, resp.StatusCode, raw, record, secrets, false)
 		return
 	}
 	if stream {
@@ -402,7 +402,7 @@ func (p *Proxy) forward(w http.ResponseWriter, client *http.Request, upstream *h
 		parsed = usage.ParseAnthropic(raw)
 	}
 	applyUsage(&record, parsed, p.Config, record.Tier)
-	p.finish(w, client, http.StatusOK, redact(converted, secrets), record, secrets, false)
+	p.finish(w, client, http.StatusOK, converted, record, secrets, false)
 }
 
 // idleReadBody permits long streams while bounding each stalled upstream read.
@@ -448,7 +448,7 @@ func (p *Proxy) stream(w http.ResponseWriter, client *http.Request, resp *http.R
 		if clientGone || len(p) == 0 {
 			return !clientGone
 		}
-		safe := redact(p, secrets)
+		safe := redactEventData(p, secrets)
 		if !credentialGuard.safeEvents(safe) {
 			failed = true
 			readErr = fmt.Errorf("provider stream contained credential material")
@@ -596,7 +596,7 @@ func (p *Proxy) finish(w http.ResponseWriter, client *http.Request, status int, 
 		if body == nil {
 			body = mustJSON(map[string]any{"error": map[string]any{"message": errorText(record)}})
 		}
-		body = redact(body, secrets)
+		body = redactJSON(body, secrets)
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(status)
 		_, _ = w.Write(body)

@@ -2198,3 +2198,15 @@ func TestDecodedCredentialGuardsAllStreamProtocols(t *testing.T) {
 		}
 	}
 }
+
+func TestRedactEncodedCredentialsPreservesUnrelatedJSON(t *testing.T) {
+	key := "example-environment-key"
+	raw := []byte(`{ "id":9007199254740993, "nested":[{"\u0065xample-environment-key":"value: example-environment-\u006bey"}] }`)
+	want := `{ "id":9007199254740993, "nested":[{"[redacted]":"value: [redacted]"}] }`
+	if got := string(redactJSON(raw, []string{key})); got != want {
+		t.Fatal(got)
+	}
+	if got := string(redactEventData(append(append([]byte("data: "), raw...), '\n', '\n'), []string{key})); got != "data: "+want+"\n\n" {
+		t.Fatal(got)
+	}
+}
