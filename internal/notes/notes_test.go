@@ -995,3 +995,17 @@ func TestSyncRejectsAggregateSizeBeforeReplacingExistingIndex(t *testing.T) {
 		t.Fatal(err, all)
 	}
 }
+
+func TestNotesPreserveLeadingDeveloperPrefix(t *testing.T) {
+	for _, prefix := range []string{
+		`{"role":"developer","content":"stable"}`,
+		`{"role":"system","content":"stable"},{"role":"developer","content":"rules"}`,
+	} {
+		body := []byte(`{"messages":[` + prefix + `,{"role":"user","content":"question"},{"role":"developer","content":"later"}]}`)
+		out, err := InsertAfterPrefix(body, "retrieved")
+		want := `{"messages":[` + prefix + `,{"content":"retrieved","role":"user"},{"role":"user","content":"question"},{"role":"developer","content":"later"}]}`
+		if err != nil || string(out) != want {
+			t.Fatalf("%s: %v", out, err)
+		}
+	}
+}

@@ -5,8 +5,8 @@ import (
 	"encoding/json"
 )
 
-// InsertAfterPrefix places the retrieved block after system messages and
-// before the rest of the conversation. System message bytes are copied through.
+// InsertAfterPrefix places the retrieved block after leading system and developer messages and
+// before the rest of the conversation. Prefix message bytes are copied through.
 func InsertAfterPrefix(body []byte, block string) ([]byte, error) {
 	if stringsTrim(block) == "" {
 		return body, nil
@@ -52,7 +52,8 @@ func InsertAfterPrefix(body []byte, block string) ([]byte, error) {
 	var prefix, tail []json.RawMessage
 	seenOther := false
 	for _, item := range messages {
-		if !seenOther && rawRole(item) == "system" {
+		role := rawRole(item)
+		if !seenOther && (role == "system" || role == "developer") {
 			prefix = append(prefix, item)
 			continue
 		}
