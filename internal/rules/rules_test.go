@@ -1,0 +1,362 @@
+package rules
+
+import (
+	"os"
+	"path/filepath"
+	"strings"
+	"sync"
+	"testing"
+
+	"github.com/hyperme-sh/hypermesh-conductor/internal/history"
+	"github.com/hyperme-sh/hypermesh-conductor/internal/metrics"
+)
+
+func TestDreamProposesWithoutActivatingOrReadingBodies(t *testing.T) {
+	dir := t.TempDir()
+	in := 40
+	records := []metrics.StepRecord{
+		step("s1", "summarize", "cheap", &in),
+		step("s2", "summarize", "cheap", &in),
+		step("s3", "summarize", "cheap", &in),
+	}
+	outcomes := []Outcome{
+		{TaskID: "task-1", StepID: "s1", Kind: "test_failed"},
+		{TaskID: "task-1", StepID: "s2", Kind: "escalation"},
+		{TaskID: "task-1", StepID: "s3", Kind: "aiuditor_deny"},
+	}
+	hist := []history.Record{{TaskID: "task-1", StepID: "s1", Summary: "PRIVATE-PROMPT-BODY"}}
+	proposal, path, err := Dream(DreamInput{Records: records, Outcomes: outcomes, History: hist, Bodies: false}, Defaults(), filepath.Join(dir, "proposals"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "active.json")); !os.IsNotExist(err) {
+		t.Fatal("dream activated a policy")
+	}
+	blob, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(blob), "PRIVATE-PROMPT-BODY") || strings.Contains(string(blob), "fail_closed") {
+		t.Fatal(string(blob))
+	}
+	if proposal.Routing.EscalateWhenPeakTokensAbove["summarize"] != 40 {
+		t.Fatal(proposal.Routing.EscalateWhenPeakTokensAbove)
+	}
+	if len(proposal.Observations) != 1 || !strings.Contains(proposal.Observations[0], "aiuditor denied") {
+		t.Fatal(proposal.Observations)
+	}
+	withBodies, _, err := Dream(DreamInput{Records: records, Outcomes: outcomes, History: hist, Bodies: true}, Defaults(), filepath.Join(dir, "proposals"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	found := false
+	for _, item := range withBodies.Evidence {
+		if strings.Contains(item.Excerpt, "PRIVATE-PROMPT-BODY") {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatal("opt-in bodies did not attach the history excerpt")
+	}
+}
+
+func TestApplyRejectsAIULooseningAndRollbackRestores(t *testing.T) {
+	dir := t.TempDir()
+	active := filepath.Join(dir, "active.json")
+	if err := SaveActive(active, Defaults()); err != nil {
+		t.Fatal(err)
+	}
+	bad := filepath.Join(dir, "bad.json")
+	if err := os.WriteFile(bad, []byte(`{"schema":"hypermesh.conductor.rules.v0","aiuditor":{"fail_closed":false}}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := Apply(active, bad); err == nil || !strings.Contains(err.Error(), "AIuditor") {
+		t.Fatal(err)
+	}
+	current, err := Load(active)
+	if err != nil || current.Version != 0 {
+		t.Fatal(err, current)
+	}
+	good := filepath.Join(dir, "good.json")
+	proposal := Defaults()
+	proposal.Version = 1
+	proposal.Routing.EscalateWhenPeakTokensAbove = map[string]int{"summarize": 100}
+	raw, err := Marshal(proposal)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(good, raw, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := Apply(active, good); err != nil {
+		t.Fatal(err)
+	}
+	applied, err := Load(active)
+	if err != nil || applied.Routing.EscalateWhenPeakTokensAbove["summarize"] != 100 {
+		t.Fatal(err, applied)
+	}
+	diff := Diff(Defaults(), applied)
+	if !strings.Contains(diff, "routing.escalate_when_peak_tokens_above.summarize") {
+		t.Fatal(diff)
+	}
+	if err := Rollback(active); err != nil {
+		t.Fatal(err)
+	}
+	restored, err := Load(active)
+	if err != nil || restored.Routing.EscalateWhenPeakTokensAbove["summarize"] != 0 {
+		t.Fatal(err, restored.Routing)
+	}
+}
+
+func TestSaveActiveDoesNotExposeAPartialFile(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "active.json")
+	if err := SaveActive(path, Defaults()); err != nil {
+		t.Fatal(err)
+	}
+	var wg sync.WaitGroup
+	var mu sync.Mutex
+	var got error
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		for i := 0; i < 80; i++ {
+			if _, err := Load(path); err != nil {
+				mu.Lock()
+				got = err
+				mu.Unlock()
+				return
+			}
+		}
+	}()
+	go func() {
+		defer wg.Done()
+		file := Defaults()
+		file.Routing.ClassTiers = map[string]string{"parse": "frontier"}
+		for i := 0; i < 80; i++ {
+			file.Version = i + 1
+			if err := SaveActive(path, file); err != nil {
+				mu.Lock()
+				got = err
+				mu.Unlock()
+				return
+			}
+		}
+	}()
+	wg.Wait()
+	if got != nil {
+		t.Fatal(got)
+	}
+	loaded, err := Load(path)
+	if err != nil || loaded.Routing.ClassTiers["parse"] != "frontier" {
+		t.Fatal(err, loaded.Routing.ClassTiers)
+	}
+}
+
+func TestSuggestCannotUpgrade(t *testing.T) {
+	policy := Defaults()
+	policy.CachePrefix.PreferOnMatch = "cheap"
+	if Suggest(policy, true) != "cheap" {
+		t.Fatal("expected a cheap hint")
+	}
+	tiers := EffectiveClassTiers(nil, Defaults(), "summarize", 100000)
+	if tiers["summarize"] != "" {
+		t.Fatal("size alone must not escalate")
+	}
+	policy.Routing.EscalateWhenPeakTokensAbove = map[string]int{"summarize": 50}
+	tiers = EffectiveClassTiers(nil, policy, "summarize", 80)
+	if tiers["summarize"] != "frontier" {
+		t.Fatal(tiers)
+	}
+	policy.Routing.EscalateWhenPeakTokensAbove["parse"] = 50
+	alias := EffectiveClassTiers(nil, policy, "PARSE", 80)
+	if alias["parse"] != "frontier" || alias["PARSE"] == "frontier" {
+		t.Fatal(alias)
+	}
+	parsing := EffectiveClassTiers(nil, policy, "parsing", 80)
+	if parsing["parse"] != "frontier" {
+		t.Fatal(parsing)
+	}
+}
+
+func TestDreamMedianUsesFailedTasksOnly(t *testing.T) {
+	low := []int{100, 100}
+	high := []int{10000, 10000}
+	var records []metrics.StepRecord
+	var outcomes []Outcome
+	for i := range low {
+		n := low[i]
+		row := step("s1", "summarize", "cheap", &n)
+		row.TaskID = "fail-" + string(rune('a'+i))
+		records = append(records, row)
+		outcomes = append(outcomes, Outcome{TaskID: row.TaskID, StepID: "s1", Kind: "test_failed"})
+	}
+	for i := range high {
+		n := high[i]
+		row := step("s1", "summarize", "cheap", &n)
+		row.TaskID = "ok-" + string(rune('a'+i))
+		records = append(records, row)
+	}
+	proposal, _, err := Dream(DreamInput{Records: records, Outcomes: outcomes}, Defaults(), t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if proposal.Routing.EscalateWhenPeakTokensAbove["summarize"] != 100 {
+		t.Fatal(proposal.Routing.EscalateWhenPeakTokensAbove)
+	}
+}
+
+func TestBodyProposalIsOwnerOnly(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.Chmod(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "0001.json"), []byte("{}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "0002.json"), []byte("{}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	in := 40
+	records := []metrics.StepRecord{
+		step("s1", "summarize", "cheap", &in),
+		step("s2", "summarize", "cheap", &in),
+	}
+	outcomes := []Outcome{
+		{TaskID: "task-1", StepID: "s1", Kind: "test_failed"},
+		{TaskID: "task-1", StepID: "s2", Kind: "test_failed"},
+	}
+	hist := []history.Record{{TaskID: "task-1", StepID: "s1", Summary: "PRIVATE-PROMPT-BODY"}}
+	_, path, err := Dream(DreamInput{Records: records, Outcomes: outcomes, History: hist, Bodies: true}, Defaults(), dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Mode().Perm()&0o077 != 0 {
+		t.Fatalf("mode %o", info.Mode().Perm())
+	}
+	blob, err := os.ReadFile(path)
+	if err != nil || !strings.Contains(string(blob), "PRIVATE-PROMPT-BODY") {
+		t.Fatal(err, string(blob))
+	}
+}
+
+func TestDreamDoesNotShareOutcomesAcrossTasks(t *testing.T) {
+	in := 10
+	first := step("s1", "summarize", "cheap", &in)
+	second := step("s1", "summarize", "cheap", &in)
+	second.TaskID = "task-b"
+	proposal, _, err := Dream(DreamInput{
+		Records:  []metrics.StepRecord{first, second},
+		Outcomes: []Outcome{{TaskID: "task-1", StepID: "s1", Kind: "test_failed"}},
+	}, Defaults(), t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if proposal.Routing.EscalateWhenPeakTokensAbove["summarize"] != 0 {
+		t.Fatal(proposal.Routing.EscalateWhenPeakTokensAbove)
+	}
+}
+
+func TestUnmatchedLinkOutcomesDoNotProposeEdits(t *testing.T) {
+	proposal, _, err := Dream(DreamInput{
+		Records: nil,
+		Outcomes: []Outcome{
+			{TaskID: "other", StepID: "s1", Kind: "link_used", From: "a", To: "b"},
+			{TaskID: "other", StepID: "s2", Kind: "link_used", From: "a", To: "b"},
+		},
+	}, Defaults(), t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(proposal.IndexLinks) != 0 {
+		t.Fatal(proposal.IndexLinks)
+	}
+}
+
+func TestFirstApplyArchivesTheDefaultPolicy(t *testing.T) {
+	dir := t.TempDir()
+	active := filepath.Join(dir, "active.json")
+	proposal := Defaults()
+	proposal.Version = 1
+	proposal.Routing.EscalateWhenPeakTokensAbove = map[string]int{"summarize": 10}
+	raw, err := Marshal(proposal)
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(dir, "proposal.json")
+	if err := os.WriteFile(path, raw, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := Apply(active, path); err != nil {
+		t.Fatal(err)
+	}
+	if err := Rollback(active); err != nil {
+		t.Fatal(err)
+	}
+	restored, err := Load(active)
+	if err != nil || restored.Version != 0 || restored.Routing.EscalateWhenPeakTokensAbove["summarize"] != 0 {
+		t.Fatal(err, restored.Version, restored.Routing.EscalateWhenPeakTokensAbove)
+	}
+}
+
+func TestVersionZeroArchiveSurvivesASecondApply(t *testing.T) {
+	dir := t.TempDir()
+	active := filepath.Join(dir, "active.json")
+	if err := SaveActive(active, Defaults()); err != nil {
+		t.Fatal(err)
+	}
+	write := func(name string, version, limit int) string {
+		proposal := Defaults()
+		proposal.Version = version
+		proposal.Routing.EscalateWhenPeakTokensAbove = map[string]int{"summarize": limit}
+		raw, err := Marshal(proposal)
+		if err != nil {
+			t.Fatal(err)
+		}
+		path := filepath.Join(dir, name)
+		if err := os.WriteFile(path, raw, 0o644); err != nil {
+			t.Fatal(err)
+		}
+		return path
+	}
+	if err := Apply(active, write("one.json", 1, 10)); err != nil {
+		t.Fatal(err)
+	}
+	if err := Apply(active, write("two.json", 2, 20)); err != nil {
+		t.Fatal(err)
+	}
+	if err := Rollback(active); err != nil {
+		t.Fatal(err)
+	}
+	restored, err := Load(active)
+	if err != nil || restored.Version != 1 || restored.Routing.EscalateWhenPeakTokensAbove["summarize"] != 10 {
+		t.Fatal(err, restored.Version, restored.Routing.EscalateWhenPeakTokensAbove)
+	}
+	if err := Rollback(active); err != nil {
+		t.Fatal(err)
+	}
+	baseline, err := Load(active)
+	if err != nil || baseline.Version != 0 {
+		t.Fatal(err, baseline.Version)
+	}
+}
+
+func step(id, class, tier string, input *int) metrics.StepRecord {
+	out := 1
+	return metrics.StepRecord{
+		TaskID: "task-1", StepID: id, JobClass: class, Tier: tier, ModelID: "m",
+		Reason: "policy", InputTokens: input, OutputTokens: &out, PrefixSHA256: "abc",
+		UsageStatus: metrics.StatusMeasured,
+	}
+}
+
+func TestExcerptRequiresMatchingTaskAndStep(t *testing.T) {
+	rows := []history.Record{{TaskID: "other", StepID: "step-1", Summary: "WRONG"}, {TaskID: "target", StepID: "step-1", Summary: "RIGHT"}}
+	if got := excerptFor([]string{outcomeKey("target", "step-1")}, rows); got != "RIGHT" {
+		t.Fatal(got)
+	}
+}

@@ -1,0 +1,42 @@
+# Optional snapshot helper for raw binaries. Linux packages that match the
+# Visor bundle are built by packaging/package.sh, not by this file.
+# Releases stay disabled. Do not create a tag from this config.
+version: 2
+
+project_name: conductor
+
+builds:
+  - id: conductor
+    main: ./cmd/conductor
+    binary: conductor
+    env:
+      - CGO_ENABLED=0
+    flags:
+      - -buildvcs=false
+      - -trimpath
+      - -buildvcs=false
+    ldflags:
+      - -s -w
+    goos:
+      - linux
+      - windows
+      - darwin
+    goarch:
+      - amd64
+      - arm64
+
+archives:
+  - formats: [binary]
+    name_template: "{{ .ProjectName }}_{{ .Os }}_{{ .Arch }}"
+
+checksum:
+  name_template: checksums.txt
+
+snapshot:
+  version_template: "snapshot"
+
+changelog:
+  disable: true
+
+release:
+  disable: true

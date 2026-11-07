@@ -4,9 +4,9 @@ Budgeted, recoverable AI task runtime for Hypermesh: model and host selection, t
 
 ## Status
 
-**Proposed / design stage. Nothing here is built or released yet.**
+**Early slice.** Conductor is a localhost proxy written in Go. It classifies a request, asks the AIuditor hop, and forwards it to a cheap or frontier endpoint. Budgets, durable runs, retrieval, planning, the task tracker, and context compaction are still design. Nothing is released.
 
-This repository currently holds only this README, the license and the security policy. There is no code, no package and no release. Everything under "Planned capabilities" describes intent, not behavior you can use today. The design documents are not public yet, so this README describes the design instead of linking to it.
+`go test ./...` runs the tests. The binary is static. Linux `.deb` and `.rpm` packages follow the Visor bundle layout and are not a release. Design notes: [docs/routing.md](docs/routing.md), [docs/measurement.md](docs/measurement.md), [docs/aiuditor.md](docs/aiuditor.md), [docs/compaction.md](docs/compaction.md), [docs/rules.md](docs/rules.md), and [docs/packaging.md](docs/packaging.md).
 
 ## What Conductor is
 
@@ -75,7 +75,7 @@ Conductor is designed to work without a language model. With rules alone it can 
 - A scoped tool bridge to Visor and the workspace, with the existing approval rules. Tool credentials and files stay off the model host.
 
 **External providers**
-- Controlled routing to external model providers is planned. A fake provider comes first, for development. Real providers are not part of the first work and depend on separate reviews.
+- The proxy forwards to OpenAI, Anthropic, or any OpenAI-compatible endpoint, including a Hypermesh host or a local model. Client credentials for that provider are passed through. A configured environment variable supplies a key only when the client did not send one, or when the tier is set to `auth: env`. Sending private note bodies to an external provider still needs a separate review.
 
 **Security and safety**
 - Policy hooks, defenses against prompt and tool injection, controlled egress, and an audit trail, with integration points to AIuditor.
@@ -84,13 +84,44 @@ Conductor is designed to work without a language model. With rules alone it can 
 ## Non-goals
 
 - No custody of funds. Conductor does not hold or move money.
-- No bring-your-own-key in the first version.
+- No bring-your-own-key product and no billing path. Client credentials are forwarded to that client's provider and are kept out of the journal and the default log. A tier may also name an environment variable for a local or hosted key.
 - Not a replacement for Hypermesh billing or payment. Conductor reserves and meters against budgets; Hypermesh and its billing services own prices, charges and refunds.
 - Not a scheduler for compute. Hypermesh makes the host placement decision.
 
+## Routing and measurement
+
+Conductor listens on `127.0.0.1:8787` and exposes OpenAI-compatible `/v1/chat/completions`, `/v1/responses`, `/v1/embeddings`, and `/v1/models`, plus Anthropic-compatible `/v1/messages`. Streaming responses are server-sent events. A third-party client sets its base URL to this proxy.
+
+Each request is classified, reviewed by the [AIuditor hop](docs/aiuditor.md), then sent to one destination. A failed call stays on that tier.
+
+| Step | Tier |
+| --- | --- |
+| parse, extract, index, classify, embed, summarize, status | cheap (local is the same tier) |
+| plan, architecture, tradeoff, code, review | frontier |
+
+Set the class with `X-Conductor-Class` or a top-level `conductor_class` field (that field is removed before the destination). A suggestion in `X-Conductor-Suggest` that asks for a higher tier is rejected. With no class and no `default_class`, the proxy refuses the call.
+
+When the client omits a system prompt, the configured prefix is inserted. Its canonical hash is stored on the journal row. Stable task and step ids can be sent as `X-Conductor-Task` and `X-Conductor-Step`.
+
+Each row records input tokens, output tokens, tier, model id, latency, and cache-hit tokens when the provider reports them. Missing usage stays null. Prompt bodies and API keys are not written to the journal or the default log. `conductor summary` reports tokens per task, the cheap versus frontier split, and the cache hit rate. Accuracy under compaction modes stays null; those scores belong to [hypermesh-bench#12](https://github.com/hyperme-sh/hypermesh-bench/issues/12). The summary does not publish a savings figure.
+
+```bash
+go build -trimpath -ldflags '-s -w' -o conductor ./cmd/conductor
+./conductor route --config examples/endpoints.json --class parse
+mkdir -p runs
+./conductor serve --config examples/endpoints.json --journal runs/journal.jsonl
+./conductor summary --journal runs/journal.jsonl
+```
+
+`examples/endpoints.json` names loopback and provider placeholders. `serve` and `run` check that the journal directory exists before a provider call. Set `CONDUCTOR_CHEAP_API_KEY` when the cheap tier must use an environment key. Set `CONDUCTOR_PROXY_TOKEN` as well, and send it as `X-Conductor-Token` on any call that should use that key. A client that sends its own provider credential does not send the proxy token.
+
+Tails longer than `compaction.max_tail_tokens` are summarized on the cheap tier. The original tail is stored in `history.jsonl` next to the metrics journal. The system prompt and tools stay the prefix that is hashed.
+
+`conductor dream` replays the journal and writes an inactive rule proposal. `conductor rules diff`, `apply`, and `rollback` review that file. Proposals cannot loosen AIuditor rules. Prompt bodies are included only with `dream --bodies`.
+
 ## Contributing
 
-Issues are welcome. Please open an issue to discuss an idea before sending a pull request. There is no code to contribute to yet.
+Issues are welcome. Please open an issue to discuss an idea before sending a pull request.
 
 ## License
 

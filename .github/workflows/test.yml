@@ -1,0 +1,83 @@
+name: Tests
+on:
+  pull_request:
+  push:
+    branches: [main]
+permissions:
+  contents: read
+jobs:
+  test:
+    runs-on: ubuntu-24.04
+    container:
+      image: golang:1.22-bookworm
+    steps:
+      - name: Install git
+        run: apt-get update && apt-get install -y --no-install-recommends git && rm -rf /var/lib/apt/lists/*
+      - uses: actions/checkout@v7.0.1
+        with:
+          persist-credentials: false
+      - name: Mark the workspace safe for git
+        run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
+      - name: Test
+        run: go test ./...
+      - name: Static linux binary
+        run: |
+          CGO_ENABLED=0 go build -buildvcs=false -trimpath -ldflags='-s -w' -o conductor ./cmd/conductor
+          ldd conductor > /tmp/ldd.txt 2>&1 || true
+          grep -q 'not a dynamic executable' /tmp/ldd.txt
+
+  packages:
+    runs-on: ubuntu-24.04
+    container:
+      image: golang:1.22-bookworm
+    steps:
+      - name: Install packagers
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends ca-certificates curl file git rpm
+          curl -fsSL -o /tmp/nfpm.tar.gz \
+            https://github.com/goreleaser/nfpm/releases/download/v2.47.0/nfpm_2.47.0_Linux_x86_64.tar.gz
+          tar -C /tmp -xzf /tmp/nfpm.tar.gz nfpm
+          install -m 0755 /tmp/nfpm /usr/local/bin/nfpm
+          nfpm --version
+          rm -rf /var/lib/apt/lists/*
+      - uses: actions/checkout@v7.0.1
+        with:
+          persist-credentials: false
+      - name: Mark the workspace safe for git
+        run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
+      - name: Package
+        run: bash packaging/package.sh
+      - name: Upload packages
+        uses: actions/upload-artifact@v7.0.1
+        with:
+          name: hypermesh-conductor-linux
+          path: dist/*
+          if-no-files-found: error
+
+  raw-binaries:
+    runs-on: ubuntu-24.04
+    container:
+      image: golang:1.22-bookworm
+    strategy:
+      fail-fast: false
+      matrix:
+        goos: [windows, darwin]
+        goarch: [amd64, arm64]
+    steps:
+      - name: Install git
+        run: apt-get update && apt-get install -y --no-install-recommends git && rm -rf /var/lib/apt/lists/*
+      - uses: actions/checkout@v7.0.1
+        with:
+          persist-credentials: false
+      - name: Cross-compile
+        env:
+          CGO_ENABLED: "0"
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+        run: |
+          ext=""
+          if [ "$GOOS" = "windows" ]; then ext=".exe"; fi
+          mkdir -p dist
+          go build -buildvcs=false -trimpath -ldflags='-s -w' -o "dist/conductor-${GOOS}-${GOARCH}${ext}" ./cmd/conductor
+          ls -l "dist/conductor-${GOOS}-${GOARCH}${ext}"
