@@ -203,6 +203,9 @@ func textOfAll(items []json.RawMessage) string {
 			buf.WriteString("[tool_result " + id + "] ")
 		}
 		writeSummaryContent(&buf, obj["content"])
+		if refusal, ok := obj["refusal"].(string); role == "assistant" && ok && refusal != "" {
+			buf.WriteString("\n[refusal] " + refusal)
+		}
 		buf.WriteString("\n[/message]\n")
 	}
 	return buf.String()
