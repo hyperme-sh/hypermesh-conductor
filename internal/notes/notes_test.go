@@ -1187,3 +1187,41 @@ func TestCollectionIndexCannotBeRedirectedFromNotes(t *testing.T) {
 		t.Fatal(err, ok)
 	}
 }
+
+func TestSyncViaCollectionAliasKeepsCanonicalRows(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("isolated XDG cache")
+	}
+	t.Setenv("XDG_CACHE_HOME", t.TempDir())
+	dir, other := t.TempDir(), t.TempDir()
+	writeNote(t, dir, "one.md", "# One\nCanonical note\n")
+	alias := filepath.Join(t.TempDir(), "collection")
+	if err := os.Symlink(dir, alias); err != nil {
+		t.Fatal(err)
+	}
+	store, err := OpenCollection(alias, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	for _, path := range []string{dir, alias} {
+		if _, err := store.Sync(path); err != nil {
+			t.Fatal(err)
+		}
+		if _, ok, err := store.Get("one"); err != nil || !ok {
+			t.Fatal(err, ok)
+		}
+	}
+	if err := os.Remove(alias); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(other, alias); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Sync(alias); err == nil {
+		t.Fatal("accepted retargeted collection")
+	}
+	if _, ok, err := store.Get("one"); err != nil || !ok {
+		t.Fatal(err, ok)
+	}
+}

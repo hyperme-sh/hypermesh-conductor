@@ -54,7 +54,12 @@ func OpenCollection(dir, configured string) (*Store, error) {
 	if err := ensureIndexParent(parent, true); err != nil {
 		return nil, err
 	}
-	return Open(filepath.Join(parent, filepath.Base(path)))
+	store, err := Open(filepath.Join(parent, filepath.Base(path)))
+	if err != nil {
+		return nil, err
+	}
+	store.collection = realCollection
+	return store, nil
 }
 
 func within(root, path string) bool {

@@ -27,7 +27,8 @@ const maxSyncFiles = 10000
 // Store is the derived SQLite index. Deleting the database and rebuilding
 // reproduces it from Markdown.
 type Store struct {
-	db *sql.DB
+	collection string
+	db         *sql.DB
 }
 
 // Open opens or creates the index database. The database file is owner-only
@@ -239,6 +240,17 @@ func (s *Store) Sync(dir string) (Stats, error) {
 // A reader therefore never observes a new content generation whose wikilinks
 // are still unresolved.
 func (s *Store) syncDir(dir string, replace bool) (Stats, error) {
+	abs, err := filepath.Abs(dir)
+	if err != nil {
+		return Stats{}, err
+	}
+	dir, err = filepath.EvalSymlinks(abs)
+	if err != nil {
+		return Stats{}, err
+	}
+	if s.collection != "" && dir != s.collection {
+		return Stats{}, fmt.Errorf("notes collection changed after opening its index")
+	}
 	files, err := markdownFiles(dir)
 	if err != nil {
 		return Stats{}, err
