@@ -263,6 +263,8 @@ func TestHelpHasNoKeyFlag(t *testing.T) {
 }
 
 func TestDreamNotesDiffKeepsExistingLinks(t *testing.T) {
+	// A derived index belongs to this test, never to the runner user.
+	t.Setenv("XDG_CACHE_HOME", t.TempDir())
 	dir := t.TempDir()
 	notesDir := filepath.Join(dir, "notes")
 	if err := os.MkdirAll(notesDir, 0o755); err != nil {
