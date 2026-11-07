@@ -243,6 +243,9 @@ func (p *Proxy) cheapSummary(ctx context.Context, client *http.Request, tail str
 	if err := json.Unmarshal(body, &root); err != nil {
 		return "", parsed, latency, measuredPrefix, err
 	}
+	if !summaryComplete(root, anthropic) || providerError(body) {
+		return "", parsed, latency, measuredPrefix, fmt.Errorf("compaction summary was incomplete")
+	}
 	text := assistantText(root)
 	if anthropic {
 		text = anthropicSummaryText(root)
@@ -251,6 +254,22 @@ func (p *Proxy) cheapSummary(ctx context.Context, client *http.Request, tail str
 		return "", parsed, latency, measuredPrefix, fmt.Errorf("compaction summary was empty")
 	}
 	return text, parsed, latency, measuredPrefix, nil
+}
+
+// Reject explicit partial, filtered and tool-call finishes. Some local
+// OpenAI-compatible endpoints omit finish metadata on a complete response.
+func summaryComplete(root map[string]any, anthropic bool) bool {
+	if anthropic {
+		reason, _ := root["stop_reason"].(string)
+		return reason == "" || reason == "end_turn" || reason == "stop_sequence"
+	}
+	choices, _ := root["choices"].([]any)
+	if len(choices) == 0 {
+		return false
+	}
+	choice, _ := choices[0].(map[string]any)
+	reason, _ := choice["finish_reason"].(string)
+	return reason == "" || reason == "stop"
 }
 
 func anthropicSummaryText(root map[string]any) string {
