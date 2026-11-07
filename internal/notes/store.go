@@ -372,6 +372,7 @@ func readNotes(dir string, files []string) ([]Note, []string, error) {
 	incoming := make([]Note, 0, len(files))
 	counts := map[string]int{}
 	var total int64
+	remainingLinks := maxSyncLinks
 	if len(files) > maxSyncFiles {
 		return nil, nil, fmt.Errorf("note count exceeds sync quota")
 	}
@@ -391,7 +392,11 @@ func readNotes(dir string, files []string) ([]Note, []string, error) {
 			return nil, nil, err
 		}
 		total += int64(len(data))
-		note := Parse(path, data)
+		note, matches, overflow := parseLimited(path, data, min(maxNoteLinks, remainingLinks))
+		if overflow {
+			return nil, nil, fmt.Errorf("notes exceed wikilink quota")
+		}
+		remainingLinks -= matches
 		incoming = append(incoming, note)
 		if note.idFromName {
 			counts[note.ID]++

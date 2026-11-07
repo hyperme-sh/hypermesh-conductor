@@ -48,6 +48,14 @@ type Note struct {
 
 // Parse reads Obsidian-style markdown: YAML frontmatter, a title, and wikilinks.
 func Parse(path string, data []byte) Note {
+	n, _, _ := parseLimited(path, data, maxNoteLinks)
+	return n
+}
+
+const maxNoteLinks = 256
+const maxSyncLinks = 8192
+
+func parseLimited(path string, data []byte, limit int) (Note, int, bool) {
 	text := strings.ReplaceAll(string(data), "\r\n", "\n")
 	sum := sha256.Sum256(data)
 	meta, body := splitFrontmatter(text)
@@ -77,11 +85,12 @@ func Parse(path string, data []byte) Note {
 			}
 		}
 	}
+	links, count, overflow := wikiLinksLimited(text, limit)
 	return Note{
 		ID: id, Path: path, Title: title, Type: kind, Status: status, Order: order,
 		Tags: parseTags(meta["tags"]), Body: strings.TrimSpace(body),
-		Hash: hex.EncodeToString(sum[:]), Links: wikiLinks(text), idFromName: fromName,
-	}
+		Hash: hex.EncodeToString(sum[:]), Links: links, idFromName: fromName,
+	}, count, overflow
 }
 
 func splitFrontmatter(text string) (map[string]string, string) {
@@ -195,9 +204,19 @@ func titleOf(body, path string) string {
 }
 
 func wikiLinks(text string) []string {
+	links, _, _ := wikiLinksLimited(text, maxNoteLinks)
+	return links
+}
+
+func wikiLinksLimited(text string, limit int) ([]string, int, bool) {
 	seen := map[string]struct{}{}
 	var links []string
-	for _, match := range linkPattern.FindAllStringSubmatch(text, -1) {
+	matches := linkPattern.FindAllStringSubmatch(text, limit+1)
+	overflow := len(matches) > limit
+	if overflow {
+		matches = matches[:limit]
+	}
+	for _, match := range matches {
 		target := strings.TrimSpace(match[1])
 		if target == "" {
 			continue
@@ -208,7 +227,7 @@ func wikiLinks(text string) []string {
 		seen[target] = struct{}{}
 		links = append(links, target)
 	}
-	return links
+	return links, len(matches), overflow
 }
 
 // Closed reports whether a status means the note is finished.
