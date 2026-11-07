@@ -1726,6 +1726,10 @@ func TestEmptySummaryKeepsTheOriginalTail(t *testing.T) {
 }
 
 func TestOversizedProviderBodyIsRejected(t *testing.T) {
+	// Isolate the per-response cap from the shared request/response budget.
+	previous := bodyLimit
+	bodyLimit = 2 * maxBody
+	t.Cleanup(func() { bodyLimit = previous })
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_, _ = io.Copy(w, io.LimitReader(neverEnding('a'), (32<<20)+8))
 	}))
