@@ -2140,3 +2140,23 @@ func TestPrefixMatchDescribesReviewedRequest(t *testing.T) {
 		t.Fatal(rec.Code, err, records)
 	}
 }
+
+func TestStreamingHeaderWaitUsesSelectedTierTimeout(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		select {
+		case <-r.Context().Done():
+			return
+		case <-time.After(250 * time.Millisecond):
+		}
+		_, _ = io.WriteString(w, "data: [DONE]\n\n")
+	}))
+	defer upstream.Close()
+	dir := t.TempDir()
+	cfg := loadTestConfig(t, dir, upstream.URL+"/v1", upstream.URL+"/v1", config.AuthPassthrough, config.ProviderOpenAICompatible)
+	cfg.Cheap.Timeout = 50 * time.Millisecond
+	cfg.Frontier.Timeout = time.Second
+	rec := do(New(cfg, aiuditor.Stub{}, openJournal(t, dir)), "/v1/chat/completions", "parse", "task", "step", "", `{"stream":true,"messages":[{"role":"user","content":"hello"}]}`)
+	if rec.Code != http.StatusBadGateway {
+		t.Fatal(rec.Code, rec.Body.String())
+	}
+}

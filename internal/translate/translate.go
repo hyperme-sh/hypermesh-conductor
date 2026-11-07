@@ -797,6 +797,9 @@ func chatResponseToAnthropic(body []byte) ([]byte, error) {
 		choice, _ := choices[0].(map[string]any)
 		message, _ := choice["message"].(map[string]any)
 		text, _ = contentToText(message["content"])
+		if refusal, ok := message["refusal"].(string); ok {
+			text += refusal
+		}
 		if calls, ok := message["tool_calls"].([]any); ok {
 			for _, call := range calls {
 				obj, _ := call.(map[string]any)
