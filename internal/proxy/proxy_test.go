@@ -2334,3 +2334,29 @@ func TestKeylessEnvOnlyTierNeverForwardsCallerCredentials(t *testing.T) {
 		}
 	}
 }
+
+func TestStreamingErrorBodiesCannotHoldTheHandler(t *testing.T) {
+	for _, status := range []int{302, 400, 500} {
+		t.Run(fmt.Sprint(status), func(t *testing.T) {
+			upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.WriteHeader(status)
+				w.(http.Flusher).Flush()
+				<-r.Context().Done()
+			}))
+			defer upstream.Close()
+			dir := t.TempDir()
+			cfg := loadTestConfig(t, dir, upstream.URL+"/v1", upstream.URL+"/v1", config.AuthPassthrough, config.ProviderOpenAICompatible)
+			cfg.Cheap.Timeout = 100 * time.Millisecond
+			done := make(chan struct{})
+			go func() {
+				defer close(done)
+				do(New(cfg, aiuditor.Stub{}, openJournal(t, dir)), "/v1/chat/completions", "parse", "task", "step", "", `{"messages":[{"role":"user","content":"hi"}],"stream":true}`)
+			}()
+			select {
+			case <-done:
+			case <-time.After(time.Second):
+				t.Fatal("error response held handler")
+			}
+		})
+	}
+}

@@ -242,3 +242,29 @@ func TestRecordRules(t *testing.T) {
 func writeFile(path, body string) error {
 	return os.WriteFile(path, []byte(body), 0o644)
 }
+
+func TestJournalRotationBoundsDiskAndPreservesRecentRows(t *testing.T) {
+	old := maxJournalBytes
+	maxJournalBytes = 1500
+	t.Cleanup(func() { maxJournalBytes = old })
+	path := filepath.Join(t.TempDir(), "journal.jsonl")
+	for i := 0; i < 20; i++ {
+		j, err := OpenJournal(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := j.Append(row(nil)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, p := range []string{path, path + ".1"} {
+		info, err := os.Stat(p)
+		if err != nil || info.Size() > maxJournalBytes {
+			t.Fatal(err, info)
+		}
+	}
+	rows, err := ReadJournal(path)
+	if err != nil || len(rows) == 0 || len(rows) >= 20 {
+		t.Fatal(err, len(rows))
+	}
+}

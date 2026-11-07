@@ -94,6 +94,16 @@ var fallbackBudget = responseBudget{
 // ErrResponseBudget is always fatal, including when transport fail-open is configured.
 var ErrResponseBudget = fmt.Errorf("aiuditor response budget exceeded")
 
+// ReasonText bounds untrusted policy explanations before response or journal use.
+func ReasonText(reason string) string {
+	const limit = 1024
+	const suffix = " [truncated]"
+	if len(reason) <= limit {
+		return reason
+	}
+	return strings.ToValidUTF8(reason[:limit-len(suffix)], "") + suffix
+}
+
 // Hop reviews one request.
 type Hop interface {
 	Review(ctx context.Context, env Envelope) (Verdict, error)
@@ -329,6 +339,7 @@ func (h HTTP) Review(ctx context.Context, env Envelope) (Verdict, error) {
 	if err := json.Unmarshal(respBody, &verdict); err != nil {
 		return Verdict{}, fmt.Errorf("aiuditor response was not JSON")
 	}
+	verdict.Reason = ReasonText(verdict.Reason)
 	switch verdict.Action {
 	case Allow, Deny, Modify:
 		verdict.release = release

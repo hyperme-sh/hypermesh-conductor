@@ -319,7 +319,7 @@ func (p *Proxy) forward(w http.ResponseWriter, client *http.Request, upstream *h
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode >= 300 && resp.StatusCode < 400 {
-		_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 1<<20))
+		_ = resp.Body.Close()
 		ms := elapsedMS(start)
 		record.LatencyMS = &ms
 		msg := fmt.Sprintf("provider HTTP %d", resp.StatusCode)
@@ -329,6 +329,12 @@ func (p *Proxy) forward(w http.ResponseWriter, client *http.Request, upstream *h
 		return
 	}
 	if resp.StatusCode >= 400 {
+		timeout := tier.Timeout
+		if timeout <= 0 {
+			timeout = 60 * time.Second
+		}
+		timer := time.AfterFunc(timeout, func() { _ = resp.Body.Close() })
+		defer timer.Stop()
 		raw, held, readErr := readReserved(resp.Body, 1<<20)
 		defer releaseBody(held)
 		if errors.Is(readErr, errBodyBudget) {
@@ -1027,7 +1033,7 @@ func (p *Proxy) applyReview(w http.ResponseWriter, r *http.Request, base *metric
 	}
 	switch verdict.Action {
 	case aiuditor.Deny:
-		msg := "aiuditor deny: " + verdict.Reason
+		msg := "aiuditor deny: " + aiuditor.ReasonText(verdict.Reason)
 		base.Error = &msg
 		base.UsageStatus = metrics.StatusUncertain
 		p.finish(w, r, http.StatusForbidden, nil, *base, nil, false)

@@ -173,7 +173,7 @@ func (p *Proxy) cheapSummary(ctx context.Context, client *http.Request, tail str
 			return "", usage.UncertainUsage(), 0, hopErr
 		}
 	} else if verdict.Action == aiuditor.Deny {
-		return "", usage.UncertainUsage(), 0, fmt.Errorf("aiuditor deny: %s", verdict.Reason)
+		return "", usage.UncertainUsage(), 0, fmt.Errorf("aiuditor deny: %s", aiuditor.ReasonText(verdict.Reason))
 	} else if verdict.Action == aiuditor.Modify {
 		if !json.Valid(verdict.Body) {
 			return "", usage.UncertainUsage(), 0, fmt.Errorf("aiuditor modify was not JSON")

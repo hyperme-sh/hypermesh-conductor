@@ -156,9 +156,12 @@ func (r StepRecord) Wire() wireRecord {
 }
 
 // Journal is an append-only measurement log.
+// The current journal and one previous segment each have this bounded size.
+var maxJournalBytes int64 = 32 << 20
+var journalMu sync.Mutex
+
 type Journal struct {
 	path string
-	mu   sync.Mutex
 }
 
 // Path is the journal file.
@@ -183,9 +186,25 @@ func (j *Journal) Append(record StepRecord) error {
 	if err != nil {
 		return err
 	}
-	j.mu.Lock()
-	defer j.mu.Unlock()
-	file, err := os.OpenFile(j.path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
+	journalMu.Lock()
+	defer journalMu.Unlock()
+	if int64(len(raw)+1) > maxJournalBytes {
+		return fmt.Errorf("journal row exceeds segment quota")
+	}
+	if info, err := os.Stat(j.path); err == nil {
+		if info.Size()+int64(len(raw)+1) > maxJournalBytes {
+			backup := j.path + ".1"
+			if err := os.Remove(backup); err != nil && !os.IsNotExist(err) {
+				return err
+			}
+			if err := os.Rename(j.path, backup); err != nil {
+				return err
+			}
+		}
+	} else if !os.IsNotExist(err) {
+		return err
+	}
+	file, err := os.OpenFile(j.path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600)
 	if err != nil {
 		return err
 	}
@@ -198,6 +217,29 @@ func (j *Journal) Append(record StepRecord) error {
 
 // ReadJournal loads every row. A bad line fails the read.
 func ReadJournal(path string) ([]StepRecord, error) {
+	journalMu.Lock()
+	defer journalMu.Unlock()
+	var records []StepRecord
+	if _, err := os.Stat(path + ".1"); err == nil {
+		previous, err := readJournalFile(path + ".1")
+		if err != nil {
+			return nil, err
+		}
+		records = append(records, previous...)
+	} else if !os.IsNotExist(err) {
+		return nil, err
+	}
+	if _, err := os.Stat(path); os.IsNotExist(err) && len(records) > 0 {
+		return records, nil
+	}
+	current, err := readJournalFile(path)
+	if err != nil {
+		return nil, err
+	}
+	return append(records, current...), nil
+}
+
+func readJournalFile(path string) ([]StepRecord, error) {
 	file, err := os.Open(path)
 	if err != nil {
 		if os.IsNotExist(err) {
