@@ -142,7 +142,7 @@ func (p *Proxy) cheapSummary(ctx context.Context, client *http.Request, tail str
 	if err != nil {
 		return "", usage.UncertainUsage(), 0, measuredPrefix, err
 	}
-	wire, err := translate.Request(translate.ProtoChat, tier.Provider, tier.Model, raw)
+	wire, err := translateTierRequest(translate.ProtoChat, tier, raw)
 	if err != nil {
 		return "", usage.UncertainUsage(), 0, measuredPrefix, err
 	}

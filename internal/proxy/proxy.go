@@ -302,7 +302,7 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"error": map[string]any{"message": err.Error()}})
 		return
 	}
-	wire, err := translate.Request(proto, tier.Provider, tier.Model, forced)
+	wire, err := translateTierRequest(proto, tier, forced)
 	if err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"error": map[string]any{"message": err.Error()}})
 		return

@@ -3,8 +3,23 @@ package proxy
 import (
 	"encoding/json"
 	"fmt"
+
+	"github.com/hyperme-sh/hypermesh-conductor/internal/config"
 	"github.com/hyperme-sh/hypermesh-conductor/internal/translate"
 )
+
+// Anthropic translation supplies a required max_tokens default. Apply the
+// recipe first so that default cannot mask an omitted or malformed client limit.
+func translateTierRequest(protocol string, tier config.Tier, body []byte) (translate.Wire, error) {
+	if tier.Provider == config.ProviderAnthropic && (protocol == translate.ProtoChat || protocol == translate.ProtoResponses) {
+		var err error
+		body, err = limitOutput(protocol, body, tier.OutputLimit)
+		if err != nil {
+			return translate.Wire{}, err
+		}
+	}
+	return translate.Request(protocol, tier.Provider, tier.Model, body)
+}
 
 // Apply to the final provider payload, including AIuditor rewrites.
 func limitOutput(protocol string, body []byte, limit int) ([]byte, error) {
