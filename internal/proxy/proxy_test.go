@@ -2089,3 +2089,23 @@ func TestStreamingIdleTimeoutResetsAfterProgress(t *testing.T) {
 		t.Fatal(string(data), err)
 	}
 }
+
+func TestInstructionArraysAffectPrefixHash(t *testing.T) {
+	for _, tc := range []struct{ proto, key string }{{translate.ProtoChat, "messages"}, {translate.ProtoResponses, "input"}} {
+		makeBody := func(language, question string) []byte {
+			return []byte(`{"instructions":"stable","` + tc.key + `":[{"role":"developer","content":[{"type":"input_text","text":"` + language + `"}]},{"role":"user","content":"` + question + `"}]}`)
+		}
+		first, err := hashBody(tc.proto, makeBody("French", "one"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		second, err := hashBody(tc.proto, makeBody("German", "one"))
+		if err != nil || first == second {
+			t.Fatal(err, first, second)
+		}
+		same, err := hashBody(tc.proto, makeBody("French", "two"))
+		if err != nil || first != same {
+			t.Fatal(err, first, same)
+		}
+	}
+}
