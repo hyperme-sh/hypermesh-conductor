@@ -2429,3 +2429,30 @@ func TestInstructionArraysAffectPrefixHash(t *testing.T) {
 		}
 	}
 }
+
+func TestPrefixHashPreservesLargeSchemaIntegers(t *testing.T) {
+	first, err := hashBody(translate.ProtoMessages, []byte(`{"system":"same","tools":[{"name":"lookup","input_schema":{"const":9007199254740992}}]}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := hashBody(translate.ProtoMessages, []byte(`{"system":"same","tools":[{"name":"lookup","input_schema":{"const":9007199254740993}}]}`))
+	if err != nil || first == second {
+		t.Fatal(err, first, second)
+	}
+}
+
+func TestPrefixMatchDescribesReviewedRequest(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.WriteString(w, `{"usage":{"prompt_tokens":1,"completion_tokens":1}}`)
+	}))
+	defer upstream.Close()
+	dir := t.TempDir()
+	cfg := loadTestConfig(t, dir, upstream.URL+"/v1", upstream.URL+"/v1", config.AuthPassthrough, config.ProviderOpenAICompatible)
+	hop := aiuditor.Stub{Rules: aiuditor.Rules{Replace: []aiuditor.ReplaceRule{{From: cfg.Prefix.System, To: "changed instructions", Reason: "review"}}}}
+	journal := openJournal(t, dir)
+	rec := do(New(cfg, hop, journal), "/v1/chat/completions", "parse", "task", "step", "", `{"messages":[{"role":"user","content":"hello"}]}`)
+	records, err := metrics.ReadJournal(journal.Path())
+	if rec.Code != http.StatusOK || err != nil || len(records) != 1 || records[0].PrefixCacheMatch == nil || *records[0].PrefixCacheMatch {
+		t.Fatal(rec.Code, err, records)
+	}
+}

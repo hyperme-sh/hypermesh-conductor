@@ -289,8 +289,14 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"error": map[string]any{"message": err.Error()}})
 		return
 	}
+	base.PrefixCacheMatch = nil
 	if hash, err := hashBody(wire.Protocol, wire.Body); err == nil {
 		base.PrefixSHA256 = hash
+		configured, err := p.prefixHash(wire.Protocol)
+		if err == nil {
+			match := hash == configured
+			base.PrefixCacheMatch = &match
+		}
 	}
 	secrets, authReq, err := p.upstreamRequest(r, tier, wire, stream)
 	if err != nil {
@@ -850,7 +856,9 @@ func (p *Proxy) prefixHash(proto string) (string, error) {
 
 func hashBody(proto string, body []byte) (string, error) {
 	var root map[string]any
-	if err := json.Unmarshal(body, &root); err != nil {
+	decoder := json.NewDecoder(bytes.NewReader(body))
+	decoder.UseNumber()
+	if err := decoder.Decode(&root); err != nil {
 		return "", err
 	}
 	system := ""
