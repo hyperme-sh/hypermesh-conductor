@@ -1035,3 +1035,19 @@ func TestIndexRejectsSymlinkDirectoryWithoutChangingTarget(t *testing.T) {
 		t.Fatal(err, entries)
 	}
 }
+
+func TestSearchRanksRelevantNotesBeforeLimitingSeeds(t *testing.T) {
+	dir := t.TempDir()
+	for _, name := range []string{"a", "b", "c", "d", "e", "f"} {
+		writeNote(t, dir, name+".md", "# Background\nthe unrelated background note\n")
+	}
+	writeNote(t, dir, "z.md", "# Relevant\nthe uniquealpha distinctive note\n")
+	store := openTestStore(t, dir)
+	if _, err := store.Rebuild(dir); err != nil {
+		t.Fatal(err)
+	}
+	ids, err := store.Search("the uniquealpha", 5)
+	if err != nil || len(ids) == 0 || ids[0] != "z" {
+		t.Fatal(err, ids)
+	}
+}

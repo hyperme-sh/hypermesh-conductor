@@ -641,7 +641,7 @@ func (s *Store) Search(text string, limit int) ([]string, error) {
 	if query == "" || limit <= 0 {
 		return nil, nil
 	}
-	rows, err := s.db.Query(`SELECT id FROM notes_fts WHERE notes_fts MATCH ? LIMIT ?`, query, limit)
+	rows, err := s.db.Query(`SELECT id FROM notes_fts WHERE notes_fts MATCH ? ORDER BY rank, id LIMIT ?`, query, limit)
 	if err != nil {
 		return nil, nil
 	}
