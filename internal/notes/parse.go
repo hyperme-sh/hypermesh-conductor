@@ -109,7 +109,7 @@ func splitFrontmatter(text string) (map[string]string, string) {
 // yamlScalar decodes one frontmatter value. Quoted scalars are values, not
 // the quote characters stored around them.
 func yamlScalar(raw string) string {
-	value := strings.TrimSpace(raw)
+	value := strings.TrimSpace(withoutYAMLComment(raw))
 	if len(value) < 2 {
 		return value
 	}
@@ -130,6 +130,41 @@ func yamlScalar(raw string) string {
 	default:
 		return value
 	}
+}
+
+// A separated # starts a comment outside a quoted scalar. Quoting is only
+// special at the beginning of a scalar, including items in a flow sequence.
+func withoutYAMLComment(raw string) string {
+	var quote byte
+	start := true
+	for i := 0; i < len(raw); i++ {
+		ch := raw[i]
+		if quote != 0 {
+			if quote == '"' && ch == '\\' {
+				i++
+				continue
+			}
+			if ch == quote {
+				if quote == '\'' && i+1 < len(raw) && raw[i+1] == '\'' {
+					i++
+					continue
+				}
+				quote = 0
+			}
+			continue
+		}
+		if ch == '#' && (i == 0 || raw[i-1] == ' ' || raw[i-1] == '\t') {
+			return raw[:i]
+		}
+		if ch == ' ' || ch == '\t' {
+			continue
+		}
+		if start && (ch == '"' || ch == '\'') {
+			quote = ch
+		}
+		start = ch == '[' || ch == ','
+	}
+	return raw
 }
 
 func parseTags(raw string) []string {

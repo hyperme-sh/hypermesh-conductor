@@ -201,6 +201,7 @@ CREATE TABLE IF NOT EXISTS links (
   dst TEXT,
   PRIMARY KEY (src, target)
 );
+CREATE INDEX IF NOT EXISTS links_destination ON links(dst, src);
 CREATE VIRTUAL TABLE IF NOT EXISTS notes_fts USING fts5(id, title, body, tags, tokenize = 'porter');
 `)
 	return err

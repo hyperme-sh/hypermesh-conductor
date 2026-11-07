@@ -1124,3 +1124,25 @@ func TestIndexRejectsLinkedArtifacts(t *testing.T) {
 		})
 	}
 }
+
+func TestMetadataCommentsPreserveQuotedHashes(t *testing.T) {
+	note := Parse("n.md", []byte("---\nid: alpha # stable ID\ntype: goal # tracked\nstatus: done # completed\n---\n# Goal\n"))
+	if note.ID != "alpha" || note.Type != "goal" || note.Status != "done" {
+		t.Fatal(note)
+	}
+	for raw, want := range map[string]string{`"alpha # literal" # metadata`: "alpha # literal", `'it''s # literal' # comment`: "it's # literal", `plain#hash # comment`: "plain#hash", `owner's value # comment`: "owner's value", `["a # b", c] # comment`: `["a # b", c]`} {
+		if got := yamlScalar(raw); got != want {
+			t.Fatal(raw, got, want)
+		}
+	}
+}
+
+func TestBacklinksUseDestinationIndex(t *testing.T) {
+	store := openTestStore(t, t.TempDir())
+	var id, parent, unused int
+	var detail string
+	err := store.db.QueryRow(`EXPLAIN QUERY PLAN SELECT src FROM links WHERE dst=?`, "id").Scan(&id, &parent, &unused, &detail)
+	if err != nil || !strings.Contains(detail, "links_destination") {
+		t.Fatal(err, detail)
+	}
+}
