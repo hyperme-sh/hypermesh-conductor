@@ -116,21 +116,27 @@ func (s *Store) makeRoom(task string, need int) error {
 			taskTotal += sizes[i]
 		}
 	}
-	drop := 0
-	for drop < len(lines) && (total+need > maxHistoryBytes || taskTotal+need > maxTaskHistoryBytes) {
-		total -= sizes[drop]
-		if tasks[drop] == task {
-			taskTotal -= sizes[drop]
+	retained := make([][]byte, 0, len(lines))
+	for i, line := range lines {
+		if tasks[i] == task && taskTotal+need > maxTaskHistoryBytes {
+			total -= sizes[i]
+			taskTotal -= sizes[i]
+			continue
 		}
+		retained = append(retained, line)
+	}
+	drop := 0
+	for drop < len(retained) && total+need > maxHistoryBytes {
+		total -= len(retained[drop]) + 1
 		drop++
 	}
 	if total+need > maxHistoryBytes || taskTotal+need > maxTaskHistoryBytes {
 		return fmt.Errorf("history record exceeds the quota")
 	}
-	if drop == 0 {
+	if len(retained) == len(lines) && drop == 0 {
 		return nil
 	}
-	return s.rewrite(lines[drop:])
+	return s.rewrite(retained[drop:])
 }
 
 func taskIDOf(line []byte) string {
