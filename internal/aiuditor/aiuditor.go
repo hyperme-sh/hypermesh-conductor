@@ -290,11 +290,17 @@ func (h HTTP) Review(ctx context.Context, env Envelope) (Verdict, error) {
 	if client == nil {
 		client = &http.Client{Timeout: timeout}
 	}
-	resp, err := client.Do(req)
+	// Copy injected clients so enforcing the redirect boundary has no shared mutation.
+	boundedClient := *client
+	boundedClient.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
+	resp, err := boundedClient.Do(req)
 	if err != nil {
 		return Verdict{}, fmt.Errorf("aiuditor unreachable")
 	}
 	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return Verdict{}, fmt.Errorf("aiuditor HTTP %d", resp.StatusCode)
+	}
 	budget, ok := ctx.Value(responseBudgetKey{}).(responseBudget)
 	if !ok {
 		budget = fallbackBudget
