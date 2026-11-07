@@ -614,3 +614,17 @@ func TestChatRefusalSurvivesMessagesTranslation(t *testing.T) {
 		t.Fatal(string(streamed))
 	}
 }
+
+func TestStrictToolsCannotBeSilentlyWeakened(t *testing.T) {
+	for _, tc := range []struct{ proto, body string }{
+		{ProtoChat, `{"messages":[],"tools":[{"type":"function","function":{"name":"lookup","strict":true,"parameters":{"type":"object"}}}]}`},
+		{ProtoResponses, `{"input":"hi","tools":[{"type":"function","name":"lookup","strict":true,"parameters":{"type":"object"}}]}`},
+	} {
+		if _, err := Request(tc.proto, ProviderAnthropic, "model", []byte(tc.body)); err == nil || !strings.Contains(err.Error(), "strict") {
+			t.Fatal(err)
+		}
+		if _, err := Request(tc.proto, ProviderOpenAI, "model", []byte(tc.body)); err != nil {
+			t.Fatal(err)
+		}
+	}
+}

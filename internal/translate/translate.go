@@ -139,6 +139,9 @@ func chatToAnthropic(body []byte, model string) ([]byte, error) {
 	if err := decodeJSON(body, &req); err != nil {
 		return nil, fmt.Errorf("request body is not JSON")
 	}
+	if err := rejectStrictTools(req); err != nil {
+		return nil, err
+	}
 	if err := rejectResponseFormat(req); err != nil {
 		return nil, err
 	}
@@ -212,6 +215,9 @@ func responsesToAnthropic(body []byte, model string) ([]byte, error) {
 	var req map[string]any
 	if err := decodeJSON(body, &req); err != nil {
 		return nil, fmt.Errorf("request body is not JSON")
+	}
+	if err := rejectStrictTools(req); err != nil {
+		return nil, err
 	}
 	if prior, ok := req["previous_response_id"].(string); ok && strings.TrimSpace(prior) != "" {
 		return nil, fmt.Errorf("previous_response_id cannot be translated")
@@ -1362,4 +1368,19 @@ func asInt(value any) (int, bool) {
 	default:
 		return 0, false
 	}
+}
+
+func rejectStrictTools(req map[string]any) error {
+	tools, _ := req["tools"].([]any)
+	for _, value := range tools {
+		tool, _ := value.(map[string]any)
+		fn, ok := tool["function"].(map[string]any)
+		if !ok {
+			fn = tool
+		}
+		if strict, _ := fn["strict"].(bool); strict {
+			return fmt.Errorf("strict tool schemas cannot be translated to Anthropic")
+		}
+	}
+	return nil
 }
