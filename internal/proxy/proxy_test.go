@@ -20,6 +20,7 @@ import (
 
 	"github.com/hyperme-sh/hypermesh-conductor/internal/aiuditor"
 	"github.com/hyperme-sh/hypermesh-conductor/internal/config"
+	"github.com/hyperme-sh/hypermesh-conductor/internal/history"
 	"github.com/hyperme-sh/hypermesh-conductor/internal/metrics"
 	"github.com/hyperme-sh/hypermesh-conductor/internal/prefix"
 	"github.com/hyperme-sh/hypermesh-conductor/internal/translate"
@@ -2223,5 +2224,36 @@ func TestRedactEncodedCredentialsPreservesUnrelatedJSON(t *testing.T) {
 	}
 	if got := string(redactEventData(append(append([]byte("data: "), raw...), '\n', '\n'), []string{key})); got != "data: "+want+"\n\n" {
 		t.Fatal(got)
+	}
+}
+
+func TestIncompleteSummaryKeepsOriginalConversation(t *testing.T) {
+	for _, tc := range []struct{ provider, reply string }{{config.ProviderOpenAICompatible, `{"choices":[{"message":{"content":"unfinished"},"finish_reason":"length"}]}`}, {config.ProviderAnthropic, `{"content":[{"type":"text","text":"unfinished"}],"stop_reason":"max_tokens"}`}} {
+		t.Run(tc.provider, func(t *testing.T) {
+			sent := make(chan string, 2)
+			upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				raw, _ := io.ReadAll(r.Body)
+				sent <- string(raw)
+				_, _ = io.WriteString(w, tc.reply)
+			}))
+			defer upstream.Close()
+			dir := t.TempDir()
+			cfg := loadTestConfig(t, dir, upstream.URL+"/v1", upstream.URL+"/v1", config.AuthPassthrough, tc.provider)
+			cfg.Compaction.MaxTailTokens = 10
+			cfg.Compaction.RecentMessages = 0
+			journal := openJournal(t, dir)
+			rec := do(New(cfg, aiuditor.Stub{}, journal), "/v1/chat/completions", "parse", "task", "step", "", `{"messages":[{"role":"user","content":"`+strings.Repeat("original fact ", 40)+`"}]}`)
+			if rec.Code != http.StatusOK || len(sent) != 2 {
+				t.Fatal(rec.Code, len(sent))
+			}
+			<-sent
+			main := <-sent
+			if !strings.Contains(main, "original fact") || strings.Contains(main, "unfinished") {
+				t.Fatal(main)
+			}
+			if _, err := os.Stat(history.PathFor(journal.Path())); !os.IsNotExist(err) {
+				t.Fatal("unexpected recovery file", err)
+			}
+		})
 	}
 }
