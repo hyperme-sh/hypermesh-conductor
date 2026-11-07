@@ -9,6 +9,10 @@ import (
 // Redact JSON strings (including object keys) after unescaping them. Keep
 // other tokens verbatim, including large integers and provider formatting.
 func redactJSON(body []byte, secrets []string) []byte {
+	return redactJSONLayer(body, secrets, true)
+}
+
+func redactJSONLayer(body []byte, secrets []string, nested bool) []byte {
 	if len(secrets) == 0 || len(body) == 0 {
 		return body
 	}
@@ -40,6 +44,15 @@ func redactJSON(body []byte, secrets []string) []byte {
 			value = string(token[1 : len(token)-1])
 		}
 		safe := value
+		if nested && strings.ContainsRune(value, '\\') {
+			inner := strings.TrimSpace(value)
+			if strings.HasPrefix(inner, "{") && json.Valid([]byte(inner)) {
+				filtered := string(redactJSONLayer([]byte(inner), secrets, false))
+				if filtered != inner {
+					safe = strings.Replace(value, inner, filtered, 1)
+				}
+			}
+		}
 		for _, secret := range secrets {
 			if secret != "" {
 				mask := "[redacted]"

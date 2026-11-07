@@ -4,6 +4,9 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"strconv"
+	"strings"
+	"unicode/utf16"
 )
 
 // Match credentials in the text an SDK assembles, before writing the event
@@ -15,11 +18,12 @@ type credentialPattern struct {
 type streamCredentials struct {
 	patterns []credentialPattern
 	partial  map[string][]int
+	escapes  map[string]string
 	invalid  bool
 }
 
 func newStreamCredentials(secrets []string) *streamCredentials {
-	g := &streamCredentials{partial: map[string][]int{}}
+	g := &streamCredentials{partial: map[string][]int{}, escapes: map[string]string{}}
 	seen := map[string]bool{}
 	for _, s := range secrets {
 		if s == "" || seen[s] {
@@ -79,6 +83,62 @@ func (g *streamCredentials) accepts(field, fragment string) bool {
 	}
 	return true
 }
+
+// Decode JSON escapes in serialized tool arguments before matching. Retain
+// only an incomplete escape (at most one UTF-16 pair) across deltas.
+func (g *streamCredentials) acceptsArguments(field, fragment string) bool {
+	if !g.accepts(field, fragment) {
+		return false
+	}
+	text := g.escapes[field] + fragment
+	delete(g.escapes, field)
+	for len(text) > 0 {
+		i := strings.IndexByte(text, '\\')
+		if i < 0 {
+			return g.accepts(field+"/decoded", text)
+		}
+		if !g.accepts(field+"/decoded", text[:i]) {
+			return false
+		}
+		text = text[i:]
+		size := 2
+		if len(text) >= 2 && text[1] == 'u' {
+			size = 6
+			if len(text) >= 6 {
+				n, err := strconv.ParseUint(text[2:6], 16, 16)
+				if err != nil {
+					return false
+				}
+				if utf16.IsSurrogate(rune(n)) {
+					if n > 0xdbff {
+						return false
+					}
+					if len(text) >= 12 {
+						lo, err := strconv.ParseUint(text[8:12], 16, 16)
+						if text[6:8] != `\u` || err != nil || lo < 0xdc00 || lo > 0xdfff {
+							return false
+						}
+					}
+					size = 12
+				}
+			}
+		}
+		if len(text) < size {
+			if len(g.escapes) >= 256 {
+				return false
+			}
+			g.escapes[field] = text
+			return true
+		}
+		var decoded string
+		if json.Unmarshal([]byte("\""+text[:size]+"\""), &decoded) != nil || !g.accepts(field+"/decoded", decoded) {
+			return false
+		}
+		text = text[size:]
+	}
+	return true
+}
+
 func (g *streamCredentials) safeEvents(raw []byte) bool {
 	if g.invalid {
 		return false
@@ -113,7 +173,7 @@ func (g *streamCredentials) safeEvents(raw []byte) bool {
 				fn, _ := call["function"].(map[string]any)
 				field := fmt.Sprintf("%s/call/%d/", base, index(call, "index"))
 				for _, k := range []string{"name", "arguments"} {
-					if !g.accepts(field+k, str(fn, k)) {
+					if (k == "arguments" && !g.acceptsArguments(field+k, str(fn, k))) || (k == "name" && !g.accepts(field+k, str(fn, k))) {
 						return false
 					}
 				}
@@ -122,7 +182,7 @@ func (g *streamCredentials) safeEvents(raw []byte) bool {
 		if d, ok := obj["delta"].(map[string]any); ok {
 			base := fmt.Sprintf("block/%d/", index(obj, "index"))
 			for _, k := range []string{"text", "partial_json", "thinking", "signature"} {
-				if !g.accepts(base+k, str(d, k)) {
+				if (k == "partial_json" && !g.acceptsArguments(base+k, str(d, k))) || (k != "partial_json" && !g.accepts(base+k, str(d, k))) {
 					return false
 				}
 			}
@@ -132,7 +192,11 @@ func (g *streamCredentials) safeEvents(raw []byte) bool {
 				return false
 			}
 			field := fmt.Sprintf("response/%d/%d/%s", index(obj, "output_index"), index(obj, "content_index"), str(obj, "type"))
-			if !g.accepts(field, d) {
+			if strings.Contains(str(obj, "type"), "arguments") {
+				if !g.acceptsArguments(field, d) {
+					return false
+				}
+			} else if !g.accepts(field, d) {
 				return false
 			}
 		}
