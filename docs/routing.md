@@ -51,7 +51,7 @@ The system prompt and tool definitions are canonicalized (sorted tool names and 
 
 `conductor serve` binds the `listen` address. That address must be loopback. The paths are `/v1/chat/completions`, `/v1/responses`, `/v1/embeddings`, `/v1/models`, and `/v1/messages`.
 
-`X-Conductor-Class` or `conductor_class` selects the job class. `X-Conductor-Suggest` is a suggestion. `X-Conductor-Task` and `X-Conductor-Step` are optional stable ids. Conductor fields are removed before the destination sees the body. The policy model replaces the client's model.
+`X-Conductor-Class` or `conductor_class` selects the job class. `X-Conductor-Suggest` is a suggestion. `X-Conductor-Task` and `X-Conductor-Step` are optional stable ids. Conductor fields are removed before the destination sees the body. The policy model replaces the client's model. Clients that require a specific destination model can send its exact ID in `X-Conductor-Expected-Model`. A mismatch returns HTTP 409 before review, compaction, or provider dispatch.
 
 `auth` on a tier is `passthrough`, `env`, or `passthrough_or_env` (the default). Passthrough forwards the client's `Authorization` header to an OpenAI-compatible destination, or `x-api-key` to Anthropic. It does not forward a client key to the other provider. `env` uses only `api_key_env`. Attaching that key also requires `X-Conductor-Token` to match `CONDUCTOR_PROXY_TOKEN`. A redirect from the destination is not followed, so that credential stays on the configured origin. When the client protocol and the destination protocol differ, Conductor translates text, tool definitions, tool calls, and the common stream events.
 
