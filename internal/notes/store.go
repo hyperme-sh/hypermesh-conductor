@@ -839,34 +839,76 @@ func (s *Store) HasEmbedding(id string) (bool, error) {
 }
 
 func markdownFiles(dir string) ([]string, error) {
+	root, err := os.OpenRoot(dir)
+	if err != nil {
+		return nil, err
+	}
+	defer root.Close()
 	var files []string
-	err := filepath.WalkDir(dir, func(path string, entry os.DirEntry, err error) error {
+	const maxEntries = 4 * maxSyncFiles
+	entriesRead := 0
+	var visit func(string, int) error
+	visit = func(relative string, depth int) error {
+		if depth > 64 {
+			return fmt.Errorf("note directory depth exceeds sync quota")
+		}
+		info, err := root.Lstat(relative)
 		if err != nil {
 			return err
 		}
-		name := entry.Name()
-		if entry.Type()&os.ModeSymlink != 0 {
-			if entry.IsDir() {
-				return filepath.SkipDir
-			}
-			return nil
+		if !info.IsDir() {
+			return fmt.Errorf("note directory changed during sync")
 		}
-		if entry.IsDir() {
-			if filepath.Clean(path) != filepath.Clean(dir) && name != "." && strings.HasPrefix(name, ".") {
-				return filepath.SkipDir
-			}
-			return nil
+		f, err := root.OpenFile(relative, indexDirOpenFlags, 0)
+		if err != nil {
+			return err
 		}
-		if strings.EqualFold(filepath.Ext(name), ".md") {
-			if len(files) >= maxSyncFiles {
-				return fmt.Errorf("note count exceeds sync quota")
-			}
-			files = append(files, path)
+		defer f.Close()
+		opened, err := f.Stat()
+		if err != nil {
+			return err
 		}
-		return nil
-	})
+		if !os.SameFile(info, opened) {
+			return fmt.Errorf("note directory changed during sync")
+		}
+		for {
+			entries, readErr := f.ReadDir(64)
+			entriesRead += len(entries)
+			if entriesRead > maxEntries {
+				return fmt.Errorf("directory entry count exceeds sync quota")
+			}
+			for _, entry := range entries {
+				name := entry.Name()
+				if entry.Type()&os.ModeSymlink != 0 {
+					continue
+				}
+				child := filepath.Join(relative, name)
+				if entry.IsDir() {
+					if !strings.HasPrefix(name, ".") {
+						if err := visit(child, depth+1); err != nil {
+							return err
+						}
+					}
+				} else if strings.EqualFold(filepath.Ext(name), ".md") {
+					if len(files) >= maxSyncFiles {
+						return fmt.Errorf("note count exceeds sync quota")
+					}
+					files = append(files, filepath.Join(dir, child))
+				}
+			}
+			if readErr == io.EOF {
+				return nil
+			}
+			if readErr != nil {
+				return readErr
+			}
+		}
+	}
+	if err := visit(".", 0); err != nil {
+		return nil, err
+	}
 	sort.Strings(files)
-	return files, err
+	return files, nil
 }
 
 func ftsQuery(text string) string {
