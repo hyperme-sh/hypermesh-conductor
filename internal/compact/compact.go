@@ -187,6 +187,8 @@ func textOfAll(items []json.RawMessage) string {
 		if err != nil {
 			continue
 		}
+		role, _ := obj["role"].(string)
+		buf.WriteString("[message " + role + "]\n")
 		if calls, ok := obj["tool_calls"].([]any); ok {
 			for _, call := range calls {
 				item, _ := call.(map[string]any)
@@ -201,6 +203,7 @@ func textOfAll(items []json.RawMessage) string {
 			buf.WriteString("[tool_result " + id + "] ")
 		}
 		writeSummaryContent(&buf, obj["content"])
+		buf.WriteString("\n[/message]\n")
 	}
 	return buf.String()
 }
