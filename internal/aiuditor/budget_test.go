@@ -64,3 +64,10 @@ func TestHTTPVerdictKeepsReservationUntilReleased(t *testing.T) {
 		}
 	}
 }
+
+func TestDenialReasonIsBounded(t *testing.T) {
+	got := ReasonText(strings.Repeat("secret-looking explanation ", 100000))
+	if len(got) > 1024 || !strings.HasSuffix(got, " [truncated]") {
+		t.Fatal(len(got))
+	}
+}

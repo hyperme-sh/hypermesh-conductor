@@ -71,3 +71,8 @@ conductor summary --journal runs/journal.jsonl
 ```
 
 The journal directory must exist before `serve` or `run`. Exit status is 0 when the command finishes, 1 when the provider call or a denied hop finishes after a journal row is written, and 2 when the config, class, or journal is not usable.
+
+Journal retention is bounded to the current 32 MiB segment and one previous
+segment (`.1`). Summaries read both retained segments; older segments are
+replaced on rotation. Archive them externally before rotation if longer history
+is required. AIuditor denial explanations are capped at 1,024 bytes.
