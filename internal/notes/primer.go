@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/hyperme-sh/hypermesh-conductor/internal/compact"
+	"unicode/utf8"
 )
 
 // Primer is a short Markdown list of open goals, their open steps, and facts.
@@ -44,9 +44,24 @@ func Primer(store *Store, budget int) (string, error) {
 		return "", nil
 	}
 	var b strings.Builder
-	b.WriteString("# Session primer\n")
+	used := 0
+	appendLine := func(line string) bool {
+		count := utf8.RuneCountInString(line)
+		if (used+count)/4 > budget {
+			return false
+		}
+		b.WriteString(line)
+		used += count
+		return true
+	}
+	const header = "# Session primer\n"
+	if !appendLine(header) {
+		return strings.TrimSpace(header[:budget*4]), nil
+	}
 	for _, goal := range goals {
-		fmt.Fprintf(&b, "- goal (%s): %s\n", goal.Status, goal.Title)
+		if !appendLine(fmt.Sprintf("- goal (%s): %s\n", goal.Status, goal.Title)) {
+			return strings.TrimSpace(b.String()), nil
+		}
 		steps, err := linkedSteps(store, goal.ID, byID)
 		if err != nil {
 			return "", err
@@ -55,50 +70,17 @@ func Primer(store *Store, budget int) (string, error) {
 			if Closed(step.Status) {
 				continue
 			}
-			fmt.Fprintf(&b, "  - step (%s): %s\n", step.Status, step.Title)
+			if !appendLine(fmt.Sprintf("  - step (%s): %s\n", step.Status, step.Title)) {
+				return strings.TrimSpace(b.String()), nil
+			}
 		}
 	}
 	for _, fact := range facts {
-		fmt.Fprintf(&b, "- fact: %s\n", fact.Title)
-	}
-	return strings.TrimSpace(trimToBudget(b.String(), budget)), nil
-}
-
-// trimToBudget drops trailing lines, then shortens the last line, until the
-// estimate fits. Each pass keeps a strictly shorter string: stripping only the
-// final newline does not, because the builder already ends with one.
-func trimToBudget(text string, budget int) string {
-	if budget < 0 {
-		budget = 0
-	}
-	for compact.EstimateTokens(text) > budget {
-		trimmed := strings.TrimRight(text, "\n")
-		cut := strings.LastIndex(trimmed, "\n")
-		if cut < 0 {
-			return truncateToBudget(trimmed, budget)
+		if !appendLine(fmt.Sprintf("- fact: %s\n", fact.Title)) {
+			return strings.TrimSpace(b.String()), nil
 		}
-		next := trimmed[:cut+1]
-		if len(next) >= len(text) {
-			return truncateToBudget(trimmed, budget)
-		}
-		text = next
 	}
-	return text
-}
-
-func truncateToBudget(text string, budget int) string {
-	if budget <= 0 || text == "" {
-		return ""
-	}
-	runes := []rune(text)
-	maxRunes := budget * 4
-	if maxRunes < len(runes) {
-		runes = runes[:maxRunes]
-	}
-	for len(runes) > 0 && compact.EstimateTokens(string(runes)) > budget {
-		runes = runes[:len(runes)-1]
-	}
-	return string(runes)
+	return strings.TrimSpace(b.String()), nil
 }
 
 func linkedSteps(store *Store, goal string, byID map[string]Note) ([]Note, error) {
