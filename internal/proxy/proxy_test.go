@@ -1037,6 +1037,14 @@ func TestCompactionKeepsThePrefixAndStoresTheTail(t *testing.T) {
 	var mains []string
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		raw, _ := io.ReadAll(r.Body)
+		if r.URL.Path == "/tokenize" {
+			count := 8
+			if strings.Contains(string(raw), "Summarize the conversation tail") {
+				count = 12
+			}
+			fmt.Fprintf(w, `{"count":%d,"max_model_len":4096}`, count)
+			return
+		}
 		if strings.Contains(string(raw), "Summarize the conversation tail") {
 			_, _ = w.Write([]byte(`{"choices":[{"message":{"role":"assistant","content":"SUMMARYTEXT"}}],"usage":{"prompt_tokens":12,"completion_tokens":2}}`))
 			return
@@ -1048,6 +1056,7 @@ func TestCompactionKeepsThePrefixAndStoresTheTail(t *testing.T) {
 	dir := t.TempDir()
 	t.Setenv("CONDUCTOR_CHEAP_API_KEY", "test-key-do-not-log")
 	cfg := loadTestConfig(t, dir, upstream.URL+"/v1", upstream.URL+"/v1", config.AuthEnv, config.ProviderOpenAICompatible)
+	cfg.Cheap.InputCounter = "vllm"
 	cfg.Compaction.MaxTailTokens = 30
 	cfg.Compaction.RecentMessages = 0
 	journal := openJournal(t, dir)
@@ -1072,6 +1081,10 @@ func TestCompactionKeepsThePrefixAndStoresTheTail(t *testing.T) {
 	records, err := metrics.ReadJournal(journal.Path())
 	if err != nil {
 		t.Fatal(err)
+	}
+	total := metrics.Summarize(records).Totals.CountedInputTokens
+	if len(records) != 3 || total == nil || *total != 28 {
+		t.Fatalf("missing compaction or main preflight counts: %+v", records)
 	}
 	var longRow, shortRow metrics.StepRecord
 	for _, row := range records {

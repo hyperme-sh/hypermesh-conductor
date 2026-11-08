@@ -105,6 +105,9 @@ func routeCmd(args []string, stdout, stderr io.Writer) int {
 	if tier.RecipeDigest != "" {
 		payload["recipe_sha256"] = tier.RecipeDigest
 		payload["max_output_tokens"] = tier.OutputLimit
+		if tier.ContextWindow > 0 {
+			payload["context_window_tokens"] = tier.ContextWindow
+		}
 		if tier.TaskOutputLimit > 0 {
 			payload["max_task_output_tokens"] = tier.TaskOutputLimit
 		}

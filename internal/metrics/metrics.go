@@ -35,6 +35,7 @@ type Accuracy struct {
 
 // StepRecord is one journal row. Token fields are nil when unmeasured.
 type StepRecord struct {
+	CountedInputTokens   *int     `json:"counted_input_tokens,omitempty"`
 	EstimatedInputTokens *int     `json:"estimated_input_tokens,omitempty"`
 	RecipeSHA256         string   `json:"recipe_sha256,omitempty"`
 	TaskID               string   `json:"task_id"`
@@ -95,6 +96,7 @@ func (r StepRecord) Validate() error {
 }
 
 type wireRecord struct {
+	CountedInputTokens   *int      `json:"counted_input_tokens,omitempty"`
 	EstimatedInputTokens *int      `json:"estimated_input_tokens,omitempty"`
 	RecipeSHA256         string    `json:"recipe_sha256,omitempty"`
 	Schema               string    `json:"schema"`
@@ -131,7 +133,7 @@ func (r StepRecord) Wire() wireRecord {
 		peak = r.InputTokens
 	}
 	return wireRecord{
-		Schema: SchemaStep, EstimatedInputTokens: r.EstimatedInputTokens, RecipeSHA256: r.RecipeSHA256,
+		Schema: SchemaStep, CountedInputTokens: r.CountedInputTokens, EstimatedInputTokens: r.EstimatedInputTokens, RecipeSHA256: r.RecipeSHA256,
 		TaskID:             r.TaskID,
 		StepID:             r.StepID,
 		JobClass:           r.JobClass,
@@ -306,7 +308,7 @@ func parseLine(line []byte, lineNo int) (StepRecord, error) {
 		return StepRecord{}, fmt.Errorf("journal line %d has a bad field", lineNo)
 	}
 	record := StepRecord{
-		EstimatedInputTokens: wire.EstimatedInputTokens, RecipeSHA256: wire.RecipeSHA256, TaskID: wire.TaskID, StepID: wire.StepID, JobClass: wire.JobClass, Tier: wire.Tier,
+		CountedInputTokens: wire.CountedInputTokens, EstimatedInputTokens: wire.EstimatedInputTokens, RecipeSHA256: wire.RecipeSHA256, TaskID: wire.TaskID, StepID: wire.StepID, JobClass: wire.JobClass, Tier: wire.Tier,
 		ModelID: wire.ModelID, Reason: wire.Reason, SuggestionTier: wire.SuggestionTier,
 		SuggestionAccepted: wire.SuggestionAccepted, InputTokens: wire.InputTokens,
 		OutputTokens: wire.OutputTokens, CacheHitTokens: wire.CacheHitTokens,
@@ -384,6 +386,7 @@ func bytesTrim(b []byte) []byte {
 
 // Block is one aggregation, either a task, a tier, or the whole journal.
 type Block struct {
+	CountedInputTokens     *int     `json:"counted_input_tokens"`
 	EstimatedInputTokens   *int     `json:"estimated_input_tokens"`
 	Steps                  int      `json:"steps"`
 	UncertainSteps         int      `json:"uncertain_steps"`
@@ -500,9 +503,14 @@ func measure(rows []StepRecord) Block {
 		return Block{}
 	}
 	estimated, estimateCount := 0, 0
+	counted, countedSteps := 0, 0
 	uncertain := 0
 	var measured []StepRecord
 	for _, row := range rows {
+		if row.CountedInputTokens != nil {
+			counted += *row.CountedInputTokens
+			countedSteps++
+		}
 		if row.EstimatedInputTokens != nil {
 			estimated += *row.EstimatedInputTokens
 			estimateCount++
@@ -526,6 +534,9 @@ func measure(rows []StepRecord) Block {
 		TokensComplete:       tokensComplete,
 		MeasuredInputTokens:  intPtr(measuredInput),
 		MeasuredOutputTokens: intPtr(measuredOutput),
+	}
+	if countedSteps == len(rows) {
+		block.CountedInputTokens = intPtr(counted)
 	}
 	if estimateCount == len(rows) {
 		block.EstimatedInputTokens = intPtr(estimated)
