@@ -42,6 +42,8 @@ var forbiddenKeys = map[string]struct{}{
 
 // Tier is one configured destination.
 type Tier struct {
+	InputCounter    string
+	ContextWindow   int
 	TaskOutputLimit int
 	RecipeDigest    string
 	OutputLimit     int
@@ -385,6 +387,14 @@ func parseTier(name string, block any) (Tier, error) {
 			return Tier{}, fmt.Errorf("tiers.%s.provider must be openai, anthropic, or openai-compatible", name)
 		}
 	}
+	counter := ""
+	if v, present := obj["input_counter"]; present {
+		base, err := url.Parse(baseURL)
+		if v != "vllm" || provider != ProviderOpenAICompatible || err != nil || base.RawQuery != "" || base.Fragment != "" || base.RawPath != "" || !strings.HasSuffix(strings.TrimRight(base.Path, "/"), "/v1") {
+			return Tier{}, fmt.Errorf("tiers.%s.input_counter requires vllm on an openai-compatible /v1 endpoint", name)
+		}
+		counter = "vllm"
+	}
 	auth := AuthPassthroughOrEnv
 	if value, ok := obj["auth"].(string); ok && value != "" {
 		switch value {
@@ -416,6 +426,7 @@ func parseTier(name string, block any) (Tier, error) {
 	}
 	return Tier{
 		Name:         name,
+		InputCounter: counter,
 		Provider:     provider,
 		BaseURL:      strings.TrimRight(baseURL, "/"),
 		Model:        model,

@@ -350,6 +350,12 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, status, map[string]any{"error": map[string]any{"message": err.Error()}})
 		return
 	}
+	count, status, countErr := p.checkContext(authReq, tier, wire.Protocol, wire.Body)
+	if countErr != nil {
+		writeJSON(w, status, map[string]any{"error": map[string]any{"message": countErr.Error()}})
+		return
+	}
+	base.CountedInputTokens = count
 	estimated := compact.EstimateTokens(string(wire.Body))
 	base.EstimatedInputTokens = &estimated
 	base.RecipeSHA256 = tier.RecipeDigest

@@ -10,8 +10,9 @@ import (
 )
 
 type recipeTier struct {
-	Model           string `json:"model"`
-	MaxOutputTokens int    `json:"max_output_tokens"`
+	ContextWindow   json.RawMessage `json:"context_window_tokens"`
+	Model           string          `json:"model"`
+	MaxOutputTokens int             `json:"max_output_tokens"`
 }
 
 func loadRecipe(path string, cheap, frontier *Tier) error {
@@ -46,6 +47,13 @@ func loadRecipe(path string, cheap, frontier *Tier) error {
 		if entry.settings.Model != entry.tier.Model || entry.settings.MaxOutputTokens < 1 || entry.settings.MaxOutputTokens > 2147483647 {
 			return fmt.Errorf("recipe %s requires configured model %q and a positive 32-bit output limit", entry.tier.Name, entry.tier.Model)
 		}
+		var window int
+		if entry.settings.ContextWindow != nil {
+			if json.Unmarshal(entry.settings.ContextWindow, &window) != nil || window <= 0 || window > 2147483647 || entry.tier.InputCounter != "vllm" {
+				return fmt.Errorf("recipe %s requires a positive 32-bit context window and configured vllm input counter", entry.tier.Name)
+			}
+		}
+		entry.tier.ContextWindow = window
 		entry.tier.RecipeDigest = hex.EncodeToString(hash.Sum(nil))
 		entry.tier.TaskOutputLimit = taskLimit
 		entry.tier.OutputLimit = entry.settings.MaxOutputTokens

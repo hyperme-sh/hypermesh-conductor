@@ -219,6 +219,9 @@ func (p *Proxy) cheapSummary(ctx context.Context, client *http.Request, tail str
 		}
 		req.Header.Set("anthropic-version", version)
 	}
+	if _, _, err := p.checkContext(req, tier, wire.Protocol, bodyToSend); err != nil {
+		return "", usage.UncertainUsage(), 0, measuredPrefix, err
+	}
 	start := time.Now()
 	resp, err := p.upstreamClient(tier.Timeout, false).Do(req)
 	if err != nil {
