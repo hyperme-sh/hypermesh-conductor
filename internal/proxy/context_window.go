@@ -15,11 +15,11 @@ import (
 // Count with the selected provider's tokenizer and template after all rewrites.
 // The tokenizer and generation endpoint share the configured origin and auth.
 func (p *Proxy) checkContext(upstream *http.Request, tier config.Tier, protocol string, body []byte) (*int, int, error) {
-	if tier.InputCounter == "" && tier.ContextWindow == 0 {
+	if tier.InputCounter == "" && tier.ContextWindow == 0 && tier.TaskTokenLimit == 0 {
 		return nil, 0, nil
 	}
 	count, status, err := p.countChatContext(upstream, tier, protocol, body)
-	if err != nil && tier.ContextWindow == 0 {
+	if err != nil && tier.ContextWindow == 0 && tier.TaskTokenLimit == 0 {
 		return nil, 0, nil
 	}
 	return count, status, err

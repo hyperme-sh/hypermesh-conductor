@@ -108,6 +108,9 @@ func routeCmd(args []string, stdout, stderr io.Writer) int {
 		if tier.ContextWindow > 0 {
 			payload["context_window_tokens"] = tier.ContextWindow
 		}
+		if tier.TaskTokenLimit > 0 {
+			payload["max_task_tokens"] = tier.TaskTokenLimit
+		}
 		if tier.TaskOutputLimit > 0 {
 			payload["max_task_output_tokens"] = tier.TaskOutputLimit
 		}

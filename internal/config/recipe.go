@@ -22,6 +22,7 @@ func loadRecipe(path string, cheap, frontier *Tier) error {
 	}
 	defer file.Close()
 	var recipe struct {
+		TaskTokenLimit  json.RawMessage `json:"max_task_tokens"`
 		TaskOutputLimit json.RawMessage `json:"max_task_output_tokens"`
 		Schema          string          `json:"schema"`
 		Cheap           recipeTier      `json:"cheap"`
@@ -35,6 +36,10 @@ func loadRecipe(path string, cheap, frontier *Tier) error {
 	}
 	if decoder.Decode(new(any)) != io.EOF || recipe.Schema != "hypermesh.conductor.recipe.v1" {
 		return fmt.Errorf("invalid recipe document or schema")
+	}
+	var totalLimit int
+	if recipe.TaskTokenLimit != nil && (json.Unmarshal(recipe.TaskTokenLimit, &totalLimit) != nil || totalLimit < 1 || totalLimit > 2147483647) {
+		return fmt.Errorf("invalid max_task_tokens")
 	}
 	var taskLimit int
 	if recipe.TaskOutputLimit != nil && (json.Unmarshal(recipe.TaskOutputLimit, &taskLimit) != nil || taskLimit < 1 || taskLimit > 2147483647) {
@@ -53,6 +58,10 @@ func loadRecipe(path string, cheap, frontier *Tier) error {
 				return fmt.Errorf("recipe %s requires a positive 32-bit context window and configured vllm input counter", entry.tier.Name)
 			}
 		}
+		if totalLimit > 0 && entry.tier.InputCounter != "vllm" {
+			return fmt.Errorf("max_task_tokens requires a vllm counter on %s", entry.tier.Name)
+		}
+		entry.tier.TaskTokenLimit = totalLimit
 		entry.tier.ContextWindow = window
 		entry.tier.RecipeDigest = hex.EncodeToString(hash.Sum(nil))
 		entry.tier.TaskOutputLimit = taskLimit

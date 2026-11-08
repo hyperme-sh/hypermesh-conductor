@@ -44,6 +44,7 @@ var forbiddenKeys = map[string]struct{}{
 type Tier struct {
 	InputCounter    string
 	ContextWindow   int
+	TaskTokenLimit  int
 	TaskOutputLimit int
 	RecipeDigest    string
 	OutputLimit     int
