@@ -27,13 +27,15 @@ func limitOutput(protocol string, body []byte, limit int) ([]byte, error) {
 	return limited, err
 }
 
-func boundedOutput(protocol string, body []byte, limit int) ([]byte, int, error) {
+type generationAllowance struct{ output, candidates int }
+
+func boundedOutput(protocol string, body []byte, limit int) ([]byte, generationAllowance, error) {
 	if limit == 0 || protocol == translate.ProtoEmbeddings {
-		return body, 0, nil
+		return body, generationAllowance{}, nil
 	}
 	var obj map[string]json.RawMessage
 	if err := json.Unmarshal(body, &obj); err != nil || obj == nil {
-		return nil, 0, fmt.Errorf("invalid generation request")
+		return nil, generationAllowance{}, fmt.Errorf("invalid generation request")
 	}
 	candidates := 1
 	perCandidate := limit
@@ -43,14 +45,14 @@ func boundedOutput(protocol string, body []byte, limit int) ([]byte, int, error)
 		// Divide before comparing so the aggregate check cannot overflow.
 		n, err := candidateCount(obj, "n", 1)
 		if err != nil {
-			return nil, 0, err
+			return nil, generationAllowance{}, err
 		}
 		generated, err := candidateCount(obj, "best_of", n)
 		if err != nil {
-			return nil, 0, err
+			return nil, generationAllowance{}, err
 		}
 		if generated < n || generated > limit {
-			return nil, 0, fmt.Errorf("generated candidate count must be between n and the recipe output limit")
+			return nil, generationAllowance{}, fmt.Errorf("generated candidate count must be between n and the recipe output limit")
 		}
 		candidates = generated
 		perCandidate = limit / generated
@@ -61,23 +63,24 @@ func boundedOutput(protocol string, body []byte, limit int) ([]byte, int, error)
 		field = "max_output_tokens"
 	case translate.ProtoMessages:
 	default:
-		return nil, 0, fmt.Errorf("recipe output limit unsupported for %s", protocol)
+		return nil, generationAllowance{}, fmt.Errorf("recipe output limit unsupported for %s", protocol)
 	}
 	for _, name := range []string{"max_tokens", "max_completion_tokens", "max_output_tokens"} {
 		if raw, ok := obj[name]; ok {
 			var count int
 			if name != field || json.Unmarshal(raw, &count) != nil || count < 1 || count > perCandidate {
-				return nil, 0, fmt.Errorf("invalid %s for recipe output limit %d", name, perCandidate)
+				return nil, generationAllowance{}, fmt.Errorf("invalid %s for recipe output limit %d", name, perCandidate)
 			}
 			perCandidate = count
 		}
 	}
+	allowance := generationAllowance{output: perCandidate * candidates, candidates: candidates}
 	if _, exists := obj[field]; exists {
-		return body, perCandidate * candidates, nil
+		return body, allowance, nil
 	}
 	obj[field], _ = json.Marshal(perCandidate)
 	encoded, err := json.Marshal(obj)
-	return encoded, perCandidate * candidates, err
+	return encoded, allowance, err
 }
 
 func candidateCount(obj map[string]json.RawMessage, key string, fallback int) (int, error) {

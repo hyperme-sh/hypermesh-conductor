@@ -199,8 +199,8 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"error": map[string]any{"message": err.Error()}})
 		return
 	}
-	if p.Config.Cheap.TaskOutputLimit > 0 && proto != translate.ProtoEmbeddings && firstNonEmpty(r.Header.Get("X-Conductor-Task"), rawString(obj.Values["conductor_task"])) == "" {
-		writeJSON(w, http.StatusBadRequest, map[string]any{"error": map[string]any{"message": "task output budget requires an explicit task ID"}})
+	if (p.Config.Cheap.TaskTokenLimit > 0 || (p.Config.Cheap.TaskOutputLimit > 0 && proto != translate.ProtoEmbeddings)) && firstNonEmpty(r.Header.Get("X-Conductor-Task"), rawString(obj.Values["conductor_task"])) == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": map[string]any{"message": "task budget requires an explicit task ID"}})
 		return
 	}
 	obj.DropPrefix("conductor_")
@@ -325,8 +325,8 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"error": map[string]any{"message": err.Error()}})
 		return
 	}
-	var outputCharge int
-	wire.Body, outputCharge, err = boundedOutput(wire.Protocol, wire.Body, tier.OutputLimit)
+	var allowance generationAllowance
+	wire.Body, allowance, err = boundedOutput(wire.Protocol, wire.Body, tier.OutputLimit)
 	if err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"error": map[string]any{"message": err.Error()}})
 		return
@@ -359,12 +359,24 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	estimated := compact.EstimateTokens(string(wire.Body))
 	base.EstimatedInputTokens = &estimated
 	base.RecipeSHA256 = tier.RecipeDigest
-	if tier.TaskOutputLimit > 0 && wire.Protocol != translate.ProtoEmbeddings {
+	if tier.TaskTokenLimit > 0 || (tier.TaskOutputLimit > 0 && wire.Protocol != translate.ProtoEmbeddings) {
 		if p.Journal == nil {
 			writeJSON(w, http.StatusServiceUnavailable, map[string]any{"error": map[string]any{"message": "task budget requires a durable journal"}})
 			return
 		}
-		ledger, reserveErr := reserveOutput(p.Journal.Path()+".output.sqlite", taskID, stepID, tier.RecipeDigest, tier.TaskOutputLimit, outputCharge)
+		inputCharge := 0
+		if tier.TaskTokenLimit > 0 {
+			if count == nil {
+				writeJSON(w, http.StatusBadRequest, map[string]any{"error": map[string]any{"message": "task budget requires counted input"}})
+				return
+			}
+			if allowance.candidates < 1 || *count > tier.TaskTokenLimit/allowance.candidates {
+				writeJSON(w, http.StatusConflict, map[string]any{"error": map[string]any{"message": "counted input exceeds task token allowance"}})
+				return
+			}
+			inputCharge = *count * allowance.candidates
+		}
+		ledger, reserveErr := reserveTokens(p.Journal.Path()+".output.sqlite", taskID, stepID, tier.RecipeDigest, tokenBudget{outputLimit: tier.TaskOutputLimit, totalLimit: tier.TaskTokenLimit, input: inputCharge, output: allowance.output})
 		if reserveErr != nil {
 			status, message := http.StatusServiceUnavailable, "task budget ledger unavailable"
 			if errors.Is(reserveErr, errTaskBudget) {
@@ -695,8 +707,8 @@ func (p *Proxy) finish(w http.ResponseWriter, client *http.Request, status int, 
 
 func (p *Proxy) recordDispatch(client *http.Request, record metrics.StepRecord) {
 	ledger, _ := client.Context().Value(budgetContextKey{}).(*sql.DB)
-	if ledger != nil && record.UsageStatus == metrics.StatusMeasured && record.OutputTokens != nil && *record.OutputTokens >= 0 {
-		if _, err := ledger.Exec("UPDATE output_attempts SET charge=? WHERE task=? AND step=?", *record.OutputTokens, record.TaskID, record.StepID); err != nil {
+	if ledger != nil && record.UsageStatus == metrics.StatusMeasured && record.OutputTokens != nil && *record.OutputTokens >= 0 && record.InputTokens != nil && *record.InputTokens >= 0 {
+		if _, err := ledger.Exec("UPDATE output_attempts SET charge=?, input_charge=? WHERE task=? AND step=?", *record.OutputTokens, *record.InputTokens, record.TaskID, record.StepID); err != nil {
 			p.Logf("task budget reconciliation failed")
 		}
 	}
