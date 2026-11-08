@@ -21,9 +21,10 @@ func loadRecipe(path string, cheap, frontier *Tier) error {
 	}
 	defer file.Close()
 	var recipe struct {
-		Schema   string     `json:"schema"`
-		Cheap    recipeTier `json:"cheap"`
-		Frontier recipeTier `json:"frontier"`
+		TaskOutputLimit json.RawMessage `json:"max_task_output_tokens"`
+		Schema          string          `json:"schema"`
+		Cheap           recipeTier      `json:"cheap"`
+		Frontier        recipeTier      `json:"frontier"`
 	}
 	hash := sha256.New()
 	decoder := json.NewDecoder(io.TeeReader(file, hash))
@@ -34,6 +35,10 @@ func loadRecipe(path string, cheap, frontier *Tier) error {
 	if decoder.Decode(new(any)) != io.EOF || recipe.Schema != "hypermesh.conductor.recipe.v1" {
 		return fmt.Errorf("invalid recipe document or schema")
 	}
+	var taskLimit int
+	if recipe.TaskOutputLimit != nil && (json.Unmarshal(recipe.TaskOutputLimit, &taskLimit) != nil || taskLimit < 1 || taskLimit > 2147483647) {
+		return fmt.Errorf("invalid max_task_output_tokens")
+	}
 	for _, entry := range []struct {
 		tier     *Tier
 		settings recipeTier
@@ -42,6 +47,7 @@ func loadRecipe(path string, cheap, frontier *Tier) error {
 			return fmt.Errorf("recipe %s requires configured model %q and a positive 32-bit output limit", entry.tier.Name, entry.tier.Model)
 		}
 		entry.tier.RecipeDigest = hex.EncodeToString(hash.Sum(nil))
+		entry.tier.TaskOutputLimit = taskLimit
 		entry.tier.OutputLimit = entry.settings.MaxOutputTokens
 	}
 	return nil

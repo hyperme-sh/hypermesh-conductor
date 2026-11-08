@@ -105,6 +105,9 @@ func routeCmd(args []string, stdout, stderr io.Writer) int {
 	if tier.RecipeDigest != "" {
 		payload["recipe_sha256"] = tier.RecipeDigest
 		payload["max_output_tokens"] = tier.OutputLimit
+		if tier.TaskOutputLimit > 0 {
+			payload["max_task_output_tokens"] = tier.TaskOutputLimit
+		}
 	}
 	return writePretty(stdout, payload)
 }
@@ -279,7 +282,7 @@ func runCmd(args []string, stdout, stderr io.Writer) int {
 	}
 	rec := httptest.NewRecorder()
 	proxy.New(cfg, hop, journal).ServeHTTP(rec, req)
-	if rec.Code == http.StatusBadRequest {
+	if rec.Code == http.StatusBadRequest || (rec.Code >= 400 && rec.Header().Get("X-Conductor-Step") == "") {
 		fmt.Fprintln(stderr, strings.TrimSpace(rec.Body.String()))
 		return 2
 	}

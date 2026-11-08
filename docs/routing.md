@@ -78,3 +78,7 @@ replaced on rotation. Archive them externally before rotation if longer history
 is required. AIuditor denial explanations are capped at 1,024 bytes.
 
 For chat generation, the recipe's output allowance covers all candidates in the request. With an allowance of 100 tokens and `n: 4`, the default per-candidate cap is 25. If the provider supports `best_of`, Conductor budgets every generated candidate, including candidates the provider discards. An explicit per-candidate limit that exceeds the allowance is rejected before dispatch.
+
+A recipe may set the top-level integer `max_task_output_tokens` to share one output allowance across both tiers. Supply a stable task ID (managed Visor uses the lease UUID). A fresh step ID means a new attempt. Reusing an admitted step returns HTTP 409 before another generation. On restart use the same journal path and recipe. A different recipe digest on a budgeted attempt for the same task returns HTTP 409.
+
+Conductor reserves the capped provider request's aggregate output in `<journal>.output.sqlite` before sending it. A measured response replaces the reservation with the provider's output count. Missing usage, an interrupted response, or a crash retains the reservation. Keep this file with the journal across restarts and rotations. Start a fresh task when enabling the feature on an existing journal; earlier requests have no reservations. Budgeted runs skip model-assisted compaction. The allowance covers generated output; input estimates are reported separately.

@@ -42,16 +42,17 @@ var forbiddenKeys = map[string]struct{}{
 
 // Tier is one configured destination.
 type Tier struct {
-	RecipeDigest string
-	OutputLimit  int
-	Name         string
-	Provider     string
-	BaseURL      string
-	Model        string
-	APIKeyEnv    string
-	Timeout      time.Duration
-	Auth         string
-	IncludeUsage bool
+	TaskOutputLimit int
+	RecipeDigest    string
+	OutputLimit     int
+	Name            string
+	Provider        string
+	BaseURL         string
+	Model           string
+	APIKeyEnv       string
+	Timeout         time.Duration
+	Auth            string
+	IncludeUsage    bool
 }
 
 // UsesEnvKey reports whether this tier can attach an environment key.

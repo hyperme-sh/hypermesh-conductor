@@ -9,6 +9,7 @@ import (
 	"context"
 	"crypto/rand"
 	"crypto/subtle"
+	"database/sql"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -198,6 +199,10 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"error": map[string]any{"message": err.Error()}})
 		return
 	}
+	if p.Config.Cheap.TaskOutputLimit > 0 && proto != translate.ProtoEmbeddings && firstNonEmpty(r.Header.Get("X-Conductor-Task"), rawString(obj.Values["conductor_task"])) == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": map[string]any{"message": "task output budget requires an explicit task ID"}})
+		return
+	}
 	obj.DropPrefix("conductor_")
 	p.injectPrefix(&obj, proto)
 	prepared, err := obj.Marshal()
@@ -320,7 +325,8 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"error": map[string]any{"message": err.Error()}})
 		return
 	}
-	wire.Body, err = limitOutput(wire.Protocol, wire.Body, tier.OutputLimit)
+	var outputCharge int
+	wire.Body, outputCharge, err = boundedOutput(wire.Protocol, wire.Body, tier.OutputLimit)
 	if err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"error": map[string]any{"message": err.Error()}})
 		return
@@ -347,6 +353,23 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	estimated := compact.EstimateTokens(string(wire.Body))
 	base.EstimatedInputTokens = &estimated
 	base.RecipeSHA256 = tier.RecipeDigest
+	if tier.TaskOutputLimit > 0 && wire.Protocol != translate.ProtoEmbeddings {
+		if p.Journal == nil {
+			writeJSON(w, http.StatusServiceUnavailable, map[string]any{"error": map[string]any{"message": "task budget requires a durable journal"}})
+			return
+		}
+		ledger, reserveErr := reserveOutput(p.Journal.Path()+".output.sqlite", taskID, stepID, tier.RecipeDigest, tier.TaskOutputLimit, outputCharge)
+		if reserveErr != nil {
+			status, message := http.StatusServiceUnavailable, "task budget ledger unavailable"
+			if errors.Is(reserveErr, errTaskBudget) {
+				status, message = http.StatusConflict, errTaskBudget.Error()
+			}
+			writeJSON(w, status, map[string]any{"error": map[string]any{"message": message}})
+			return
+		}
+		defer ledger.Close()
+		r = r.WithContext(context.WithValue(r.Context(), budgetContextKey{}, ledger))
+	}
 	p.forward(w, r, authReq, tier, wire, stream, secrets, base)
 }
 
@@ -647,8 +670,7 @@ func (p *Proxy) stream(w http.ResponseWriter, client *http.Request, resp *http.R
 	} else {
 		applyUsage(&record, acc, p.Config, record.Tier)
 	}
-	p.journal(record)
-	p.logRecord(client, record)
+	p.recordDispatch(client, record)
 }
 
 func (p *Proxy) finish(w http.ResponseWriter, client *http.Request, status int, body []byte, record metrics.StepRecord, secrets []string, streamed bool) {
@@ -661,6 +683,16 @@ func (p *Proxy) finish(w http.ResponseWriter, client *http.Request, status int, 
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(status)
 		_, _ = w.Write(body)
+	}
+	p.recordDispatch(client, record)
+}
+
+func (p *Proxy) recordDispatch(client *http.Request, record metrics.StepRecord) {
+	ledger, _ := client.Context().Value(budgetContextKey{}).(*sql.DB)
+	if ledger != nil && record.UsageStatus == metrics.StatusMeasured && record.OutputTokens != nil && *record.OutputTokens >= 0 {
+		if _, err := ledger.Exec("UPDATE output_attempts SET charge=? WHERE task=? AND step=?", *record.OutputTokens, record.TaskID, record.StepID); err != nil {
+			p.Logf("task budget reconciliation failed")
+		}
 	}
 	p.journal(record)
 	p.logRecord(client, record)
