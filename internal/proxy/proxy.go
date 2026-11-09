@@ -61,11 +61,12 @@ var idPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._:-]{0,199}$`)
 
 // Proxy serves the local endpoints.
 type Proxy struct {
-	Config  config.Config
-	Hop     aiuditor.Hop
-	Journal *metrics.Journal
-	Notes   *notes.Service
-	Logf    func(string, ...any)
+	PeerIngress http.Handler
+	Config      config.Config
+	Hop         aiuditor.Hop
+	Journal     *metrics.Journal
+	Notes       *notes.Service
+	Logf        func(string, ...any)
 
 	transportOnce sync.Once
 	transport     *http.Transport
@@ -165,6 +166,10 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w = deadlineWriter{ResponseWriter: w, idle: writeIdle}
+	if p.PeerIngress != nil && r.Method == http.MethodPost && r.URL.Path == "/v1/peer/prompt-submit" {
+		p.PeerIngress.ServeHTTP(w, r)
+		return
+	}
 	proto, ok := protocolOf(r.Method, r.URL.Path)
 	if !ok {
 		writeJSON(w, http.StatusNotFound, map[string]any{"error": map[string]any{"message": "unknown path"}})
@@ -770,7 +775,7 @@ func (p *Proxy) identity(r *http.Request, obj jsonbody.Object, proto string) (cl
 	taskID = firstNonEmpty(r.Header.Get("X-Conductor-Task"), rawString(obj.Values["conductor_task"]))
 	stepID = firstNonEmpty(r.Header.Get("X-Conductor-Step"), rawString(obj.Values["conductor_step"]))
 	if taskID == "" {
-		taskID = newID("t")
+		taskID = NewTaskID()
 	}
 	if stepID == "" {
 		stepID = newID("s")
@@ -1068,6 +1073,9 @@ func firstNonEmpty(values ...string) string {
 	}
 	return ""
 }
+
+// NewTaskID allocates a receiver-owned task identity for a fresh request.
+func NewTaskID() string { return newID("t") }
 
 func newID(prefix string) string {
 	buf := make([]byte, 8)
