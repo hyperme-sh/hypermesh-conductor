@@ -12,6 +12,7 @@ import (
 	"strings"
 
 	"github.com/hyperme-sh/hypermesh-conductor/internal/config"
+	"github.com/hyperme-sh/hypermesh-conductor/internal/proxy"
 )
 
 type peerGrant struct {
@@ -64,6 +65,7 @@ func (grant peerGrant) handler(dispatch http.Handler) http.Handler {
 			return
 		}
 		local.Header.Set("Content-Type", "application/json")
+		local.Header.Set("X-Conductor-Task", proxy.NewTaskID())
 		local.Header.Set("X-Conductor-Class", envelope.Class)
 		local.Header.Set(config.ProxyTokenHeader, os.Getenv(config.ProxyTokenEnv))
 		dispatch.ServeHTTP(w, local)

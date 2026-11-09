@@ -3,9 +3,13 @@ package cli
 import (
 	"context"
 	"encoding/json"
+	"github.com/hyperme-sh/hypermesh-conductor/internal/config"
+	"github.com/hyperme-sh/hypermesh-conductor/internal/metrics"
+	"github.com/hyperme-sh/hypermesh-conductor/internal/proxy"
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -87,5 +91,37 @@ func TestPeerReceiverScopedDispatch(t *testing.T) {
 	t.Setenv("INBOUND_GRANT", "replacement")
 	if submit(context.Background(), server.Client().Transport, route, "lab", "summarize", strings.NewReader("sample"), io.Discard) == nil || calls != 1 {
 		t.Fatal("revoked or denied submission dispatched")
+	}
+}
+
+func TestPeerIngressAllocatesLocalBudgetTask(t *testing.T) {
+	t.Setenv("PEER_GRANT", "fixture")
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		io.WriteString(w, `{"choices":[{"message":{"role":"assistant","content":"ok"}}],"usage":{"prompt_tokens":2,"completion_tokens":1}}`)
+	}))
+	defer upstream.Close()
+	cfg, err := config.Load(filepath.Join("..", "..", "examples", "endpoints.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg.Cheap = config.Tier{Name: "cheap", Provider: config.ProviderOpenAICompatible, Model: "test", BaseURL: upstream.URL + "/v1", Auth: config.AuthPassthrough, OutputLimit: 8, TaskOutputLimit: 8}
+	cfg.Journal = filepath.Join(t.TempDir(), "journal.jsonl")
+	journal, err := metrics.OpenJournal(cfg.Journal)
+	if err != nil {
+		t.Fatal(err)
+	}
+	handler := peerGrant{"lab", []string{"summarize"}, "PEER_GRANT"}.handler(proxy.New(cfg, nil, journal))
+	seen := map[string]bool{}
+	for range 2 {
+		req := httptest.NewRequest(http.MethodPost, "/v1/peer/prompt-submit", strings.NewReader(`{"destination":"lab","class":"summarize","prompt":"sample"}`))
+		req.Header.Set("Authorization", "Bearer fixture")
+		req.Header.Set("X-Conductor-Task", "caller-supplied")
+		rec := httptest.NewRecorder()
+		handler.ServeHTTP(rec, req)
+		id := rec.Header().Get("X-Conductor-Task")
+		if rec.Code != 200 || id == "" || id == "caller-supplied" || seen[id] {
+			t.Fatalf("status %d task %q: %s", rec.Code, id, rec.Body.String())
+		}
+		seen[id] = true
 	}
 }

@@ -775,7 +775,7 @@ func (p *Proxy) identity(r *http.Request, obj jsonbody.Object, proto string) (cl
 	taskID = firstNonEmpty(r.Header.Get("X-Conductor-Task"), rawString(obj.Values["conductor_task"]))
 	stepID = firstNonEmpty(r.Header.Get("X-Conductor-Step"), rawString(obj.Values["conductor_step"]))
 	if taskID == "" {
-		taskID = newID("t")
+		taskID = NewTaskID()
 	}
 	if stepID == "" {
 		stepID = newID("s")
@@ -1073,6 +1073,9 @@ func firstNonEmpty(values ...string) string {
 	}
 	return ""
 }
+
+// NewTaskID allocates a receiver-owned task identity for a fresh request.
+func NewTaskID() string { return newID("t") }
 
 func newID(prefix string) string {
 	buf := make([]byte, 8)
