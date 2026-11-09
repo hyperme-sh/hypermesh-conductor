@@ -9,6 +9,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -123,5 +124,41 @@ func TestPeerIngressAllocatesLocalBudgetTask(t *testing.T) {
 			t.Fatalf("status %d task %q: %s", rec.Code, id, rec.Body.String())
 		}
 		seen[id] = true
+	}
+}
+
+func TestLivePeerGrantRevocation(t *testing.T) {
+	t.Setenv("LIVE_PEER_TEST", "fixture")
+	path := filepath.Join(t.TempDir(), "grant.json")
+	grant := []byte(`{"destination":"lab","allowed_classes":["summarize"],"token_env":"LIVE_PEER_TEST"}`)
+	if err := os.WriteFile(path, grant, 0600); err != nil {
+		t.Fatal(err)
+	}
+	calls := 0
+	handler, err := loadPeerIngress(path, http.HandlerFunc(func(http.ResponseWriter, *http.Request) { calls++ }))
+	if err != nil {
+		t.Fatal(err)
+	}
+	check := func(status int) {
+		t.Helper()
+		r := httptest.NewRequest("POST", "/v1/peer/prompt-submit", strings.NewReader(`{"destination":"lab","class":"summarize","prompt":"same"}`))
+		r.Header.Set("Authorization", "Bearer fixture")
+		w := httptest.NewRecorder()
+		handler.ServeHTTP(w, r)
+		if w.Code != status {
+			t.Fatalf("status %d want %d", w.Code, status)
+		}
+	}
+	check(200)
+	if err := os.Remove(path); err != nil {
+		t.Fatal(err)
+	}
+	check(403)
+	if err := os.WriteFile(path, []byte("{"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	check(403)
+	if calls != 1 {
+		t.Fatalf("dispatched %d times", calls)
 	}
 }

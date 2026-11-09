@@ -22,6 +22,20 @@ type peerGrant struct {
 }
 
 func loadPeerIngress(path string, dispatch http.Handler) (http.Handler, error) {
+	if _, err := readPeerGrant(path); err != nil {
+		return nil, err
+	}
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		grant, err := readPeerGrant(path)
+		if err != nil {
+			http.Error(w, "peer grant denied", http.StatusForbidden)
+			return
+		}
+		grant.handler(dispatch).ServeHTTP(w, r)
+	}), nil
+}
+
+func readPeerGrant(path string) (*peerGrant, error) {
 	f, err := os.Open(path)
 	if err != nil {
 		return nil, err
@@ -33,7 +47,7 @@ func loadPeerIngress(path string, dispatch http.Handler) (http.Handler, error) {
 	if dec.Decode(&grant) != nil || dec.Decode(new(any)) != io.EOF || grant.Destination == "" || len(grant.Classes) == 0 || grant.TokenEnv == "" || grant.TokenEnv == config.ProxyTokenEnv || strings.TrimSpace(os.Getenv(grant.TokenEnv)) == "" {
 		return nil, errors.New("invalid peer ingress grant")
 	}
-	return grant.handler(dispatch), nil
+	return &grant, nil
 }
 
 func (grant peerGrant) handler(dispatch http.Handler) http.Handler {
