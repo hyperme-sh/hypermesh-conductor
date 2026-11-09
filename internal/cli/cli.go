@@ -27,10 +27,12 @@ import (
 // Main runs one invocation. args do not include the program name.
 func Main(args []string, stdout, stderr io.Writer) int {
 	if len(args) == 0 {
-		fmt.Fprintln(stderr, "usage: conductor <route|run|summary|serve|index|primer|dream|rules>")
+		fmt.Fprintln(stderr, "usage: conductor <route|submit|run|summary|serve|index|primer|dream|rules>")
 		return 2
 	}
 	switch args[0] {
+	case "submit":
+		return submitCmd(args[1:], os.Stdin, stdout, stderr)
 	case "route":
 		return routeCmd(args[1:], stdout, stderr)
 	case "summary":
@@ -48,7 +50,7 @@ func Main(args []string, stdout, stderr io.Writer) int {
 	case "rules":
 		return rulesCmd(args[1:], stdout, stderr)
 	case "-h", "--help", "help":
-		fmt.Fprintln(stdout, "usage: conductor <route|run|summary|serve|index|primer|dream|rules>")
+		fmt.Fprintln(stdout, "usage: conductor <route|submit|run|summary|serve|index|primer|dream|rules>")
 		return 0
 	default:
 		fmt.Fprintf(stderr, "unknown command %s\n", args[0])
@@ -156,6 +158,7 @@ func serveCmd(args []string, stdout, stderr io.Writer) int {
 	fs.SetOutput(stderr)
 	configPath := fs.String("config", "", "endpoints file")
 	journalPath := fs.String("journal", "", "measurement journal")
+	peerGrantPath := fs.String("peer-grant", "", "optional single-hop peer ingress grant file")
 	stdinListener := fs.Bool("stdin-listener", false, "serve a loopback TCP listener inherited on stdin")
 	if err := fs.Parse(args); err != nil {
 		return 2
@@ -186,6 +189,15 @@ func serveCmd(args []string, stdout, stderr io.Writer) int {
 		return 2
 	}
 	server := proxy.New(cfg, hop, journal)
+	if *peerGrantPath != "" {
+		// Peer submissions have no access to the operator's local note service.
+		receiver := proxy.New(cfg, hop, journal)
+		server.PeerIngress, err = loadPeerIngress(*peerGrantPath, receiver)
+		if err != nil {
+			fmt.Fprintln(stderr, err)
+			return 2
+		}
+	}
 	if svc, store, err := openNotes(cfg); err != nil {
 		fmt.Fprintln(stderr, err.Error())
 		return 2

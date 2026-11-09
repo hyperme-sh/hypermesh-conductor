@@ -92,3 +92,15 @@ Conductor sends the final model, messages, tool definitions and supported templa
 Step receipts distinguish `counted_input_tokens` (preflight tokenizer), `estimated_input_tokens` (heuristic), and `input_tokens` (reported after inference). Summary blocks return a null counted total when any row lacks a preflight count. Context admission applies to each generation; the task-wide output ledger accounts for all candidates and steps.
 
 Set the recipe's top-level `max_task_tokens` to limit combined input and output for a task across tiers. Both tiers must have a vLLM input counter. Supply an explicit task ID and keep the journal and its ledger together on restart. Each generation provisionally charges its counted input once per generated candidate plus its aggregate output cap. A measured receipt replaces both provisional charges with reported usage. OpenAI prompt usage already includes cached input. Uncertain or interrupted attempts keep their full reservation. An unavailable count or an unsupported request prevents generation. When both task limits are present, the ledger enforces them together. Start a fresh task when changing recipes.
+
+## Single-hop prompt submission
+
+An operator can configure a destination for an explicit submission with a routes file:
+
+```json
+{"lab":{"origin":"https://lab.example","allowed_classes":["summarize"],"token_env":"LAB_PROMPT_GRANT"}}
+```
+
+Run `conductor submit -routes routes.json -destination lab -class summarize` and supply one user prompt on stdin. Selecting the class declares the intended job; the operator should grant it only to callers allowed to send the supplied text. This CLI reads its caller's routes file and is intended for a trusted local operator.
+
+The client POSTs a JSON object containing `destination`, `class` and `prompt` to `/v1/peer/prompt-submit` using TLS 1.3 and the configured bearer credential. Provision a dedicated grant for that destination. Its ingress must authenticate the caller, bind the grant to its own destination and permitted classes, and authorize dispatch. Enable the receiver with `conductor serve -config endpoints.json -peer-grant grant.json`. Its grant file contains `{"destination":"lab","allowed_classes":["summarize"],"token_env":"INBOUND_SUMMARY_GRANT"}`. Provision the matching secret independently of the local proxy token. Expose only the peer POST path through an operator-managed TLS ingress to the loopback listener. The destination constructs a fresh local inference request, applies its own routing and review, and excludes local note retrieval. Omitting the grant leaves the peer path disabled. The client sends no conversation history, tools or local provider keys and rejects redirects. This path is independent of automatic tier routing.
