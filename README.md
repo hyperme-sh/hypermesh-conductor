@@ -159,3 +159,13 @@ SHA-256 and an approximate input size computed from the final serialized payload
 with the existing character-based estimator. Provider-reported usage remains
 separate. These limits apply per completion; cumulative task budgets require
 durable reservations.
+
+### Prepare leased capacity
+
+With the lease-client capable `hypermesh-orchestrator` on PATH and the renter's
+`HYPERMESH_API_KEY` in the environment, run `conductor prepare-leases --tenant TENANT`.
+Optional `--catalog-id` and `--api-base` select a model and trusted plane.
+This command can open offers on the allowed hosts and waits for gateway tickets.
+It emits the device, lease ID and ownership flag for each host. The renter is
+responsible for closing newly opened leases after use. Preparing capacity is
+explicit; ordinary routing and proxy startup do not acquire leases.
