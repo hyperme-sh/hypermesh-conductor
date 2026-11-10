@@ -17,6 +17,7 @@ import (
 	"github.com/hyperme-sh/hypermesh-conductor/internal/aiuditor"
 	"github.com/hyperme-sh/hypermesh-conductor/internal/config"
 	"github.com/hyperme-sh/hypermesh-conductor/internal/history"
+	"github.com/hyperme-sh/hypermesh-conductor/internal/leases"
 	"github.com/hyperme-sh/hypermesh-conductor/internal/metrics"
 	"github.com/hyperme-sh/hypermesh-conductor/internal/notes"
 	"github.com/hyperme-sh/hypermesh-conductor/internal/proxy"
@@ -27,10 +28,12 @@ import (
 // Main runs one invocation. args do not include the program name.
 func Main(args []string, stdout, stderr io.Writer) int {
 	if len(args) == 0 {
-		fmt.Fprintln(stderr, "usage: conductor <route|submit|run|summary|serve|index|primer|dream|rules>")
+		fmt.Fprintln(stderr, "usage: conductor <prepare-leases|route|submit|run|summary|serve|index|primer|dream|rules>")
 		return 2
 	}
 	switch args[0] {
+	case "prepare-leases":
+		return prepareLeasesCmd(args[1:], stdout, stderr)
 	case "submit":
 		return submitCmd(args[1:], os.Stdin, stdout, stderr)
 	case "route":
@@ -50,12 +53,33 @@ func Main(args []string, stdout, stderr io.Writer) int {
 	case "rules":
 		return rulesCmd(args[1:], stdout, stderr)
 	case "-h", "--help", "help":
-		fmt.Fprintln(stdout, "usage: conductor <route|submit|run|summary|serve|index|primer|dream|rules>")
+		fmt.Fprintln(stdout, "usage: conductor <prepare-leases|route|submit|run|summary|serve|index|primer|dream|rules>")
 		return 0
 	default:
 		fmt.Fprintf(stderr, "unknown command %s\n", args[0])
 		return 2
 	}
+}
+
+func prepareLeasesCmd(args []string, stdout, stderr io.Writer) int {
+	fs := flag.NewFlagSet("prepare-leases", flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	tenant := fs.String("tenant", "", "renter tenant ID")
+	catalog := fs.String("catalog-id", "", "catalog model ID (defaults to Orchestrator configuration)")
+	api := fs.String("api-base", "", "trusted control-plane base URL")
+	if err := fs.Parse(args); err != nil {
+		return 2
+	}
+	if fs.NArg() != 0 || *tenant == "" {
+		fmt.Fprintln(stderr, "prepare-leases requires --tenant and accepts no positional arguments")
+		return 2
+	}
+	result, err := leases.Prepare(context.Background(), *tenant, *catalog, *api)
+	if err != nil {
+		fmt.Fprintln(stderr, err)
+		return 1
+	}
+	return writePretty(stdout, result)
 }
 
 func routeCmd(args []string, stdout, stderr io.Writer) int {
