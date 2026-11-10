@@ -18,6 +18,7 @@ var errTaskBudget = errors.New("task token allowance exhausted, recipe changed, 
 type tokenBudget struct {
 	outputLimit, totalLimit int
 	input, output           int
+	attemptID               string
 }
 
 func reserveTokens(path, task, step, recipe string, budget tokenBudget) (*sql.DB, error) {
@@ -83,6 +84,16 @@ func admitAttempt(db *sql.DB, task, step, recipe string, b tokenBudget) error {
 	}
 	if n != 1 {
 		return errTaskBudget
+	}
+	if b.attemptID != "" {
+		if _, err := tx.Exec(`CREATE TABLE IF NOT EXISTS plane_token_reservations (
+            attempt_id TEXT PRIMARY KEY, task TEXT NOT NULL, step TEXT NOT NULL,
+            reserved_input INTEGER NOT NULL, reserved_output INTEGER NOT NULL, UNIQUE(task,step))`); err != nil {
+			return err
+		}
+		if _, err := tx.Exec("INSERT INTO plane_token_reservations VALUES (?,?,?,?,?)", b.attemptID, task, step, b.input, b.output); err != nil {
+			return err
+		}
 	}
 	return tx.Commit()
 }

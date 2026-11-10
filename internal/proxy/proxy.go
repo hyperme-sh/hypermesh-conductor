@@ -14,6 +14,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/google/uuid"
 	"io"
 	"net"
 	"net/http"
@@ -204,7 +205,14 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"error": map[string]any{"message": err.Error()}})
 		return
 	}
-	if (p.Config.Cheap.TaskTokenLimit > 0 || (p.Config.Cheap.TaskOutputLimit > 0 && proto != translate.ProtoEmbeddings)) && firstNonEmpty(r.Header.Get("X-Conductor-Task"), rawString(obj.Values["conductor_task"])) == "" {
+	accountingURL := os.Getenv("CONDUCTOR_ACCOUNTING_URL")
+	if accountingURL != "" {
+		if err := authorizeProxy(r); err != nil {
+			writeJSON(w, http.StatusUnauthorized, map[string]any{"error": "proxy authorization required"})
+			return
+		}
+	}
+	if (accountingURL != "" || p.Config.Cheap.TaskTokenLimit > 0 || (p.Config.Cheap.TaskOutputLimit > 0 && proto != translate.ProtoEmbeddings)) && firstNonEmpty(r.Header.Get("X-Conductor-Task"), rawString(obj.Values["conductor_task"])) == "" {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"error": map[string]any{"message": "task budget requires an explicit task ID"}})
 		return
 	}
@@ -364,6 +372,12 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	estimated := compact.EstimateTokens(string(wire.Body))
 	base.EstimatedInputTokens = &estimated
 	base.RecipeSHA256 = tier.RecipeDigest
+	if accountingURL != "" {
+		if tier.TaskTokenLimit <= 0 || count == nil {
+			writeJSON(w, http.StatusServiceUnavailable, map[string]any{"error": "plane accounting requires counted input and a task token limit"})
+			return
+		}
+	}
 	if tier.TaskTokenLimit > 0 || (tier.TaskOutputLimit > 0 && wire.Protocol != translate.ProtoEmbeddings) {
 		if p.Journal == nil {
 			writeJSON(w, http.StatusServiceUnavailable, map[string]any{"error": map[string]any{"message": "task budget requires a durable journal"}})
@@ -381,7 +395,11 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			}
 			inputCharge = *count * allowance.candidates
 		}
-		ledger, reserveErr := reserveTokens(p.Journal.Path()+".output.sqlite", taskID, stepID, tier.RecipeDigest, tokenBudget{outputLimit: tier.TaskOutputLimit, totalLimit: tier.TaskTokenLimit, input: inputCharge, output: allowance.output})
+		attemptID := ""
+		if accountingURL != "" {
+			attemptID = uuid.NewString()
+		}
+		ledger, reserveErr := reserveTokens(p.Journal.Path()+".output.sqlite", taskID, stepID, tier.RecipeDigest, tokenBudget{attemptID: attemptID, outputLimit: tier.TaskOutputLimit, totalLimit: tier.TaskTokenLimit, input: inputCharge, output: allowance.output})
 		if reserveErr != nil {
 			status, message := http.StatusServiceUnavailable, "task budget ledger unavailable"
 			if errors.Is(reserveErr, errTaskBudget) {
@@ -391,6 +409,14 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		defer ledger.Close()
+		if accountingURL != "" {
+			hold := planeReservation{Task: taskID, Step: stepID, Model: tier.Model, Recipe: tier.RecipeDigest, Source: tier.InputCounter, Input: inputCharge, Output: allowance.output}
+			if err := registerConfiguredReservation(r.Context(), accountingURL, attemptID, hold); err != nil {
+				writeJSON(w, http.StatusServiceUnavailable, map[string]any{"error": "plane reservation unconfirmed; attempt remains held"})
+				return
+			}
+			authReq.Header.Set("X-Hypermesh-Token-Attempt", attemptID)
+		}
 		r = r.WithContext(context.WithValue(r.Context(), budgetContextKey{}, ledger))
 	}
 	p.forward(w, r, authReq, tier, wire, stream, secrets, base)
