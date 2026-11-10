@@ -235,7 +235,7 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"error": map[string]any{"message": "request body must be a JSON object"}})
 		return
 	}
-	stampLeaseHeader(r, obj)
+	originalLease := strings.TrimSpace(rawString(obj.Values["lease_id"]))
 	className, suggest, taskID, stepID, err := p.identity(r, obj, proto)
 	if err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"error": map[string]any{"message": err.Error()}})
@@ -295,6 +295,12 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if expected := r.Header.Values("X-Conductor-Expected-Model"); len(expected) > 0 && (len(expected) != 1 || expected[0] != tier.Model) {
 		writeJSON(w, http.StatusConflict, map[string]any{"error": map[string]any{"message": "route does not match expected model"}})
 		return
+	}
+	if tier.Gateway {
+		if err := leaseHeaderConflict(r, originalLease); err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]any{"error": map[string]any{"message": err.Error()}})
+			return
+		}
 	}
 	stream := boolField(obj, "stream")
 	prelimHash, _ := hashBody(proto, prepared)
@@ -393,7 +399,7 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			base.PrefixCacheMatch = &match
 		}
 	}
-	secrets, authReq, err := p.upstreamRequest(r, tier, wire, stream)
+	secrets, authReq, err := p.upstreamRequest(r, tier, wire, stream, originalLease)
 	if err != nil {
 		status := http.StatusBadRequest
 		var denied proxyAuthError
@@ -895,7 +901,7 @@ func (p *Proxy) injectPrefix(obj *jsonbody.Object, proto string) {
 	}
 }
 
-func (p *Proxy) upstreamRequest(client *http.Request, tier config.Tier, wire translate.Wire, stream bool) ([]string, *http.Request, error) {
+func (p *Proxy) upstreamRequest(client *http.Request, tier config.Tier, wire translate.Wire, stream bool, originalLease string) ([]string, *http.Request, error) {
 	if tier.IncludeUsage && stream && wire.Protocol == translate.ProtoChat && tier.Provider == config.ProviderOpenAI {
 		obj, err := jsonbody.Parse(wire.Body)
 		if err == nil {
@@ -915,9 +921,7 @@ func (p *Proxy) upstreamRequest(client *http.Request, tier config.Tier, wire tra
 	if err != nil {
 		return nil, nil, err
 	}
-	if tier.Gateway && wire.LeaseID != "" && req.Header.Get("X-Hypermesh-Lease-Id") == "" && req.Header.Get("X-Lease-Id") == "" {
-		req.Header.Set("X-Hypermesh-Lease-Id", wire.LeaseID)
-	}
+	applyReviewedLease(req, client, tier, wire.LeaseID, originalLease)
 	if tier.Provider == config.ProviderAnthropic || wire.Protocol == translate.ProtoMessages {
 		version := client.Header.Get("anthropic-version")
 		if version == "" {
@@ -1035,8 +1039,40 @@ func applyGatewayIdentity(dst, src *http.Request, tier config.Tier, clientKey st
 		dst.Header.Set("Authorization", "Bearer "+clientKey)
 	}
 	copyHeader(dst, src, "X-Tenant-ID")
-	copyHeader(dst, src, "X-Hypermesh-Lease-Id")
-	copyHeader(dst, src, "X-Lease-Id")
+	return nil
+}
+
+// applyReviewedLease sets the gateway lease selector from the reviewed body.
+// A caller header is not a second selector: AIuditor can remove or replace
+// lease_id, and that result is what the gateway sees.
+func applyReviewedLease(dst, src *http.Request, tier config.Tier, finalLease, originalLease string) {
+	if !tier.Gateway {
+		return
+	}
+	dst.Header.Del("X-Hypermesh-Lease-Id")
+	dst.Header.Del("X-Lease-Id")
+	if finalLease != "" {
+		dst.Header.Set("X-Hypermesh-Lease-Id", finalLease)
+		return
+	}
+	if originalLease != "" {
+		return
+	}
+	if value := firstNonEmpty(src.Header.Get("X-Hypermesh-Lease-Id"), src.Header.Get("X-Lease-Id")); value != "" {
+		dst.Header.Set("X-Hypermesh-Lease-Id", value)
+	}
+}
+
+func leaseHeaderConflict(r *http.Request, bodyLease string) error {
+	if bodyLease == "" {
+		return nil
+	}
+	for _, name := range []string{"X-Hypermesh-Lease-Id", "X-Lease-Id", "X-Conductor-Task"} {
+		value := strings.TrimSpace(r.Header.Get(name))
+		if value != "" && value != bodyLease {
+			return fmt.Errorf("%s conflicts with body lease_id", name)
+		}
+	}
 	return nil
 }
 
@@ -1068,15 +1104,6 @@ func bearerToken(src *http.Request) string {
 func copyHeader(dst, src *http.Request, name string) {
 	if value := strings.TrimSpace(src.Header.Get(name)); value != "" {
 		dst.Header.Set(name, value)
-	}
-}
-
-func stampLeaseHeader(r *http.Request, obj jsonbody.Object) {
-	if strings.TrimSpace(r.Header.Get("X-Hypermesh-Lease-Id")) != "" || strings.TrimSpace(r.Header.Get("X-Lease-Id")) != "" {
-		return
-	}
-	if lease := strings.TrimSpace(rawString(obj.Values["lease_id"])); lease != "" {
-		r.Header.Set("X-Hypermesh-Lease-Id", lease)
 	}
 }
 

@@ -2682,7 +2682,7 @@ func TestGatewayForwardsRenterIdentityAndKeepsLease(t *testing.T) {
 	cfg.Cheap.Model = "llama-3.1-8b-q4"
 	server := New(cfg, aiuditor.Stub{}, openJournal(t, dir))
 
-	req := request("/v1/chat/completions", "parse", "task-1", "lease-1", "", `{"model":"client-model","lease_id":"`+lease+`","messages":[{"role":"user","content":"hi"}]}`)
+	req := request("/v1/chat/completions", "parse", lease, "lease-1", "", `{"model":"client-model","lease_id":"`+lease+`","messages":[{"role":"user","content":"hi"}]}`)
 	req.Header.Set("X-Api-Key", "renter.secret")
 	req.Header.Set("X-Tenant-ID", tenant)
 	req.Header.Set("X-Lease-Id", lease)
@@ -2691,14 +2691,14 @@ func TestGatewayForwardsRenterIdentityAndKeepsLease(t *testing.T) {
 	if rec.Code != http.StatusOK || path != "/v1/chat/completions" {
 		t.Fatalf("code %d path %s body %s", rec.Code, path, rec.Body.String())
 	}
-	if header.Get("X-Api-Key") != "renter.secret" || header.Get("Authorization") != "" || header.Get("X-Tenant-ID") != tenant || header.Get("X-Lease-Id") != lease {
+	if header.Get("X-Api-Key") != "renter.secret" || header.Get("Authorization") != "" || header.Get("X-Tenant-ID") != tenant || header.Get("X-Hypermesh-Lease-Id") != lease || header.Get("X-Lease-Id") != "" {
 		t.Fatal(header)
 	}
 	if !strings.Contains(body, `"model":"llama-3.1-8b-q4"`) || !strings.Contains(body, `"lease_id":"`+lease+`"`) {
 		t.Fatal(body)
 	}
 
-	translated := request("/v1/messages", "parse", "task-1", "lease-2", "", `{"lease_id":"`+lease+`","messages":[{"role":"user","content":"hi"}]}`)
+	translated := request("/v1/messages", "parse", lease, "lease-2", "", `{"lease_id":"`+lease+`","messages":[{"role":"user","content":"hi"}]}`)
 	translated.Header.Set("Authorization", "Bearer renter.secret")
 	translated.Header.Set("X-Tenant-ID", tenant)
 	rec = httptest.NewRecorder()
@@ -2708,6 +2708,81 @@ func TestGatewayForwardsRenterIdentityAndKeepsLease(t *testing.T) {
 	}
 	if !strings.Contains(body, `"lease_id":"`+lease+`"`) || !strings.Contains(body, `"model":"llama-3.1-8b-q4"`) || strings.Contains(body, "client-model") {
 		t.Fatal(body)
+	}
+}
+
+type leaseRewrite struct{ body string }
+
+func (h leaseRewrite) Review(context.Context, aiuditor.Envelope) (aiuditor.Verdict, error) {
+	return aiuditor.Verdict{Action: aiuditor.Modify, Reason: "lease", Body: []byte(h.body)}, nil
+}
+
+func TestReviewedBodyOwnsGatewayLeaseHeader(t *testing.T) {
+	const original = "22222222-2222-2222-2222-222222222222"
+	const replaced = "33333333-3333-3333-3333-333333333333"
+	chat := func(lease string) string {
+		if lease == "" {
+			return `{"messages":[{"role":"user","content":"hi"}]}`
+		}
+		return `{"lease_id":"` + lease + `","messages":[{"role":"user","content":"hi"}]}`
+	}
+	for _, tc := range []struct {
+		name        string
+		rewrite     string
+		header      string
+		headerVal   string
+		task        string
+		wantCode    int
+		wantLease   string
+		forbidLease bool
+	}{
+		{name: "remove", rewrite: chat(""), header: "X-Hypermesh-Lease-Id", headerVal: original, task: original, wantCode: http.StatusOK, forbidLease: true},
+		{name: "replace", rewrite: chat(replaced), header: "X-Hypermesh-Lease-Id", headerVal: original, task: original, wantCode: http.StatusOK, wantLease: replaced},
+		{name: "conflict-header", rewrite: chat(original), header: "X-Hypermesh-Lease-Id", headerVal: replaced, task: original, wantCode: http.StatusBadRequest},
+		{name: "conflict-task", rewrite: chat(original), header: "X-Lease-Id", headerVal: original, task: replaced, wantCode: http.StatusBadRequest},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			hits := 0
+			var got http.Header
+			var body string
+			upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				hits++
+				raw, _ := io.ReadAll(r.Body)
+				got = r.Header.Clone()
+				body = string(raw)
+				_, _ = w.Write([]byte(`{"usage":{"prompt_tokens":1,"completion_tokens":1}}`))
+			}))
+			defer upstream.Close()
+			dir := t.TempDir()
+			cfg := loadTestConfig(t, dir, upstream.URL+"/v1", upstream.URL+"/v1", config.AuthPassthrough, config.ProviderOpenAICompatible)
+			cfg.Cheap.Gateway = true
+			cfg.Cheap.Model = "llama-3.1-8b-q4"
+			req := request("/v1/chat/completions", "parse", tc.task, tc.name, "", chat(original))
+			req.Header.Set(tc.header, tc.headerVal)
+			rec := httptest.NewRecorder()
+			New(cfg, leaseRewrite{body: tc.rewrite}, openJournal(t, dir)).ServeHTTP(rec, req)
+			if rec.Code != tc.wantCode {
+				t.Fatalf("code %d body %s", rec.Code, rec.Body.String())
+			}
+			if tc.wantCode != http.StatusOK {
+				if hits != 0 || !strings.Contains(rec.Body.String(), "conflicts with body lease_id") {
+					t.Fatalf("hits %d body %s", hits, rec.Body.String())
+				}
+				return
+			}
+			if hits != 1 {
+				t.Fatalf("hits %d", hits)
+			}
+			if tc.forbidLease {
+				if got.Get("X-Hypermesh-Lease-Id") != "" || got.Get("X-Lease-Id") != "" || strings.Contains(body, "lease_id") {
+					t.Fatalf("header %v body %s", got, body)
+				}
+				return
+			}
+			if got.Get("X-Hypermesh-Lease-Id") != tc.wantLease || got.Get("X-Lease-Id") != "" || !strings.Contains(body, `"lease_id":"`+tc.wantLease+`"`) || strings.Contains(body, original) {
+				t.Fatalf("header %v body %s", got, body)
+			}
+		})
 	}
 }
 
