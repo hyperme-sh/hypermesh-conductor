@@ -252,6 +252,10 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"error": map[string]any{"message": err.Error()}})
 		return
 	}
+	if accountingURL != "" && tier.TaskTokenLimit <= 0 {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]any{"error": "plane accounting requires a task token limit"})
+		return
+	}
 	if expected := r.Header.Values("X-Conductor-Expected-Model"); len(expected) > 0 && (len(expected) != 1 || expected[0] != tier.Model) {
 		writeJSON(w, http.StatusConflict, map[string]any{"error": map[string]any{"message": "route does not match expected model"}})
 		return
