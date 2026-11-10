@@ -271,7 +271,7 @@ func (p *Proxy) cheapSummary(ctx context.Context, client *http.Request, tail, re
 		return "", usage.UncertainUsage(), latency, input, err
 	}
 	if err != nil || resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		if err == nil && (resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden) {
+		if err == nil && tier.Gateway && (resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden) {
 			err = gatewayRejectedError{status: resp.StatusCode}
 		}
 		if err == nil {

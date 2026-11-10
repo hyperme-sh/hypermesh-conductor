@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"crypto/ecdsa"
@@ -2904,6 +2905,9 @@ func TestGatewayAuxiliaryCallsCarryIdentity(t *testing.T) {
 			if strings.HasSuffix(r.URL.Path, "/tokenize") {
 				tokenLease = r.Header.Get("X-Hypermesh-Lease-Id")
 				tokenKey = r.Header.Get("X-Api-Key")
+				if r.Header.Get("Content-Type") != "application/json" {
+					t.Errorf("tokenizer content type %q", r.Header.Get("Content-Type"))
+				}
 				tokenBody = string(raw)
 				fmt.Fprint(w, `{"count":4,"max_model_len":128}`)
 				return
@@ -2948,6 +2952,132 @@ func TestGatewayAuxiliaryCallsCarryIdentity(t *testing.T) {
 			t.Fatalf("code %d path %s header %v body %s", rec.Code, path, got, rec.Body.String())
 		}
 	})
+}
+
+func TestNonGatewayCompactionFailureKeepsTheConversation(t *testing.T) {
+	var sawFrontier bool
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		raw, _ := io.ReadAll(r.Body)
+		if strings.Contains(string(raw), "Summarize the conversation tail") {
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
+		}
+		sawFrontier = true
+		fmt.Fprint(w, `{"usage":{"prompt_tokens":1,"completion_tokens":1}}`)
+	}))
+	defer upstream.Close()
+	dir := t.TempDir()
+	cfg := loadTestConfig(t, dir, upstream.URL+"/v1", upstream.URL+"/v1", config.AuthPassthrough, config.ProviderOpenAICompatible)
+	cfg.Compaction.MaxTailTokens = 8
+	cfg.Compaction.RecentMessages = 0
+	req := request("/v1/chat/completions", "code", "task-1", "keep", "", `{"messages":[{"role":"user","content":"`+strings.Repeat("tail fact ", 40)+`"}]}`)
+	rec := httptest.NewRecorder()
+	New(cfg, aiuditor.Stub{}, openJournal(t, dir)).ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK || !sawFrontier {
+		t.Fatalf("code %d frontier %v body %s", rec.Code, sawFrontier, rec.Body.String())
+	}
+}
+
+func isTimeout(err error) bool {
+	var netErr net.Error
+	return errors.As(err, &netErr) && netErr.Timeout()
+}
+
+func TestNetworkAuthFailureReleasesTheConnection(t *testing.T) {
+	dir := t.TempDir()
+	cfg := loadTestConfig(t, dir, "http://127.0.0.1:1/v1", "http://127.0.0.1:1/v1", config.AuthPassthrough, config.ProviderOpenAICompatible)
+	certFile, keyFile := writeTestCert(t)
+	cfg.ListenMode = config.ListenModeNetwork
+	cfg.TLS = config.TLSFiles{CertFile: certFile, KeyFile: keyFile}
+	t.Setenv(config.ProxyTokenEnv, "proxy-token-for-tests")
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+	go func() { _ = New(cfg, aiuditor.Stub{}, nil).ServeListener(ln) }()
+	addr := ln.Addr().String()
+	dial := func() (*tls.Conn, error) {
+		return tls.Dial("tcp", addr, &tls.Config{InsecureSkipVerify: true})
+	}
+	deadline := time.Now().Add(3 * time.Second)
+	var failed *tls.Conn
+	for {
+		failed, err = dial()
+		if err == nil || time.Now().After(deadline) {
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer failed.Close()
+	if _, err := fmt.Fprintf(failed, "GET /v1/models HTTP/1.1\r\nHost: %s\r\nConnection: keep-alive\r\n\r\n", addr); err != nil {
+		t.Fatal(err)
+	}
+	resp, err := http.ReadResponse(bufio.NewReader(failed), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	io.Copy(io.Discard, resp.Body)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusUnauthorized || !resp.Close {
+		t.Fatalf("status %d close %v proto %s headers %v", resp.StatusCode, resp.Close, resp.Proto, resp.Header)
+	}
+	failed.SetReadDeadline(time.Now().Add(time.Second))
+	if _, err := failed.Read(make([]byte, 1)); err == nil || isTimeout(err) {
+		t.Fatal("unauthenticated connection stayed open", err)
+	}
+
+	var wg sync.WaitGroup
+	const badConns = 32
+	ready := make(chan struct{}, badConns)
+	for i := 0; i < badConns; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			conn, err := dial()
+			if err != nil {
+				return
+			}
+			defer conn.Close()
+			conn.SetDeadline(time.Now().Add(8 * time.Second))
+			fmt.Fprintf(conn, "GET /v1/models HTTP/1.1\r\nHost: %s\r\nConnection: keep-alive\r\n\r\n", addr)
+			res, err := http.ReadResponse(bufio.NewReader(conn), nil)
+			if err != nil {
+				return
+			}
+			io.Copy(io.Discard, res.Body)
+			res.Body.Close()
+			ready <- struct{}{}
+			conn.SetReadDeadline(time.Now().Add(2 * time.Second))
+			conn.Read(make([]byte, 1))
+		}()
+	}
+	timeout := time.After(10 * time.Second)
+	for n := 0; n < badConns; n++ {
+		select {
+		case <-ready:
+		case <-timeout:
+			t.Fatal("unauthenticated connections were not released")
+		}
+	}
+	client := &http.Client{Timeout: 2 * time.Second, Transport: &http.Transport{TLSClientConfig: &tls.Config{InsecureSkipVerify: true}}}
+	okReq, err := http.NewRequest(http.MethodGet, "https://"+addr+"/v1/models", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	okReq.Header.Set(config.ProxyTokenHeader, "proxy-token-for-tests")
+	okResp, err := client.Do(okReq)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer okResp.Body.Close()
+	if okResp.StatusCode != http.StatusOK {
+		t.Fatal(okResp.StatusCode)
+	}
+	wg.Wait()
 }
 
 func TestGatewayRefusesNonRenterAndAmbiguousCredentials(t *testing.T) {

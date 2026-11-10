@@ -88,6 +88,11 @@ const (
 	idleTimeout       = 120 * time.Second
 	writeIdle         = 30 * time.Second
 	maxConns          = 128
+	// Network mode keeps unauthenticated connections on a small pool with
+	// short timeouts. Authenticated connections use maxConns.
+	maxPreAuthConns      = 16
+	networkHeaderTimeout = 5 * time.Second
+	networkIdleTimeout   = 5 * time.Second
 )
 
 // ListenAndServe binds the configured address. Loopback is the default.
@@ -126,8 +131,9 @@ func (p *Proxy) ServeListener(listener net.Listener) error {
 		}
 		// Limit the TCP listener first. Wrapping the TLS listener hides
 		// *tls.Conn from net/http, so r.TLS stays nil and a same-origin
-		// https Origin is rejected.
-		listener = tls.NewListener(limitConns(listener, maxConns), &tls.Config{
+		// https Origin is rejected. Unauthenticated connections use a
+		// separate, smaller pool than authenticated ones.
+		listener = tls.NewListener(newPreAuthListener(listener, maxPreAuthConns, maxConns), &tls.Config{
 			Certificates: []tls.Certificate{cert},
 			MinVersion:   tls.VersionTLS12,
 		})
@@ -140,12 +146,25 @@ func (p *Proxy) ServeListener(listener net.Listener) error {
 }
 
 func (p *Proxy) server() *http.Server {
-	return &http.Server{
-		Handler:           p,
-		ReadHeaderTimeout: readHeaderTimeout,
-		ReadTimeout:       readTimeout,
-		IdleTimeout:       idleTimeout,
+	header := readHeaderTimeout
+	idle := idleTimeout
+	srv := &http.Server{
+		Handler:     p,
+		ReadTimeout: readTimeout,
 	}
+	if p.Config.ListenMode == config.ListenModeNetwork {
+		header = networkHeaderTimeout
+		idle = networkIdleTimeout
+		srv.ConnContext = func(ctx context.Context, c net.Conn) context.Context {
+			if tlsConn, ok := c.(*tls.Conn); ok {
+				c = tlsConn.NetConn()
+			}
+			return context.WithValue(ctx, rawConnKey, c)
+		}
+	}
+	srv.ReadHeaderTimeout = header
+	srv.IdleTimeout = idle
+	return srv
 }
 
 // limitConns stops Accept once n connections are open, so a drip of
@@ -180,11 +199,103 @@ func (c *trackedConn) Close() error {
 	return c.Conn.Close()
 }
 
+type rawConnKeyType struct{}
+
+var rawConnKey rawConnKeyType
+
+// newPreAuthListener admits few connections that have not authenticated.
+// A successful proxy-token check promotes the connection onto the larger pool.
+func newPreAuthListener(ln net.Listener, preN, authN int) net.Listener {
+	return &preAuthListener{Listener: ln, pre: make(chan struct{}, preN), auth: make(chan struct{}, authN)}
+}
+
+type preAuthListener struct {
+	net.Listener
+	pre  chan struct{}
+	auth chan struct{}
+}
+
+func (l *preAuthListener) Accept() (net.Conn, error) {
+	l.pre <- struct{}{}
+	conn, err := l.Listener.Accept()
+	if err != nil {
+		<-l.pre
+		return nil, err
+	}
+	return &preAuthConn{Conn: conn, pre: l.pre, auth: l.auth, holdingPre: true}, nil
+}
+
+type preAuthConn struct {
+	net.Conn
+	pre        chan struct{}
+	auth       chan struct{}
+	mu         sync.Mutex
+	holdingPre bool
+	promoted   bool
+	closed     bool
+}
+
+// Promote moves the connection from the unauthenticated pool to the authenticated pool.
+func (c *preAuthConn) Promote() bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.closed {
+		return false
+	}
+	if c.promoted {
+		return true
+	}
+	select {
+	case c.auth <- struct{}{}:
+	default:
+		return false
+	}
+	c.promoted = true
+	if c.holdingPre {
+		<-c.pre
+		c.holdingPre = false
+	}
+	return true
+}
+
+func (c *preAuthConn) Close() error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if !c.closed {
+		c.closed = true
+		if c.promoted {
+			<-c.auth
+		} else if c.holdingPre {
+			<-c.pre
+			c.holdingPre = false
+		}
+	}
+	return c.Conn.Close()
+}
+
+func closeNetworkConn(w http.ResponseWriter) {
+	w.Header().Set("Connection", "close")
+}
+
+func promoteNetworkConn(w http.ResponseWriter, r *http.Request) bool {
+	conn, _ := r.Context().Value(rawConnKey).(*preAuthConn)
+	if conn == nil || conn.Promote() {
+		return true
+	}
+	closeNetworkConn(w)
+	writeJSON(w, http.StatusServiceUnavailable, map[string]any{"error": map[string]any{"message": "connection limit reached"}})
+	return false
+}
+
 // ServeHTTP implements the local API.
 func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if p.Config.ListenMode == config.ListenModeNetwork {
 		if err := authorizeNetwork(r); err != nil {
+			closeNetworkConn(w)
 			writeJSON(w, http.StatusUnauthorized, map[string]any{"error": map[string]any{"message": err.Error()}})
+			return
+		}
+		if !promoteNetworkConn(w, r) {
 			return
 		}
 	}
@@ -1049,7 +1160,11 @@ func applyGatewayIdentity(dst, src *http.Request, tier config.Tier, clientKey st
 
 // applyGatewayDispatch is the only way a request is prepared for a tier.
 // Gateway auth, renter headers, and the reviewed lease are attached together.
+// Every JSON POST built here carries Content-Type, including the tokenizer.
 func applyGatewayDispatch(dst, src *http.Request, tier config.Tier, lease string) ([]string, error) {
+	if dst.Header.Get("Content-Type") == "" {
+		dst.Header.Set("Content-Type", "application/json")
+	}
 	secrets, err := applyAuth(dst, src, tier)
 	if err != nil {
 		return nil, err
