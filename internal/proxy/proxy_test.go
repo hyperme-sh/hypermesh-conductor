@@ -2586,6 +2586,51 @@ func TestRedactEncodedCredentialsPreservesUnrelatedJSON(t *testing.T) {
 	}
 }
 
+func TestFrontierOnlyFileRoutesUnclassifiedRequests(t *testing.T) {
+	assertSingleTierFile(t, "frontier", "frontier-only", "code")
+	assertSingleTierFile(t, "cheap", "cheap-only", "parse")
+}
+
+func assertSingleTierFile(t *testing.T, tierName, model, missingClass string) {
+	t.Helper()
+	var got string
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var payload map[string]any
+		_ = json.NewDecoder(r.Body).Decode(&payload)
+		got, _ = payload["model"].(string)
+		_, _ = w.Write([]byte(`{"usage":{"prompt_tokens":1,"completion_tokens":1}}`))
+	}))
+	defer upstream.Close()
+	dir := t.TempDir()
+	raw := fmt.Sprintf(`{"listen":"127.0.0.1:8787","tiers":{%q:{"provider":"openai-compatible","base_url":%q,"model":%q}},"prefix":{"system":"You are Conductor.","tools":[]}}`, tierName, upstream.URL+"/v1", model)
+	path := filepath.Join(dir, "endpoints.json")
+	if err := os.WriteFile(path, []byte(raw), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := config.Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := New(cfg, aiuditor.Stub{}, openJournal(t, dir))
+	var logged strings.Builder
+	server.Logf = func(format string, args ...any) { fmt.Fprintf(&logged, format, args...) }
+	rec := do(server, "/v1/chat/completions", "", "task-1", "unclassified", "", `{"messages":[{"role":"user","content":"hi"}]}`)
+	if rec.Code != http.StatusOK || got != model || !strings.Contains(logged.String(), "class fallback="+missingClass) {
+		t.Fatalf("%s code %d model %s log %s body %s", tierName, rec.Code, got, logged.String(), rec.Body.String())
+	}
+	other := "parse"
+	if tierName == "cheap" {
+		other = "code"
+	}
+	rec = do(New(cfg, aiuditor.Stub{}, openJournal(t, dir)), "/v1/chat/completions", other, "task-1", "missing-tier", "", `{"messages":[{"role":"user","content":"hi"}]}`)
+	if rec.Code != http.StatusBadRequest || !strings.Contains(rec.Body.String(), "is not configured") {
+		t.Fatalf("%s missing tier code %d body %s", tierName, rec.Code, rec.Body.String())
+	}
+	if missingClass == "" {
+		t.Fatal("missing class")
+	}
+}
+
 func TestMissingClassFallsBackAndLogs(t *testing.T) {
 	var model string
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

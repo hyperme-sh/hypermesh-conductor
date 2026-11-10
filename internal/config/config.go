@@ -125,17 +125,18 @@ func (c Config) RequireListen() error {
 // both omit one. The cheap tier is first. HTTP 400 remains only when no
 // tier is configured.
 func (c Config) FallbackClass() (string, error) {
-	if tierConfigured(c.Cheap) {
+	if c.Cheap.Configured() {
 		return FallbackClass, nil
 	}
-	if tierConfigured(c.Frontier) {
+	if c.Frontier.Configured() {
 		return FrontierFallbackClass, nil
 	}
 	return "", fmt.Errorf("no tiers are configured")
 }
 
-func tierConfigured(tier Tier) bool {
-	return strings.TrimSpace(tier.BaseURL) != "" || strings.TrimSpace(tier.Model) != ""
+// Configured reports whether the endpoints file included this tier.
+func (t Tier) Configured() bool {
+	return strings.TrimSpace(t.BaseURL) != "" || strings.TrimSpace(t.Model) != ""
 }
 
 // Key returns the environment key when this tier is configured to read one.
@@ -209,10 +210,14 @@ func (c Config) Endpoint(tier string) (Tier, error) {
 	if err != nil {
 		return Tier{}, err
 	}
+	selected := c.Frontier
 	if name == routing.Cheap {
-		return c.Cheap, nil
+		selected = c.Cheap
 	}
-	return c.Frontier, nil
+	if !selected.Configured() {
+		return Tier{}, fmt.Errorf("tier %s is not configured", name)
+	}
+	return selected, nil
 }
 
 // Rate returns the published proxy rate for a tier, if one was configured.
@@ -245,7 +250,7 @@ func Load(path string) (Config, error) {
 	}
 	tiers, _ := raw["tiers"].(map[string]any)
 	if tiers == nil {
-		return Config{}, fmt.Errorf("config tiers must be an object with cheap and frontier")
+		return Config{}, fmt.Errorf("config tiers must be an object")
 	}
 	for name, block := range tiers {
 		if obj, ok := block.(map[string]any); ok {
@@ -254,13 +259,16 @@ func Load(path string) (Config, error) {
 			}
 		}
 	}
-	cheap, err := parseTier(routing.Cheap, tiers[routing.Cheap])
+	cheap, err := parseOptionalTier(routing.Cheap, tiers)
 	if err != nil {
 		return Config{}, err
 	}
-	frontier, err := parseTier(routing.Frontier, tiers[routing.Frontier])
+	frontier, err := parseOptionalTier(routing.Frontier, tiers)
 	if err != nil {
 		return Config{}, err
+	}
+	if !cheap.Configured() && !frontier.Configured() {
+		return Config{}, fmt.Errorf("config tiers must include cheap or frontier")
 	}
 	if recipe, present := raw["recipe_file"]; present {
 		name, ok := recipe.(string)
@@ -475,6 +483,16 @@ func ValidateListen(addr string) error {
 		return nil
 	}
 	return fmt.Errorf("listen must be a loopback address, got %s", addr)
+}
+
+// parseOptionalTier leaves a tier unset when its key is absent. A present
+// value that is not a tier object is an error.
+func parseOptionalTier(name string, tiers map[string]any) (Tier, error) {
+	block, present := tiers[name]
+	if !present {
+		return Tier{}, nil
+	}
+	return parseTier(name, block)
 }
 
 func parseTier(name string, block any) (Tier, error) {

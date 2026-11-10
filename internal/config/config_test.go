@@ -153,6 +153,47 @@ func TestGatewayTierRequiresCatalogID(t *testing.T) {
 	}
 }
 
+func TestOmittedTierLoadsFromEndpointsFile(t *testing.T) {
+	dir := t.TempDir()
+	frontier := map[string]any{"base_url": "https://frontier.example/v1", "model": "frontier-only"}
+	cheap := map[string]any{"base_url": "http://127.0.0.1:8080/v1", "model": "cheap-only"}
+	cfg, err := Load(writeEndpoints(t, dir, "frontier.json", map[string]any{"frontier": frontier}))
+	if err != nil || cfg.Cheap.Configured() || cfg.Frontier.Model != "frontier-only" {
+		t.Fatal(err, cfg.Cheap.Configured(), cfg.Frontier.Model)
+	}
+	if class, err := cfg.FallbackClass(); err != nil || class != FrontierFallbackClass {
+		t.Fatal(class, err)
+	}
+	cfg, err = Load(writeEndpoints(t, dir, "cheap.json", map[string]any{"cheap": cheap}))
+	if err != nil || cfg.Frontier.Configured() || cfg.Cheap.Model != "cheap-only" {
+		t.Fatal(err, cfg.Frontier.Configured(), cfg.Cheap.Model)
+	}
+	if class, err := cfg.FallbackClass(); err != nil || class != FallbackClass {
+		t.Fatal(class, err)
+	}
+	if _, err := Load(writeEndpoints(t, dir, "none.json", map[string]any{})); err == nil || !strings.Contains(err.Error(), "cheap or frontier") {
+		t.Fatal(err)
+	}
+	if _, err := Load(writeEndpoints(t, dir, "bad-cheap.json", map[string]any{"cheap": "nope", "frontier": frontier})); err == nil || !strings.Contains(err.Error(), "tiers.cheap must be an object") {
+		t.Fatal(err)
+	}
+	if _, err := Load(writeEndpoints(t, dir, "bad-frontier.json", map[string]any{"cheap": cheap, "frontier": map[string]any{}})); err == nil || !strings.Contains(err.Error(), "tiers.frontier.base_url") {
+		t.Fatal(err)
+	}
+	if _, err := Load(writeEndpoints(t, dir, "null-frontier.json", map[string]any{"cheap": cheap, "frontier": nil})); err == nil || !strings.Contains(err.Error(), "tiers.frontier must be an object") {
+		t.Fatal(err)
+	}
+}
+
+func writeEndpoints(t *testing.T, dir, name string, tiers map[string]any) string {
+	t.Helper()
+	return write(t, dir, name, map[string]any{
+		"listen": "127.0.0.1:8787",
+		"tiers":  tiers,
+		"prefix": map[string]any{"system": "You are Conductor.", "tools": []any{}},
+	})
+}
+
 func TestFallbackClassUsesTheFirstConfiguredTier(t *testing.T) {
 	if class, err := (Config{Cheap: Tier{BaseURL: "http://127.0.0.1:9/v1"}}).FallbackClass(); err != nil || class != FallbackClass {
 		t.Fatal(class, err)

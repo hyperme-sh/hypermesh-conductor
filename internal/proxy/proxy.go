@@ -817,12 +817,16 @@ func (p *Proxy) serveModels(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+	data := make([]any, 0, 2)
+	if p.Config.Cheap.Configured() {
+		data = append(data, map[string]any{"id": p.Config.Cheap.Model, "object": "model", "owned_by": routing.Cheap})
+	}
+	if p.Config.Frontier.Configured() {
+		data = append(data, map[string]any{"id": p.Config.Frontier.Model, "object": "model", "owned_by": routing.Frontier})
+	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"object": "list",
-		"data": []any{
-			map[string]any{"id": p.Config.Cheap.Model, "object": "model", "owned_by": routing.Cheap},
-			map[string]any{"id": p.Config.Frontier.Model, "object": "model", "owned_by": routing.Frontier},
-		},
+		"data":   data,
 	})
 }
 
