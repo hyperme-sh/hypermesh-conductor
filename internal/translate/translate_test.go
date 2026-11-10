@@ -615,6 +615,30 @@ func TestChatRefusalSurvivesMessagesTranslation(t *testing.T) {
 	}
 }
 
+func TestLeaseIDSurvivesProtocolConversion(t *testing.T) {
+	const lease = "22222222-2222-2222-2222-222222222222"
+	chat, err := Request(ProtoChat, ProviderOpenAICompatible, "llama-3.1-8b-q4", []byte(`{"model":"client","lease_id":"`+lease+`","messages":[{"role":"user","content":"hi"}]}`))
+	if err != nil || chat.LeaseID != lease || !strings.Contains(string(chat.Body), `"lease_id":"`+lease+`"`) || !strings.Contains(string(chat.Body), `"model":"llama-3.1-8b-q4"`) {
+		t.Fatalf("%v %+v", err, chat)
+	}
+	toAnthropic, err := Request(ProtoChat, ProviderAnthropic, "frontier", []byte(`{"lease_id":"`+lease+`","messages":[{"role":"user","content":"hi"}]}`))
+	if err != nil || toAnthropic.LeaseID != lease || toAnthropic.Protocol != ProtoMessages || strings.Contains(string(toAnthropic.Body), "lease_id") {
+		t.Fatalf("anthropic body must omit lease_id: %v %s", err, toAnthropic.Body)
+	}
+	fromAnthropic, err := Request(ProtoMessages, ProviderOpenAICompatible, "llama-3.1-8b-q4", []byte(`{"lease_id":"`+lease+`","messages":[{"role":"user","content":"hi"}]}`))
+	if err != nil || fromAnthropic.Protocol != ProtoChat || fromAnthropic.LeaseID != lease || !strings.Contains(string(fromAnthropic.Body), `"lease_id":"`+lease+`"`) {
+		t.Fatalf("%v %s", err, fromAnthropic.Body)
+	}
+	fromResponses, err := Request(ProtoResponses, ProviderAnthropic, "frontier", []byte(`{"lease_id":"`+lease+`","input":"hi"}`))
+	if err != nil || fromResponses.LeaseID != lease || fromResponses.Protocol != ProtoMessages || strings.Contains(string(fromResponses.Body), "lease_id") {
+		t.Fatalf("%v %s", err, fromResponses.Body)
+	}
+	sameResponses, err := Request(ProtoResponses, ProviderOpenAICompatible, "llama-3.1-8b-q4", []byte(`{"lease_id":"`+lease+`","input":"hi"}`))
+	if err != nil || sameResponses.Protocol != ProtoResponses || !strings.Contains(string(sameResponses.Body), `"lease_id":"`+lease+`"`) {
+		t.Fatalf("%v %s", err, sameResponses.Body)
+	}
+}
+
 func TestStrictToolsCannotBeSilentlyWeakened(t *testing.T) {
 	for _, tc := range []struct{ proto, body string }{
 		{ProtoChat, `{"messages":[],"tools":[{"type":"function","function":{"name":"lookup","strict":true,"parameters":{"type":"object"}}}]}`},

@@ -28,10 +28,14 @@ const (
 )
 
 // Wire is the body and path to send upstream.
+// LeaseID is the client lease_id. Chat and responses bodies keep the field.
+// Anthropic messages does not accept it, so the proxy copies LeaseID onto
+// X-Hypermesh-Lease-Id for a gateway tier.
 type Wire struct {
 	Path     string
 	Body     []byte
 	Protocol string
+	LeaseID  string
 }
 
 // Request builds the upstream request for a client body.
@@ -45,14 +49,14 @@ func Request(clientProto, provider, model string, body []byte) (Wire, error) {
 		if err != nil {
 			return Wire{}, err
 		}
-		return Wire{Path: "embeddings", Body: rewritten, Protocol: ProtoEmbeddings}, nil
+		return finishWire(Wire{Path: "embeddings", Body: rewritten, Protocol: ProtoEmbeddings}, body)
 	}
 	if sameFamily(clientProto, upstream) {
 		rewritten, err := setModelPreserve(body, model)
 		if err != nil {
 			return Wire{}, err
 		}
-		return Wire{Path: pathFor(clientProto), Body: rewritten, Protocol: clientProto}, nil
+		return finishWire(Wire{Path: pathFor(clientProto), Body: rewritten, Protocol: clientProto}, body)
 	}
 	switch {
 	case clientProto == ProtoChat && upstream == ProtoMessages:
@@ -60,22 +64,61 @@ func Request(clientProto, provider, model string, body []byte) (Wire, error) {
 		if err != nil {
 			return Wire{}, err
 		}
-		return Wire{Path: "messages", Body: raw, Protocol: ProtoMessages}, nil
+		return finishWire(Wire{Path: "messages", Body: raw, Protocol: ProtoMessages}, body)
 	case clientProto == ProtoMessages && upstream != ProtoMessages:
 		raw, err := anthropicToChat(body, model)
 		if err != nil {
 			return Wire{}, err
 		}
-		return Wire{Path: "chat/completions", Body: raw, Protocol: ProtoChat}, nil
+		return finishWire(Wire{Path: "chat/completions", Body: raw, Protocol: ProtoChat}, body)
 	case clientProto == ProtoResponses && upstream == ProtoMessages:
 		raw, err := responsesToAnthropic(body, model)
 		if err != nil {
 			return Wire{}, err
 		}
-		return Wire{Path: "messages", Body: raw, Protocol: ProtoMessages}, nil
+		return finishWire(Wire{Path: "messages", Body: raw, Protocol: ProtoMessages}, body)
 	default:
 		return Wire{}, fmt.Errorf("cannot translate %s to %s", clientProto, provider)
 	}
+}
+
+// finishWire carries lease_id onto a destination that accepts the field.
+// Anthropic messages keeps the id on Wire.LeaseID only.
+func finishWire(wire Wire, source []byte) (Wire, error) {
+	wire.LeaseID = leaseID(source)
+	if wire.LeaseID == "" || wire.Protocol == ProtoMessages {
+		return wire, nil
+	}
+	body, err := ensureLeaseField(wire.Body, wire.LeaseID)
+	if err != nil {
+		return Wire{}, err
+	}
+	wire.Body = body
+	return wire, nil
+}
+
+func leaseID(body []byte) string {
+	var req map[string]any
+	if err := json.Unmarshal(body, &req); err != nil {
+		return ""
+	}
+	text, _ := req["lease_id"].(string)
+	return strings.TrimSpace(text)
+}
+
+func ensureLeaseField(body []byte, id string) ([]byte, error) {
+	obj, err := jsonbody.Parse(body)
+	if err != nil {
+		return nil, err
+	}
+	current := strings.TrimSpace(string(obj.Values["lease_id"]))
+	if current != "" && current != "null" {
+		return body, nil
+	}
+	if err := obj.Set("lease_id", id); err != nil {
+		return nil, err
+	}
+	return obj.Marshal()
 }
 
 // Response converts an upstream body back to the client protocol.

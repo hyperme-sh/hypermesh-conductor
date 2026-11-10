@@ -90,7 +90,9 @@ Conductor is designed to work without a language model. With rules alone it can 
 
 ## Routing and measurement
 
-Conductor listens on `127.0.0.1:8787` and exposes OpenAI-compatible `/v1/chat/completions`, `/v1/responses`, `/v1/embeddings`, and `/v1/models`, plus Anthropic-compatible `/v1/messages`. Streaming responses are server-sent events. A third-party client sets its base URL to this proxy.
+Conductor listens on `127.0.0.1:8787` by default and exposes OpenAI-compatible `/v1/chat/completions`, `/v1/responses`, `/v1/embeddings`, and `/v1/models`, plus Anthropic-compatible `/v1/messages`. Streaming responses are server-sent events. A third-party client sets its base URL to this proxy.
+
+`hyperme-sh/controlplane-edge` `src/controlplane_edge/product_routes.json` has no conductor product and no hostname. An operator who needs clients off this machine puts their own TLS reverse proxy in front of `127.0.0.1:8787` and forwards only the paths they intend to expose. To bind a non-loopback address in the process itself, set `listen_mode` to `network`, set `listen` to that address, and set `tls.cert_file` and `tls.key_file`. `conductor serve` then refuses to start unless `CONDUCTOR_PROXY_TOKEN` is set. Every request to that listener must send the same value in `X-Conductor-Token`. The process terminates TLS. This is an operator listen option, not a public edge.
 
 Each request is classified, reviewed by the [AIuditor hop](docs/aiuditor.md), then sent to one destination. A failed call stays on that tier.
 
@@ -99,7 +101,7 @@ Each request is classified, reviewed by the [AIuditor hop](docs/aiuditor.md), th
 | parse, extract, index, classify, embed, summarize, status | cheap (local is the same tier) |
 | plan, architecture, tradeoff, code, review | frontier |
 
-Set the class with `X-Conductor-Class` or a top-level `conductor_class` field (that field is removed before the destination). A suggestion in `X-Conductor-Suggest` that asks for a higher tier is rejected. With no class and no `default_class`, the proxy refuses the call.
+Set the class with `X-Conductor-Class` or a top-level `conductor_class` field (that field is removed before the destination). A suggestion in `X-Conductor-Suggest` that asks for a higher tier is rejected. With no class and no `default_class`, the proxy uses the built-in class `parse` when the cheap tier is configured, or `code` when only the frontier tier is configured, and logs `class fallback`. The proxy returns HTTP 400 `no tiers are configured` only when neither tier is configured.
 
 When the client omits a system prompt, the configured prefix is inserted. Its canonical hash is stored on the journal row. Stable task and step ids can be sent as `X-Conductor-Task` and `X-Conductor-Step`.
 

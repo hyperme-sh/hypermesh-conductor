@@ -3,10 +3,17 @@ package proxy
 import (
 	"bytes"
 	"context"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
+	"crypto/tls"
+	"crypto/x509"
 	"encoding/json"
+	"encoding/pem"
 	"errors"
 	"fmt"
 	"io"
+	"math/big"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -2094,9 +2101,9 @@ func TestModelsAndUnknownClass(t *testing.T) {
 	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), "local-small") || !strings.Contains(rec.Body.String(), "frontier") {
 		t.Fatal(rec.Code, rec.Body.String())
 	}
-	missing := do(New(cfg, aiuditor.Stub{}, nil), "/v1/chat/completions", "", "task-1", "step-1", "", `{"messages":[{"role":"user","content":"hi"}]}`)
-	if missing.Code != http.StatusBadRequest {
-		t.Fatal(missing.Code, missing.Body.String())
+	unknown := do(New(cfg, aiuditor.Stub{}, nil), "/v1/chat/completions", "not-a-class", "task-1", "step-1", "", `{"messages":[{"role":"user","content":"hi"}]}`)
+	if unknown.Code != http.StatusBadRequest {
+		t.Fatal(unknown.Code, unknown.Body.String())
 	}
 	bare := httptest.NewRequest(http.MethodGet, "/v1/models", nil)
 	denied := httptest.NewRecorder()
@@ -2577,6 +2584,245 @@ func TestRedactEncodedCredentialsPreservesUnrelatedJSON(t *testing.T) {
 	if got := string(redactEventData(append(append([]byte("data: "), raw...), '\n', '\n'), []string{key})); got != "data: "+want+"\n\n" {
 		t.Fatal(got)
 	}
+}
+
+func TestMissingClassFallsBackAndLogs(t *testing.T) {
+	var model string
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var payload map[string]any
+		_ = json.NewDecoder(r.Body).Decode(&payload)
+		model, _ = payload["model"].(string)
+		_, _ = w.Write([]byte(`{"usage":{"prompt_tokens":1,"completion_tokens":1}}`))
+	}))
+	defer upstream.Close()
+	dir := t.TempDir()
+	cfg := loadTestConfig(t, dir, upstream.URL+"/v1", "http://127.0.0.1:1/v1", config.AuthPassthrough, config.ProviderOpenAICompatible)
+	server := New(cfg, aiuditor.Stub{}, openJournal(t, dir))
+	var logged strings.Builder
+	server.Logf = func(format string, args ...any) {
+		fmt.Fprintf(&logged, format, args...)
+	}
+	rec := do(server, "/v1/chat/completions", "", "task-1", "fallback", "", `{"messages":[{"role":"user","content":"hi"}]}`)
+	if rec.Code != http.StatusOK || model != "local-small" || !strings.Contains(logged.String(), "class fallback=parse") {
+		t.Fatalf("code %d model %s log %s body %s", rec.Code, model, logged.String(), rec.Body.String())
+	}
+}
+
+func TestNoTiersStayBadRequest(t *testing.T) {
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{"messages":[{"role":"user","content":"hi"}]}`))
+	rec := httptest.NewRecorder()
+	New(config.Config{}, aiuditor.Stub{}, nil).ServeHTTP(rec, req)
+	if rec.Code != http.StatusBadRequest || !strings.Contains(rec.Body.String(), "no tiers are configured") {
+		t.Fatal(rec.Code, rec.Body.String())
+	}
+}
+
+func TestGatewayForwardsRenterIdentityAndKeepsLease(t *testing.T) {
+	const lease = "22222222-2222-2222-2222-222222222222"
+	const tenant = "11111111-1111-1111-1111-111111111111"
+	var header http.Header
+	var body string
+	var path string
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		raw, _ := io.ReadAll(r.Body)
+		header = r.Header.Clone()
+		body = string(raw)
+		path = r.URL.Path
+		_, _ = w.Write([]byte(`{"usage":{"prompt_tokens":1,"completion_tokens":1}}`))
+	}))
+	defer upstream.Close()
+	dir := t.TempDir()
+	cfg := loadTestConfig(t, dir, upstream.URL+"/v1", upstream.URL+"/v1", config.AuthPassthrough, config.ProviderOpenAICompatible)
+	cfg.Cheap.Gateway = true
+	cfg.Cheap.Model = "llama-3.1-8b-q4"
+	server := New(cfg, aiuditor.Stub{}, openJournal(t, dir))
+
+	req := request("/v1/chat/completions", "parse", "task-1", "lease-1", "", `{"model":"client-model","lease_id":"`+lease+`","messages":[{"role":"user","content":"hi"}]}`)
+	req.Header.Set("X-Api-Key", "renter.secret")
+	req.Header.Set("X-Tenant-ID", tenant)
+	req.Header.Set("X-Lease-Id", lease)
+	rec := httptest.NewRecorder()
+	server.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK || path != "/v1/chat/completions" {
+		t.Fatalf("code %d path %s body %s", rec.Code, path, rec.Body.String())
+	}
+	if header.Get("X-Api-Key") != "renter.secret" || header.Get("Authorization") != "" || header.Get("X-Tenant-ID") != tenant || header.Get("X-Lease-Id") != lease {
+		t.Fatal(header)
+	}
+	if !strings.Contains(body, `"model":"llama-3.1-8b-q4"`) || !strings.Contains(body, `"lease_id":"`+lease+`"`) {
+		t.Fatal(body)
+	}
+
+	translated := request("/v1/messages", "parse", "task-1", "lease-2", "", `{"lease_id":"`+lease+`","messages":[{"role":"user","content":"hi"}]}`)
+	translated.Header.Set("Authorization", "Bearer renter.secret")
+	translated.Header.Set("X-Tenant-ID", tenant)
+	rec = httptest.NewRecorder()
+	server.ServeHTTP(rec, translated)
+	if rec.Code != http.StatusOK || header.Get("Authorization") != "Bearer renter.secret" || header.Get("X-Api-Key") != "" || header.Get("X-Hypermesh-Lease-Id") != lease || header.Get("X-Tenant-ID") != tenant {
+		t.Fatalf("code %d header %v body %s", rec.Code, header, body)
+	}
+	if !strings.Contains(body, `"lease_id":"`+lease+`"`) || !strings.Contains(body, `"model":"llama-3.1-8b-q4"`) || strings.Contains(body, "client-model") {
+		t.Fatal(body)
+	}
+}
+
+func TestGatewayRefusesNonRenterAndAmbiguousCredentials(t *testing.T) {
+	hits := 0
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits++
+		_, _ = w.Write([]byte(`{"usage":{"prompt_tokens":1,"completion_tokens":1}}`))
+	}))
+	defer upstream.Close()
+	dir := t.TempDir()
+	cfg := loadTestConfig(t, dir, upstream.URL+"/v1", upstream.URL+"/v1", config.AuthPassthrough, config.ProviderOpenAICompatible)
+	cfg.Cheap.Gateway = true
+	cfg.Cheap.Model = "llama-3.1-8b-q4"
+	server := New(cfg, aiuditor.Stub{}, openJournal(t, dir))
+	for _, header := range []struct{ name, value string }{
+		{"Authorization", "Bearer hm_dev_secret"},
+		{"Authorization", "Bearer hm_rtr_secret"},
+		{"Authorization", "Bearer hm_site_secret"},
+		{"Authorization", "Bearer hm_gw_secret"},
+		{"X-Api-Key", "hm_gw_secret"},
+	} {
+		req := request("/v1/chat/completions", "parse", "task-1", header.name, "", `{"messages":[{"role":"user","content":"hi"}]}`)
+		req.Header.Set(header.name, header.value)
+		rec := httptest.NewRecorder()
+		server.ServeHTTP(rec, req)
+		if rec.Code != http.StatusBadRequest || !strings.Contains(rec.Body.String(), "non-renter") || hits != 0 {
+			t.Fatalf("%s %s code %d hits %d body %s", header.name, header.value, rec.Code, hits, rec.Body.String())
+		}
+	}
+	both := request("/v1/chat/completions", "parse", "task-1", "both", "", `{"messages":[{"role":"user","content":"hi"}]}`)
+	both.Header.Set("Authorization", "Bearer renter.secret")
+	both.Header.Set("X-Api-Key", "renter.other")
+	rec := httptest.NewRecorder()
+	server.ServeHTTP(rec, both)
+	if rec.Code != http.StatusBadRequest || hits != 0 || !strings.Contains(rec.Body.String(), "not both") {
+		t.Fatal(rec.Code, hits, rec.Body.String())
+	}
+}
+
+func TestNonGatewayDoesNotForwardRenterHeaders(t *testing.T) {
+	var header http.Header
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		header = r.Header.Clone()
+		_, _ = w.Write([]byte(`{"usage":{"prompt_tokens":1,"completion_tokens":1}}`))
+	}))
+	defer upstream.Close()
+	dir := t.TempDir()
+	cfg := loadTestConfig(t, dir, upstream.URL+"/v1", upstream.URL+"/v1", config.AuthPassthrough, config.ProviderOpenAICompatible)
+	req := request("/v1/chat/completions", "parse", "task-1", "plain", "", `{"messages":[{"role":"user","content":"hi"}]}`)
+	req.Header.Set("Authorization", "Bearer renter.secret")
+	req.Header.Set("X-Api-Key", "renter.secret")
+	req.Header.Set("X-Tenant-ID", "11111111-1111-1111-1111-111111111111")
+	req.Header.Set("X-Hypermesh-Lease-Id", "22222222-2222-2222-2222-222222222222")
+	rec := httptest.NewRecorder()
+	New(cfg, aiuditor.Stub{}, openJournal(t, dir)).ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK || header.Get("Authorization") != "Bearer renter.secret" || header.Get("X-Api-Key") != "" || header.Get("X-Tenant-ID") != "" || header.Get("X-Hypermesh-Lease-Id") != "" {
+		t.Fatalf("code %d header %v body %s", rec.Code, header, rec.Body.String())
+	}
+}
+
+func TestNetworkListenRequiresTLSAndProxyToken(t *testing.T) {
+	dir := t.TempDir()
+	cfg := loadTestConfig(t, dir, "http://127.0.0.1:1/v1", "http://127.0.0.1:1/v1", config.AuthPassthrough, config.ProviderOpenAICompatible)
+	plain, err := net.Listen("tcp", "0.0.0.0:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer plain.Close()
+	if err := New(cfg, aiuditor.Stub{}, nil).ServeListener(plain); err == nil || !strings.Contains(err.Error(), "loopback") {
+		t.Fatal(err)
+	}
+	cfg.Listen = "0.0.0.0:8787"
+	if err := New(cfg, aiuditor.Stub{}, nil).ListenAndServe(); err == nil || !strings.Contains(err.Error(), "loopback") {
+		t.Fatal(err)
+	}
+
+	certFile, keyFile := writeTestCert(t)
+	cfg.ListenMode = config.ListenModeNetwork
+	cfg.TLS = config.TLSFiles{CertFile: certFile, KeyFile: keyFile}
+	t.Setenv(config.ProxyTokenEnv, "")
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+	if err := New(cfg, aiuditor.Stub{}, nil).ServeListener(ln); err == nil || !strings.Contains(err.Error(), config.ProxyTokenEnv) {
+		t.Fatal(err)
+	}
+
+	t.Setenv(config.ProxyTokenEnv, "proxy-token-for-tests")
+	server := New(cfg, aiuditor.Stub{}, nil)
+	go func() { _ = server.ServeListener(ln) }()
+	client := &http.Client{Transport: &http.Transport{TLSClientConfig: &tls.Config{InsecureSkipVerify: true}}}
+	url := "https://" + ln.Addr().String() + "/v1/models"
+	var denied *http.Response
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		denied, err = client.Get(url)
+		if err == nil || time.Now().After(deadline) {
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer denied.Body.Close()
+	if denied.StatusCode != http.StatusUnauthorized {
+		t.Fatal(denied.StatusCode)
+	}
+	okReq, err := http.NewRequest(http.MethodGet, url, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	okReq.Header.Set(config.ProxyTokenHeader, "proxy-token-for-tests")
+	okResp, err := client.Do(okReq)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer okResp.Body.Close()
+	raw, _ := io.ReadAll(okResp.Body)
+	if okResp.StatusCode != http.StatusOK || !strings.Contains(string(raw), "local-small") {
+		t.Fatal(okResp.StatusCode, string(raw))
+	}
+}
+
+func writeTestCert(t *testing.T) (string, string) {
+	t.Helper()
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tmpl := &x509.Certificate{
+		SerialNumber:          big.NewInt(1),
+		NotBefore:             time.Now().Add(-time.Hour),
+		NotAfter:              time.Now().Add(time.Hour),
+		IPAddresses:           []net.IP{net.ParseIP("127.0.0.1")},
+		KeyUsage:              x509.KeyUsageDigitalSignature,
+		ExtKeyUsage:           []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
+		BasicConstraintsValid: true,
+	}
+	der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &key.PublicKey, key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	keyDER, err := x509.MarshalECPrivateKey(key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dir := t.TempDir()
+	certFile := filepath.Join(dir, "cert.pem")
+	keyFile := filepath.Join(dir, "key.pem")
+	if err := os.WriteFile(certFile, pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der}), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(keyFile, pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: keyDER}), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return certFile, keyFile
 }
 
 func TestIncompleteSummaryKeepsOriginalConversation(t *testing.T) {

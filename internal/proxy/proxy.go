@@ -9,6 +9,7 @@ import (
 	"context"
 	"crypto/rand"
 	"crypto/subtle"
+	"crypto/tls"
 	"database/sql"
 	"encoding/hex"
 	"encoding/json"
@@ -89,10 +90,17 @@ const (
 	maxConns          = 128
 )
 
-// ListenAndServe binds the configured loopback address.
+// ListenAndServe binds the configured address. Loopback is the default.
+// listen_mode network terminates TLS and refuses to start without a certificate,
+// a key, and CONDUCTOR_PROXY_TOKEN.
 func (p *Proxy) ListenAndServe() error {
-	if err := config.ValidateListen(p.Config.Listen); err != nil {
+	if err := p.Config.RequireListen(); err != nil {
 		return err
+	}
+	if p.Config.ListenMode != config.ListenModeNetwork {
+		if err := config.ValidateListen(p.Config.Listen); err != nil {
+			return err
+		}
 	}
 	listener, err := net.Listen("tcp", p.Config.Listen)
 	if err != nil {
@@ -101,10 +109,28 @@ func (p *Proxy) ListenAndServe() error {
 	return p.ServeListener(listener)
 }
 
-// ServeListener applies the same loopback policy and connection limits to an inherited listener.
+// ServeListener applies the loopback policy, or TLS for listen_mode network,
+// and the connection limit to an inherited listener.
 func (p *Proxy) ServeListener(listener net.Listener) error {
 	addr, ok := listener.Addr().(*net.TCPAddr)
-	if !ok || !addr.IP.IsLoopback() {
+	if !ok || addr.IP == nil {
+		return fmt.Errorf("listener must be a TCP socket")
+	}
+	if p.Config.ListenMode == config.ListenModeNetwork {
+		if err := p.Config.RequireListen(); err != nil {
+			return err
+		}
+		cert, err := tls.LoadX509KeyPair(p.Config.TLS.CertFile, p.Config.TLS.KeyFile)
+		if err != nil {
+			return fmt.Errorf("tls certificate: %w", err)
+		}
+		listener = tls.NewListener(listener, &tls.Config{
+			Certificates: []tls.Certificate{cert},
+			MinVersion:   tls.VersionTLS12,
+		})
+		return p.server().Serve(limitConns(listener, maxConns))
+	}
+	if !addr.IP.IsLoopback() {
 		return fmt.Errorf("listener must be a loopback TCP socket")
 	}
 	return p.server().Serve(limitConns(listener, maxConns))
@@ -153,6 +179,12 @@ func (c *trackedConn) Close() error {
 
 // ServeHTTP implements the local API.
 func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	if p.Config.ListenMode == config.ListenModeNetwork {
+		if err := authorizeNetwork(r); err != nil {
+			writeJSON(w, http.StatusUnauthorized, map[string]any{"error": map[string]any{"message": err.Error()}})
+			return
+		}
+	}
 	// Native API clients omit browser provenance headers. Only same-origin
 	// browser requests may reach local providers.
 	scheme := "http"
@@ -200,6 +232,7 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"error": map[string]any{"message": "request body must be a JSON object"}})
 		return
 	}
+	stampLeaseHeader(r, obj)
 	className, suggest, taskID, stepID, err := p.identity(r, obj, proto)
 	if err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"error": map[string]any{"message": err.Error()}})
@@ -799,7 +832,14 @@ func (p *Proxy) identity(r *http.Request, obj jsonbody.Object, proto string) (cl
 		className = p.Config.DefaultClass
 	}
 	if className == "" {
-		return "", "", "", "", fmt.Errorf("job class is empty")
+		fallback, ferr := p.Config.FallbackClass()
+		if ferr != nil {
+			return "", "", "", "", ferr
+		}
+		className = fallback
+		if p.Logf != nil {
+			p.Logf("class fallback=%s reason=no X-Conductor-Class and no default_class", className)
+		}
 	}
 	suggest = firstNonEmpty(r.Header.Get("X-Conductor-Suggest"), rawString(obj.Values["conductor_suggest"]))
 	taskID = firstNonEmpty(r.Header.Get("X-Conductor-Task"), rawString(obj.Values["conductor_task"]))
@@ -868,6 +908,9 @@ func (p *Proxy) upstreamRequest(client *http.Request, tier config.Tier, wire tra
 	if err != nil {
 		return nil, nil, err
 	}
+	if tier.Gateway && wire.LeaseID != "" && req.Header.Get("X-Hypermesh-Lease-Id") == "" && req.Header.Get("X-Lease-Id") == "" {
+		req.Header.Set("X-Hypermesh-Lease-Id", wire.LeaseID)
+	}
 	if tier.Provider == config.ProviderAnthropic || wire.Protocol == translate.ProtoMessages {
 		version := client.Header.Get("anthropic-version")
 		if version == "" {
@@ -880,7 +923,17 @@ func (p *Proxy) upstreamRequest(client *http.Request, tier config.Tier, wire tra
 
 func applyAuth(dst, src *http.Request, tier config.Tier) ([]string, error) {
 	var secrets []string
+	if err := rejectNonRenterCredentials(src); err != nil {
+		return nil, err
+	}
 	clientKey := clientCredential(src, tier.Provider)
+	if tier.Gateway {
+		key, err := gatewayClientKey(src)
+		if err != nil {
+			return nil, err
+		}
+		clientKey = key
+	}
 	if tier.Auth == config.AuthEnv {
 		clientKey = ""
 	}
@@ -896,24 +949,39 @@ func applyAuth(dst, src *http.Request, tier config.Tier) ([]string, error) {
 			return nil, err
 		}
 	}
-	switch tier.Provider {
-	case config.ProviderAnthropic:
-		key := clientKey
-		if needEnv {
-			key = envKey
+	if isNonRenterCredential(envKey) {
+		return nil, fmt.Errorf("refusing to forward a non-renter credential")
+	}
+	if tier.Gateway {
+		if err := applyGatewayIdentity(dst, src, tier, clientKey, needEnv, envKey); err != nil {
+			return nil, err
 		}
-		if key != "" {
-			dst.Header.Set("x-api-key", key)
+		if key := dst.Header.Get("X-Api-Key"); key != "" {
 			secrets = append(secrets, key)
 		}
-	default:
-		key := clientKey
-		if needEnv {
-			key = envKey
+		if header := dst.Header.Get("Authorization"); header != "" {
+			secrets = append(secrets, header)
 		}
-		if key != "" {
-			dst.Header.Set("Authorization", "Bearer "+key)
-			secrets = append(secrets, key)
+	} else {
+		switch tier.Provider {
+		case config.ProviderAnthropic:
+			key := clientKey
+			if needEnv {
+				key = envKey
+			}
+			if key != "" {
+				dst.Header.Set("x-api-key", key)
+				secrets = append(secrets, key)
+			}
+		default:
+			key := clientKey
+			if needEnv {
+				key = envKey
+			}
+			if key != "" {
+				dst.Header.Set("Authorization", "Bearer "+key)
+				secrets = append(secrets, key)
+			}
 		}
 	}
 	if header := src.Header.Get("Authorization"); header != "" {
@@ -932,11 +1000,74 @@ func clientCredential(src *http.Request, provider string) string {
 	if provider == config.ProviderAnthropic {
 		return strings.TrimSpace(src.Header.Get("x-api-key"))
 	}
+	return bearerToken(src)
+}
+
+func gatewayClientKey(src *http.Request) (string, error) {
+	apiKey := strings.TrimSpace(src.Header.Get("X-Api-Key"))
+	bearer := bearerToken(src)
+	if apiKey != "" && bearer != "" {
+		return "", fmt.Errorf("send Authorization or X-Api-Key, not both")
+	}
+	if apiKey != "" {
+		return apiKey, nil
+	}
+	return bearer, nil
+}
+
+func applyGatewayIdentity(dst, src *http.Request, tier config.Tier, clientKey string, needEnv bool, envKey string) error {
+	switch {
+	case needEnv:
+		dst.Header.Set("Authorization", "Bearer "+envKey)
+	case clientKey != "" && strings.TrimSpace(src.Header.Get("X-Api-Key")) != "" && tier.Auth != config.AuthEnv:
+		dst.Header.Set("X-Api-Key", clientKey)
+	case clientKey != "":
+		dst.Header.Set("Authorization", "Bearer "+clientKey)
+	}
+	copyHeader(dst, src, "X-Tenant-ID")
+	copyHeader(dst, src, "X-Hypermesh-Lease-Id")
+	copyHeader(dst, src, "X-Lease-Id")
+	return nil
+}
+
+func rejectNonRenterCredentials(src *http.Request) error {
+	if isNonRenterCredential(bearerToken(src)) || isNonRenterCredential(strings.TrimSpace(src.Header.Get("X-Api-Key"))) {
+		return fmt.Errorf("refusing to forward a non-renter credential")
+	}
+	return nil
+}
+
+func isNonRenterCredential(value string) bool {
+	value = strings.TrimSpace(value)
+	for _, prefix := range []string{"hm_dev_", "hm_rtr_", "hm_site_", "hm_gw_"} {
+		if strings.HasPrefix(value, prefix) {
+			return true
+		}
+	}
+	return false
+}
+
+func bearerToken(src *http.Request) string {
 	header := strings.TrimSpace(src.Header.Get("Authorization"))
 	if len(header) > 7 && strings.EqualFold(header[:7], "bearer ") {
 		return strings.TrimSpace(header[7:])
 	}
 	return ""
+}
+
+func copyHeader(dst, src *http.Request, name string) {
+	if value := strings.TrimSpace(src.Header.Get(name)); value != "" {
+		dst.Header.Set(name, value)
+	}
+}
+
+func stampLeaseHeader(r *http.Request, obj jsonbody.Object) {
+	if strings.TrimSpace(r.Header.Get("X-Hypermesh-Lease-Id")) != "" || strings.TrimSpace(r.Header.Get("X-Lease-Id")) != "" {
+		return
+	}
+	if lease := strings.TrimSpace(rawString(obj.Values["lease_id"])); lease != "" {
+		r.Header.Set("X-Hypermesh-Lease-Id", lease)
+	}
 }
 
 func (p *Proxy) baseRecord(taskID, stepID string, decision routing.Decision, model, hash string) metrics.StepRecord {
@@ -1126,9 +1257,21 @@ func authorizeProxy(src *http.Request) error {
 	if want == "" {
 		return proxyAuthError{config.ProxyTokenEnv + " is required when a tier uses an environment key"}
 	}
+	return matchProxyToken(src, want, "proxy token is required to use the configured provider key")
+}
+
+func authorizeNetwork(src *http.Request) error {
+	want := strings.TrimSpace(os.Getenv(config.ProxyTokenEnv))
+	if want == "" {
+		return proxyAuthError{config.ProxyTokenEnv + " is required for listen_mode network"}
+	}
+	return matchProxyToken(src, want, "proxy token is required")
+}
+
+func matchProxyToken(src *http.Request, want, mismatch string) error {
 	got := strings.TrimSpace(src.Header.Get(config.ProxyTokenHeader))
 	if subtle.ConstantTimeCompare([]byte(got), []byte(want)) != 1 {
-		return proxyAuthError{"proxy token is required to use the configured provider key"}
+		return proxyAuthError{mismatch}
 	}
 	return nil
 }
