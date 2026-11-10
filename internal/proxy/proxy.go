@@ -9,6 +9,7 @@ import (
 	"context"
 	"crypto/rand"
 	"crypto/subtle"
+	"crypto/tls"
 	"database/sql"
 	"encoding/hex"
 	"encoding/json"
@@ -87,12 +88,24 @@ const (
 	idleTimeout       = 120 * time.Second
 	writeIdle         = 30 * time.Second
 	maxConns          = 128
+	// Network mode keeps unauthenticated connections on a small pool with
+	// short timeouts. Authenticated connections use maxConns.
+	maxPreAuthConns      = 16
+	networkHeaderTimeout = 5 * time.Second
+	networkIdleTimeout   = 5 * time.Second
 )
 
-// ListenAndServe binds the configured loopback address.
+// ListenAndServe binds the configured address. Loopback is the default.
+// listen_mode network terminates TLS and refuses to start without a certificate,
+// a key, and CONDUCTOR_PROXY_TOKEN.
 func (p *Proxy) ListenAndServe() error {
-	if err := config.ValidateListen(p.Config.Listen); err != nil {
+	if err := p.Config.RequireListen(); err != nil {
 		return err
+	}
+	if p.Config.ListenMode != config.ListenModeNetwork {
+		if err := config.ValidateListen(p.Config.Listen); err != nil {
+			return err
+		}
 	}
 	listener, err := net.Listen("tcp", p.Config.Listen)
 	if err != nil {
@@ -101,22 +114,57 @@ func (p *Proxy) ListenAndServe() error {
 	return p.ServeListener(listener)
 }
 
-// ServeListener applies the same loopback policy and connection limits to an inherited listener.
+// ServeListener applies the loopback policy, or TLS for listen_mode network,
+// and the connection limit to an inherited listener.
 func (p *Proxy) ServeListener(listener net.Listener) error {
 	addr, ok := listener.Addr().(*net.TCPAddr)
-	if !ok || !addr.IP.IsLoopback() {
+	if !ok || addr.IP == nil {
+		return fmt.Errorf("listener must be a TCP socket")
+	}
+	if p.Config.ListenMode == config.ListenModeNetwork {
+		if err := p.Config.RequireListen(); err != nil {
+			return err
+		}
+		cert, err := tls.LoadX509KeyPair(p.Config.TLS.CertFile, p.Config.TLS.KeyFile)
+		if err != nil {
+			return fmt.Errorf("tls certificate: %w", err)
+		}
+		// Limit the TCP listener first. Wrapping the TLS listener hides
+		// *tls.Conn from net/http, so r.TLS stays nil and a same-origin
+		// https Origin is rejected. Unauthenticated connections use a
+		// separate, smaller pool than authenticated ones.
+		listener = tls.NewListener(newPreAuthListener(listener, maxPreAuthConns, maxConns), &tls.Config{
+			Certificates: []tls.Certificate{cert},
+			MinVersion:   tls.VersionTLS12,
+		})
+		return p.server().Serve(listener)
+	}
+	if !addr.IP.IsLoopback() {
 		return fmt.Errorf("listener must be a loopback TCP socket")
 	}
 	return p.server().Serve(limitConns(listener, maxConns))
 }
 
 func (p *Proxy) server() *http.Server {
-	return &http.Server{
-		Handler:           p,
-		ReadHeaderTimeout: readHeaderTimeout,
-		ReadTimeout:       readTimeout,
-		IdleTimeout:       idleTimeout,
+	header := readHeaderTimeout
+	idle := idleTimeout
+	srv := &http.Server{
+		Handler:     p,
+		ReadTimeout: readTimeout,
 	}
+	if p.Config.ListenMode == config.ListenModeNetwork {
+		header = networkHeaderTimeout
+		idle = networkIdleTimeout
+		srv.ConnContext = func(ctx context.Context, c net.Conn) context.Context {
+			if tlsConn, ok := c.(*tls.Conn); ok {
+				c = tlsConn.NetConn()
+			}
+			return context.WithValue(ctx, rawConnKey, c)
+		}
+	}
+	srv.ReadHeaderTimeout = header
+	srv.IdleTimeout = idle
+	return srv
 }
 
 // limitConns stops Accept once n connections are open, so a drip of
@@ -151,8 +199,106 @@ func (c *trackedConn) Close() error {
 	return c.Conn.Close()
 }
 
+type rawConnKeyType struct{}
+
+var rawConnKey rawConnKeyType
+
+// newPreAuthListener admits few connections that have not authenticated.
+// A successful proxy-token check promotes the connection onto the larger pool.
+func newPreAuthListener(ln net.Listener, preN, authN int) net.Listener {
+	return &preAuthListener{Listener: ln, pre: make(chan struct{}, preN), auth: make(chan struct{}, authN)}
+}
+
+type preAuthListener struct {
+	net.Listener
+	pre  chan struct{}
+	auth chan struct{}
+}
+
+func (l *preAuthListener) Accept() (net.Conn, error) {
+	l.pre <- struct{}{}
+	conn, err := l.Listener.Accept()
+	if err != nil {
+		<-l.pre
+		return nil, err
+	}
+	return &preAuthConn{Conn: conn, pre: l.pre, auth: l.auth, holdingPre: true}, nil
+}
+
+type preAuthConn struct {
+	net.Conn
+	pre        chan struct{}
+	auth       chan struct{}
+	mu         sync.Mutex
+	holdingPre bool
+	promoted   bool
+	closed     bool
+}
+
+// Promote moves the connection from the unauthenticated pool to the authenticated pool.
+func (c *preAuthConn) Promote() bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.closed {
+		return false
+	}
+	if c.promoted {
+		return true
+	}
+	select {
+	case c.auth <- struct{}{}:
+	default:
+		return false
+	}
+	c.promoted = true
+	if c.holdingPre {
+		<-c.pre
+		c.holdingPre = false
+	}
+	return true
+}
+
+func (c *preAuthConn) Close() error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if !c.closed {
+		c.closed = true
+		if c.promoted {
+			<-c.auth
+		} else if c.holdingPre {
+			<-c.pre
+			c.holdingPre = false
+		}
+	}
+	return c.Conn.Close()
+}
+
+func closeNetworkConn(w http.ResponseWriter) {
+	w.Header().Set("Connection", "close")
+}
+
+func promoteNetworkConn(w http.ResponseWriter, r *http.Request) bool {
+	conn, _ := r.Context().Value(rawConnKey).(*preAuthConn)
+	if conn == nil || conn.Promote() {
+		return true
+	}
+	closeNetworkConn(w)
+	writeJSON(w, http.StatusServiceUnavailable, map[string]any{"error": map[string]any{"message": "connection limit reached"}})
+	return false
+}
+
 // ServeHTTP implements the local API.
 func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	if p.Config.ListenMode == config.ListenModeNetwork {
+		if err := authorizeNetwork(r); err != nil {
+			closeNetworkConn(w)
+			writeJSON(w, http.StatusUnauthorized, map[string]any{"error": map[string]any{"message": err.Error()}})
+			return
+		}
+		if !promoteNetworkConn(w, r) {
+			return
+		}
+	}
 	// Native API clients omit browser provenance headers. Only same-origin
 	// browser requests may reach local providers.
 	scheme := "http"
@@ -200,6 +346,8 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"error": map[string]any{"message": "request body must be a JSON object"}})
 		return
 	}
+	originalLease := strings.TrimSpace(rawString(obj.Values["lease_id"]))
+	callerTask := firstNonEmpty(r.Header.Get("X-Conductor-Task"), rawString(obj.Values["conductor_task"]))
 	className, suggest, taskID, stepID, err := p.identity(r, obj, proto)
 	if err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"error": map[string]any{"message": err.Error()}})
@@ -211,10 +359,6 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			writeJSON(w, http.StatusUnauthorized, map[string]any{"error": "proxy authorization required"})
 			return
 		}
-	}
-	if (accountingURL != "" || p.Config.Cheap.TaskTokenLimit > 0 || (p.Config.Cheap.TaskOutputLimit > 0 && proto != translate.ProtoEmbeddings)) && firstNonEmpty(r.Header.Get("X-Conductor-Task"), rawString(obj.Values["conductor_task"])) == "" {
-		writeJSON(w, http.StatusBadRequest, map[string]any{"error": map[string]any{"message": "task budget requires an explicit task ID"}})
-		return
 	}
 	obj.DropPrefix("conductor_")
 	p.injectPrefix(&obj, proto)
@@ -252,6 +396,10 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"error": map[string]any{"message": err.Error()}})
 		return
 	}
+	if taskIDRequired(accountingURL, tier, proto) && callerTask == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": map[string]any{"message": "task budget requires an explicit task ID"}})
+		return
+	}
 	if accountingURL != "" && tier.TaskTokenLimit <= 0 {
 		writeJSON(w, http.StatusServiceUnavailable, map[string]any{"error": "plane accounting requires a task token limit"})
 		return
@@ -259,6 +407,12 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if expected := r.Header.Values("X-Conductor-Expected-Model"); len(expected) > 0 && (len(expected) != 1 || expected[0] != tier.Model) {
 		writeJSON(w, http.StatusConflict, map[string]any{"error": map[string]any{"message": "route does not match expected model"}})
 		return
+	}
+	if tier.Gateway {
+		if err := leaseHeaderConflict(r, originalLease); err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]any{"error": map[string]any{"message": err.Error()}})
+			return
+		}
 	}
 	stream := boolField(obj, "stream")
 	prelimHash, _ := hashBody(proto, prepared)
@@ -286,11 +440,16 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if useNotes {
 		query = userQuery(prepared)
 	}
-	next, didCompact, memLookups, memHits, compactErr := p.maybeCompact(r.Context(), r, proto, prepared, taskID, stepID, prelimHash, tier)
+	next, didCompact, memLookups, memHits, compactErr := p.maybeCompact(r.Context(), r, proto, prepared, taskID, stepID, prelimHash, tier, originalLease)
 	if compactErr != nil {
 		var denied proxyAuthError
 		if errors.As(compactErr, &denied) {
 			writeJSON(w, http.StatusUnauthorized, map[string]any{"error": map[string]any{"message": compactErr.Error()}})
+			return
+		}
+		var rejected gatewayRejectedError
+		if errors.As(compactErr, &rejected) {
+			writeJSON(w, rejected.status, map[string]any{"error": map[string]any{"message": rejected.Error()}})
 			return
 		}
 		if errors.Is(compactErr, errBodyBudget) {
@@ -357,7 +516,7 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			base.PrefixCacheMatch = &match
 		}
 	}
-	secrets, authReq, err := p.upstreamRequest(r, tier, wire, stream)
+	secrets, authReq, err := p.upstreamRequest(r, tier, wire, stream, originalLease)
 	if err != nil {
 		status := http.StatusBadRequest
 		var denied proxyAuthError
@@ -367,7 +526,7 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, status, map[string]any{"error": map[string]any{"message": err.Error()}})
 		return
 	}
-	count, status, countErr := p.checkContext(authReq, tier, wire.Protocol, wire.Body)
+	count, status, countErr := p.checkContext(r, authReq, tier, wire.Protocol, wire.Body, gatewayLease(tier, wire.LeaseID, originalLease, r))
 	if countErr != nil {
 		writeJSON(w, status, map[string]any{"error": map[string]any{"message": countErr.Error()}})
 		return
@@ -781,12 +940,16 @@ func (p *Proxy) serveModels(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+	data := make([]any, 0, 2)
+	if p.Config.Cheap.Configured() {
+		data = append(data, map[string]any{"id": p.Config.Cheap.Model, "object": "model", "owned_by": routing.Cheap})
+	}
+	if p.Config.Frontier.Configured() {
+		data = append(data, map[string]any{"id": p.Config.Frontier.Model, "object": "model", "owned_by": routing.Frontier})
+	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"object": "list",
-		"data": []any{
-			map[string]any{"id": p.Config.Cheap.Model, "object": "model", "owned_by": routing.Cheap},
-			map[string]any{"id": p.Config.Frontier.Model, "object": "model", "owned_by": routing.Frontier},
-		},
+		"data":   data,
 	})
 }
 
@@ -799,7 +962,14 @@ func (p *Proxy) identity(r *http.Request, obj jsonbody.Object, proto string) (cl
 		className = p.Config.DefaultClass
 	}
 	if className == "" {
-		return "", "", "", "", fmt.Errorf("job class is empty")
+		fallback, ferr := p.Config.FallbackClass()
+		if ferr != nil {
+			return "", "", "", "", ferr
+		}
+		className = fallback
+		if p.Logf != nil {
+			p.Logf("class fallback=%s reason=no X-Conductor-Class and no default_class", className)
+		}
 	}
 	suggest = firstNonEmpty(r.Header.Get("X-Conductor-Suggest"), rawString(obj.Values["conductor_suggest"]))
 	taskID = firstNonEmpty(r.Header.Get("X-Conductor-Task"), rawString(obj.Values["conductor_task"]))
@@ -848,7 +1018,7 @@ func (p *Proxy) injectPrefix(obj *jsonbody.Object, proto string) {
 	}
 }
 
-func (p *Proxy) upstreamRequest(client *http.Request, tier config.Tier, wire translate.Wire, stream bool) ([]string, *http.Request, error) {
+func (p *Proxy) upstreamRequest(client *http.Request, tier config.Tier, wire translate.Wire, stream bool, originalLease string) ([]string, *http.Request, error) {
 	if tier.IncludeUsage && stream && wire.Protocol == translate.ProtoChat && tier.Provider == config.ProviderOpenAI {
 		obj, err := jsonbody.Parse(wire.Body)
 		if err == nil {
@@ -864,7 +1034,7 @@ func (p *Proxy) upstreamRequest(client *http.Request, tier config.Tier, wire tra
 		return nil, nil, err
 	}
 	req.Header.Set("Content-Type", "application/json")
-	secrets, err := applyAuth(req, client, tier)
+	secrets, err := applyGatewayDispatch(req, client, tier, gatewayLease(tier, wire.LeaseID, originalLease, client))
 	if err != nil {
 		return nil, nil, err
 	}
@@ -880,7 +1050,17 @@ func (p *Proxy) upstreamRequest(client *http.Request, tier config.Tier, wire tra
 
 func applyAuth(dst, src *http.Request, tier config.Tier) ([]string, error) {
 	var secrets []string
+	if err := rejectNonRenterCredentials(src); err != nil {
+		return nil, err
+	}
 	clientKey := clientCredential(src, tier.Provider)
+	if tier.Gateway {
+		key, err := gatewayClientKey(src)
+		if err != nil {
+			return nil, err
+		}
+		clientKey = key
+	}
 	if tier.Auth == config.AuthEnv {
 		clientKey = ""
 	}
@@ -896,24 +1076,42 @@ func applyAuth(dst, src *http.Request, tier config.Tier) ([]string, error) {
 			return nil, err
 		}
 	}
-	switch tier.Provider {
-	case config.ProviderAnthropic:
-		key := clientKey
-		if needEnv {
-			key = envKey
+	if isNonRenterCredential(envKey) {
+		return nil, fmt.Errorf("refusing to forward a non-renter credential")
+	}
+	if tier.Gateway {
+		if err := applyGatewayIdentity(dst, src, tier, clientKey, needEnv, envKey); err != nil {
+			return nil, err
 		}
-		if key != "" {
-			dst.Header.Set("x-api-key", key)
+		if key := dst.Header.Get("X-Api-Key"); key != "" {
 			secrets = append(secrets, key)
 		}
-	default:
-		key := clientKey
-		if needEnv {
-			key = envKey
+		if header := dst.Header.Get("Authorization"); header != "" {
+			secrets = append(secrets, header)
+			if len(header) > 7 && strings.EqualFold(header[:7], "bearer ") {
+				secrets = append(secrets, strings.TrimSpace(header[7:]))
+			}
 		}
-		if key != "" {
-			dst.Header.Set("Authorization", "Bearer "+key)
-			secrets = append(secrets, key)
+	} else {
+		switch tier.Provider {
+		case config.ProviderAnthropic:
+			key := clientKey
+			if needEnv {
+				key = envKey
+			}
+			if key != "" {
+				dst.Header.Set("x-api-key", key)
+				secrets = append(secrets, key)
+			}
+		default:
+			key := clientKey
+			if needEnv {
+				key = envKey
+			}
+			if key != "" {
+				dst.Header.Set("Authorization", "Bearer "+key)
+				secrets = append(secrets, key)
+			}
 		}
 	}
 	if header := src.Header.Get("Authorization"); header != "" {
@@ -932,11 +1130,124 @@ func clientCredential(src *http.Request, provider string) string {
 	if provider == config.ProviderAnthropic {
 		return strings.TrimSpace(src.Header.Get("x-api-key"))
 	}
+	return bearerToken(src)
+}
+
+func gatewayClientKey(src *http.Request) (string, error) {
+	apiKey := strings.TrimSpace(src.Header.Get("X-Api-Key"))
+	bearer := bearerToken(src)
+	if apiKey != "" && bearer != "" {
+		return "", fmt.Errorf("send Authorization or X-Api-Key, not both")
+	}
+	if apiKey != "" {
+		return apiKey, nil
+	}
+	return bearer, nil
+}
+
+func applyGatewayIdentity(dst, src *http.Request, tier config.Tier, clientKey string, needEnv bool, envKey string) error {
+	switch {
+	case needEnv:
+		dst.Header.Set("Authorization", "Bearer "+envKey)
+	case clientKey != "" && strings.TrimSpace(src.Header.Get("X-Api-Key")) != "" && tier.Auth != config.AuthEnv:
+		dst.Header.Set("X-Api-Key", clientKey)
+	case clientKey != "":
+		dst.Header.Set("Authorization", "Bearer "+clientKey)
+	}
+	copyHeader(dst, src, "X-Tenant-ID")
+	return nil
+}
+
+// applyGatewayDispatch is the only way a request is prepared for a tier.
+// Gateway auth, renter headers, and the reviewed lease are attached together.
+// Every JSON POST built here carries Content-Type, including the tokenizer.
+func applyGatewayDispatch(dst, src *http.Request, tier config.Tier, lease string) ([]string, error) {
+	if dst.Header.Get("Content-Type") == "" {
+		dst.Header.Set("Content-Type", "application/json")
+	}
+	secrets, err := applyAuth(dst, src, tier)
+	if err != nil {
+		return nil, err
+	}
+	if !tier.Gateway {
+		return secrets, nil
+	}
+	dst.Header.Del("X-Hypermesh-Lease-Id")
+	dst.Header.Del("X-Lease-Id")
+	if lease != "" {
+		dst.Header.Set("X-Hypermesh-Lease-Id", lease)
+	}
+	return secrets, nil
+}
+
+// gatewayLease is the selector AIuditor left on the body. A removed body
+// lease is not restored from a caller header.
+func gatewayLease(tier config.Tier, finalLease, originalLease string, src *http.Request) string {
+	if !tier.Gateway {
+		return ""
+	}
+	if finalLease != "" {
+		return finalLease
+	}
+	if originalLease != "" {
+		return ""
+	}
+	if src == nil {
+		return ""
+	}
+	return firstNonEmpty(src.Header.Get("X-Hypermesh-Lease-Id"), src.Header.Get("X-Lease-Id"))
+}
+
+func bodyLease(body []byte) string {
+	obj, err := jsonbody.Parse(body)
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(rawString(obj.Values["lease_id"]))
+}
+
+func leaseHeaderConflict(r *http.Request, bodyLease string) error {
+	if bodyLease == "" {
+		return nil
+	}
+	for _, name := range []string{"X-Hypermesh-Lease-Id", "X-Lease-Id", "X-Conductor-Task"} {
+		value := strings.TrimSpace(r.Header.Get(name))
+		if value != "" && value != bodyLease {
+			return fmt.Errorf("%s conflicts with body lease_id", name)
+		}
+	}
+	return nil
+}
+
+func rejectNonRenterCredentials(src *http.Request) error {
+	if isNonRenterCredential(bearerToken(src)) || isNonRenterCredential(strings.TrimSpace(src.Header.Get("X-Api-Key"))) {
+		return fmt.Errorf("refusing to forward a non-renter credential")
+	}
+	return nil
+}
+
+func isNonRenterCredential(value string) bool {
+	value = strings.TrimSpace(value)
+	for _, prefix := range []string{"hm_dev_", "hm_rtr_", "hm_site_", "hm_gw_"} {
+		if strings.HasPrefix(value, prefix) {
+			return true
+		}
+	}
+	return false
+}
+
+func bearerToken(src *http.Request) string {
 	header := strings.TrimSpace(src.Header.Get("Authorization"))
 	if len(header) > 7 && strings.EqualFold(header[:7], "bearer ") {
 		return strings.TrimSpace(header[7:])
 	}
 	return ""
+}
+
+func copyHeader(dst, src *http.Request, name string) {
+	if value := strings.TrimSpace(src.Header.Get(name)); value != "" {
+		dst.Header.Set(name, value)
+	}
 }
 
 func (p *Proxy) baseRecord(taskID, stepID string, decision routing.Decision, model, hash string) metrics.StepRecord {
@@ -1126,9 +1437,21 @@ func authorizeProxy(src *http.Request) error {
 	if want == "" {
 		return proxyAuthError{config.ProxyTokenEnv + " is required when a tier uses an environment key"}
 	}
+	return matchProxyToken(src, want, "proxy token is required to use the configured provider key")
+}
+
+func authorizeNetwork(src *http.Request) error {
+	want := strings.TrimSpace(os.Getenv(config.ProxyTokenEnv))
+	if want == "" {
+		return proxyAuthError{config.ProxyTokenEnv + " is required for listen_mode network"}
+	}
+	return matchProxyToken(src, want, "proxy token is required")
+}
+
+func matchProxyToken(src *http.Request, want, mismatch string) error {
 	got := strings.TrimSpace(src.Header.Get(config.ProxyTokenHeader))
 	if subtle.ConstantTimeCompare([]byte(got), []byte(want)) != 1 {
-		return proxyAuthError{"proxy token is required to use the configured provider key"}
+		return proxyAuthError{mismatch}
 	}
 	return nil
 }
@@ -1250,11 +1573,20 @@ func (p *Proxy) upstreamClient(timeout time.Duration, stream bool) *http.Client 
 	return client
 }
 
+func taskIDRequired(accountingURL string, tier config.Tier, proto string) bool {
+	if accountingURL != "" || tier.TaskTokenLimit > 0 {
+		return true
+	}
+	return tier.TaskOutputLimit > 0 && proto != translate.ProtoEmbeddings
+}
+
 func (p *Proxy) sharedTransport() *http.Transport {
 	p.transportOnce.Do(func() {
-		headerTimeout := p.Config.Cheap.Timeout
-		if p.Config.Frontier.Timeout > headerTimeout {
-			headerTimeout = p.Config.Frontier.Timeout
+		var headerTimeout time.Duration
+		for _, candidate := range []config.Tier{p.Config.Cheap, p.Config.Frontier} {
+			if candidate.Configured() && candidate.Timeout > headerTimeout {
+				headerTimeout = candidate.Timeout
+			}
 		}
 		if headerTimeout <= 0 {
 			headerTimeout = 60 * time.Second

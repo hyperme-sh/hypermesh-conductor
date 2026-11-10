@@ -33,6 +33,17 @@ const (
 	DefaultListen    = "127.0.0.1:8787"
 	ProxyTokenEnv    = "CONDUCTOR_PROXY_TOKEN"
 	ProxyTokenHeader = "X-Conductor-Token"
+
+	ListenModeLoopback = "loopback"
+	ListenModeNetwork  = "network"
+
+	// FallbackClass is the built-in job class used when a request names no
+	// class and the config has no default_class. It selects the cheap tier,
+	// the first tier in the endpoints file.
+	FallbackClass = "parse"
+	// FrontierFallbackClass selects the frontier tier when the cheap tier is
+	// not configured.
+	FrontierFallbackClass = "code"
 )
 
 var forbiddenKeys = map[string]struct{}{
@@ -56,6 +67,16 @@ type Tier struct {
 	Timeout         time.Duration
 	Auth            string
 	IncludeUsage    bool
+	// Gateway marks an OpenAI-compatible Hypermesh gateway tier. The model
+	// written upstream is a catalog id that tier recognizes.
+	Gateway bool
+}
+
+// TLSFiles are the certificate and key paths for listen_mode network.
+// The key stays on disk. It is not stored in the endpoints file.
+type TLSFiles struct {
+	CertFile string
+	KeyFile  string
 }
 
 // UsesEnvKey reports whether this tier can attach an environment key.
@@ -76,6 +97,46 @@ func (c Config) RequireProxyToken() error {
 		return fmt.Errorf("%s is required when a tier uses an environment key", ProxyTokenEnv)
 	}
 	return nil
+}
+
+// RequireListen fails closed for the opt-in non-loopback mode. That mode
+// needs a TLS certificate, a TLS key, and CONDUCTOR_PROXY_TOKEN before the
+// process binds.
+func (c Config) RequireListen() error {
+	if c.ListenMode != ListenModeNetwork {
+		return nil
+	}
+	if strings.TrimSpace(c.TLS.CertFile) == "" || strings.TrimSpace(c.TLS.KeyFile) == "" {
+		return fmt.Errorf("listen_mode network requires tls.cert_file and tls.key_file")
+	}
+	if _, err := os.Stat(c.TLS.CertFile); err != nil {
+		return fmt.Errorf("tls.cert_file: %w", err)
+	}
+	if _, err := os.Stat(c.TLS.KeyFile); err != nil {
+		return fmt.Errorf("tls.key_file: %w", err)
+	}
+	if strings.TrimSpace(os.Getenv(ProxyTokenEnv)) == "" {
+		return fmt.Errorf("%s is required for listen_mode network", ProxyTokenEnv)
+	}
+	return nil
+}
+
+// FallbackClass chooses a built-in class when the request and the config
+// both omit one. The cheap tier is first. HTTP 400 remains only when no
+// tier is configured.
+func (c Config) FallbackClass() (string, error) {
+	if c.Cheap.Configured() {
+		return FallbackClass, nil
+	}
+	if c.Frontier.Configured() {
+		return FrontierFallbackClass, nil
+	}
+	return "", fmt.Errorf("no tiers are configured")
+}
+
+// Configured reports whether the endpoints file included this tier.
+func (t Tier) Configured() bool {
+	return strings.TrimSpace(t.BaseURL) != "" || strings.TrimSpace(t.Model) != ""
 }
 
 // Key returns the environment key when this tier is configured to read one.
@@ -110,6 +171,8 @@ type AIU struct {
 // Config is the process configuration.
 type Config struct {
 	Listen       string
+	ListenMode   string
+	TLS          TLSFiles
 	Journal      string
 	DefaultClass string
 	Cheap        Tier
@@ -147,10 +210,14 @@ func (c Config) Endpoint(tier string) (Tier, error) {
 	if err != nil {
 		return Tier{}, err
 	}
+	selected := c.Frontier
 	if name == routing.Cheap {
-		return c.Cheap, nil
+		selected = c.Cheap
 	}
-	return c.Frontier, nil
+	if !selected.Configured() {
+		return Tier{}, fmt.Errorf("tier %s is not configured", name)
+	}
+	return selected, nil
 }
 
 // Rate returns the published proxy rate for a tier, if one was configured.
@@ -183,7 +250,7 @@ func Load(path string) (Config, error) {
 	}
 	tiers, _ := raw["tiers"].(map[string]any)
 	if tiers == nil {
-		return Config{}, fmt.Errorf("config tiers must be an object with cheap and frontier")
+		return Config{}, fmt.Errorf("config tiers must be an object")
 	}
 	for name, block := range tiers {
 		if obj, ok := block.(map[string]any); ok {
@@ -192,13 +259,16 @@ func Load(path string) (Config, error) {
 			}
 		}
 	}
-	cheap, err := parseTier(routing.Cheap, tiers[routing.Cheap])
+	cheap, err := parseOptionalTier(routing.Cheap, tiers)
 	if err != nil {
 		return Config{}, err
 	}
-	frontier, err := parseTier(routing.Frontier, tiers[routing.Frontier])
+	frontier, err := parseOptionalTier(routing.Frontier, tiers)
 	if err != nil {
 		return Config{}, err
+	}
+	if !cheap.Configured() && !frontier.Configured() {
+		return Config{}, fmt.Errorf("config tiers must include cheap or frontier")
 	}
 	if recipe, present := raw["recipe_file"]; present {
 		name, ok := recipe.(string)
@@ -241,7 +311,8 @@ func Load(path string) (Config, error) {
 	if listen == "" {
 		listen = DefaultListen
 	}
-	if err := ValidateListen(listen); err != nil {
+	listenMode, tlsFiles, err := parseListen(raw, listen)
+	if err != nil {
 		return Config{}, err
 	}
 	journal, _ := raw["journal"].(string)
@@ -267,6 +338,8 @@ func Load(path string) (Config, error) {
 	}
 	return Config{
 		Listen:       listen,
+		ListenMode:   listenMode,
+		TLS:          tlsFiles,
 		Journal:      journal,
 		DefaultClass: defaultClass,
 		Cheap:        cheap,
@@ -347,6 +420,55 @@ func parseCompaction(value any) (Compaction, error) {
 	return out, nil
 }
 
+func parseListen(raw map[string]any, listen string) (string, TLSFiles, error) {
+	mode := ListenModeLoopback
+	if value, ok := raw["listen_mode"].(string); ok && strings.TrimSpace(value) != "" {
+		switch strings.ToLower(strings.TrimSpace(value)) {
+		case ListenModeLoopback:
+			mode = ListenModeLoopback
+		case ListenModeNetwork:
+			mode = ListenModeNetwork
+		default:
+			return "", TLSFiles{}, fmt.Errorf("listen_mode must be loopback or network")
+		}
+	}
+	var tlsFiles TLSFiles
+	if raw["tls"] != nil {
+		block, ok := raw["tls"].(map[string]any)
+		if !ok {
+			return "", TLSFiles{}, fmt.Errorf("tls must be an object with cert_file and key_file")
+		}
+		if err := rejectSecrets(block, "tls"); err != nil {
+			return "", TLSFiles{}, err
+		}
+		cert, _ := block["cert_file"].(string)
+		key, _ := block["key_file"].(string)
+		tlsFiles = TLSFiles{CertFile: strings.TrimSpace(cert), KeyFile: strings.TrimSpace(key)}
+	}
+	if mode == ListenModeLoopback {
+		if err := ValidateListen(listen); err != nil {
+			return "", TLSFiles{}, err
+		}
+		if tlsFiles.CertFile != "" || tlsFiles.KeyFile != "" {
+			return "", TLSFiles{}, fmt.Errorf("tls.cert_file and tls.key_file require listen_mode network")
+		}
+		return mode, TLSFiles{}, nil
+	}
+	if _, _, err := net.SplitHostPort(listen); err != nil {
+		return "", TLSFiles{}, fmt.Errorf("listen must be host:port: %s", listen)
+	}
+	if tlsFiles.CertFile == "" || tlsFiles.KeyFile == "" {
+		return "", TLSFiles{}, fmt.Errorf("listen_mode network requires tls.cert_file and tls.key_file")
+	}
+	if _, err := os.Stat(tlsFiles.CertFile); err != nil {
+		return "", TLSFiles{}, fmt.Errorf("tls.cert_file: %w", err)
+	}
+	if _, err := os.Stat(tlsFiles.KeyFile); err != nil {
+		return "", TLSFiles{}, fmt.Errorf("tls.key_file: %w", err)
+	}
+	return mode, tlsFiles, nil
+}
+
 // ValidateListen allows loopback addresses only.
 func ValidateListen(addr string) error {
 	host, _, err := net.SplitHostPort(addr)
@@ -361,6 +483,16 @@ func ValidateListen(addr string) error {
 		return nil
 	}
 	return fmt.Errorf("listen must be a loopback address, got %s", addr)
+}
+
+// parseOptionalTier leaves a tier unset when its key is absent. A present
+// value that is not a tier object is an error.
+func parseOptionalTier(name string, tiers map[string]any) (Tier, error) {
+	block, present := tiers[name]
+	if !present {
+		return Tier{}, nil
+	}
+	return parseTier(name, block)
 }
 
 func parseTier(name string, block any) (Tier, error) {
@@ -425,6 +557,30 @@ func parseTier(name string, block any) (Tier, error) {
 	if value, ok := obj["include_stream_usage"].(bool); ok {
 		includeUsage = value
 	}
+	gateway := false
+	if value, ok := obj["gateway"].(bool); ok {
+		gateway = value
+	} else if _, present := obj["gateway"]; present {
+		return Tier{}, fmt.Errorf("tiers.%s.gateway must be a boolean", name)
+	}
+	catalogModel := ""
+	if value, ok := obj["catalog_model"].(string); ok {
+		catalogModel = value
+	} else if _, present := obj["catalog_model"]; present && obj["catalog_model"] != nil {
+		return Tier{}, fmt.Errorf("tiers.%s.catalog_model must be a string", name)
+	}
+	if gateway {
+		if provider == ProviderAnthropic {
+			return Tier{}, fmt.Errorf("tiers.%s.gateway requires provider openai or openai-compatible", name)
+		}
+		resolved, err := ResolveCatalogModel(model, catalogModel)
+		if err != nil {
+			return Tier{}, fmt.Errorf("tiers.%s: %w", name, err)
+		}
+		model = resolved
+	} else if strings.TrimSpace(catalogModel) != "" {
+		return Tier{}, fmt.Errorf("tiers.%s.catalog_model requires gateway true", name)
+	}
 	return Tier{
 		Name:         name,
 		InputCounter: counter,
@@ -435,6 +591,7 @@ func parseTier(name string, block any) (Tier, error) {
 		Timeout:      time.Duration(timeout * float64(time.Second)),
 		Auth:         auth,
 		IncludeUsage: includeUsage,
+		Gateway:      gateway,
 	}, nil
 }
 

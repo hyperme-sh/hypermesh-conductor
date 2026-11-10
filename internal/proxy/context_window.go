@@ -14,18 +14,18 @@ import (
 
 // Count with the selected provider's tokenizer and template after all rewrites.
 // The tokenizer and generation endpoint share the configured origin and auth.
-func (p *Proxy) checkContext(upstream *http.Request, tier config.Tier, protocol string, body []byte) (*int, int, error) {
+func (p *Proxy) checkContext(client, upstream *http.Request, tier config.Tier, protocol string, body []byte, lease string) (*int, int, error) {
 	if tier.InputCounter == "" && tier.ContextWindow == 0 && tier.TaskTokenLimit == 0 {
 		return nil, 0, nil
 	}
-	count, status, err := p.countChatContext(upstream, tier, protocol, body)
+	count, status, err := p.countChatContext(client, upstream, tier, protocol, body, lease)
 	if err != nil && tier.ContextWindow == 0 && tier.TaskTokenLimit == 0 {
 		return nil, 0, nil
 	}
 	return count, status, err
 }
 
-func (p *Proxy) countChatContext(upstream *http.Request, tier config.Tier, protocol string, body []byte) (*int, int, error) {
+func (p *Proxy) countChatContext(client, upstream *http.Request, tier config.Tier, protocol string, body []byte, lease string) (*int, int, error) {
 	if protocol != translate.ProtoChat || tier.InputCounter != "vllm" {
 		return nil, 400, errors.New("hard context window requires a supported tokenizer for this protocol")
 	}
@@ -44,6 +44,10 @@ func (p *Proxy) countChatContext(upstream *http.Request, tier config.Tier, proto
 			}
 			delete(fields, key)
 		case "temperature", "top_p", "top_k", "seed", "stream", "stream_options", "n", "best_of", "stop", "frequency_penalty", "presence_penalty", "logprobs", "top_logprobs":
+			delete(fields, key)
+		case "lease_id":
+			// Lease metadata is not part of the rendered prompt. It stays on
+			// the generation body and the gateway lease headers.
 			delete(fields, key)
 		default:
 			return nil, 400, fmt.Errorf("context counting does not support chat parameter %q", key)
@@ -85,7 +89,9 @@ func (p *Proxy) countChatContext(upstream *http.Request, tier config.Tier, proto
 	if err != nil {
 		return nil, 503, errors.New("invalid tokenizer endpoint")
 	}
-	req.Header = upstream.Header.Clone()
+	if _, err := applyGatewayDispatch(req, client, tier, lease); err != nil {
+		return nil, http.StatusUnauthorized, err
+	}
 	resp, err := p.upstreamClient(tier.Timeout, false).Do(req)
 	unavailable := errors.New("provider input token count unavailable")
 	if err != nil {

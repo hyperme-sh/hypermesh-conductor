@@ -7,6 +7,9 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"strings"
+
+	"github.com/hyperme-sh/hypermesh-conductor/internal/routing"
 )
 
 type recipeTier struct {
@@ -46,9 +49,16 @@ func loadRecipe(path string, cheap, frontier *Tier) error {
 		return fmt.Errorf("invalid max_task_output_tokens")
 	}
 	for _, entry := range []struct {
+		name     string
 		tier     *Tier
 		settings recipeTier
-	}{{cheap, recipe.Cheap}, {frontier, recipe.Frontier}} {
+	}{{routing.Cheap, cheap, recipe.Cheap}, {routing.Frontier, frontier, recipe.Frontier}} {
+		if !entry.tier.Configured() {
+			if strings.TrimSpace(entry.settings.Model) != "" || entry.settings.MaxOutputTokens != 0 || entry.settings.ContextWindow != nil {
+				return fmt.Errorf("recipe %s requires that tier in the endpoints file", entry.name)
+			}
+			continue
+		}
 		if entry.settings.Model != entry.tier.Model || entry.settings.MaxOutputTokens < 1 || entry.settings.MaxOutputTokens > 2147483647 {
 			return fmt.Errorf("recipe %s requires configured model %q and a positive 32-bit output limit", entry.tier.Name, entry.tier.Model)
 		}

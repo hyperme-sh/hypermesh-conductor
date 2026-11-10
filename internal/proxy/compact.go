@@ -21,8 +21,8 @@ import (
 	"github.com/hyperme-sh/hypermesh-conductor/internal/usage"
 )
 
-func (p *Proxy) maybeCompact(ctx context.Context, client *http.Request, proto string, prepared []byte, taskID, stepID, prefixHash string, selected config.Tier) ([]byte, bool, int, int, error) {
-	if p.Journal == nil || selected.TaskTokenLimit > 0 || selected.TaskOutputLimit > 0 || p.Config.Compaction.MaxTailTokens <= 0 {
+func (p *Proxy) maybeCompact(ctx context.Context, client *http.Request, proto string, prepared []byte, taskID, stepID, prefixHash string, selected config.Tier, originalLease string) ([]byte, bool, int, int, error) {
+	if p.Journal == nil || !p.Config.Cheap.Configured() || selected.TaskTokenLimit > 0 || selected.TaskOutputLimit > 0 || p.Config.Compaction.MaxTailTokens <= 0 {
 		return prepared, false, 0, 0, nil
 	}
 	if proto != "openai.chat" && proto != "anthropic.messages" {
@@ -40,7 +40,8 @@ func (p *Proxy) maybeCompact(ctx context.Context, client *http.Request, proto st
 	if err := authorizeCompaction(compactionClient, p.Config.Cheap); err != nil {
 		return prepared, false, 0, 0, err
 	}
-	summary, parsed, latency, input, lookups, hits, cached, err := p.tailSummary(ctx, compactionClient, prefixHash, plan.SummaryInput)
+	reviewed := gatewayLease(p.Config.Cheap, bodyLease(prepared), originalLease, client)
+	summary, parsed, latency, input, lookups, hits, cached, err := p.tailSummary(ctx, compactionClient, prefixHash, plan.SummaryInput, reviewed)
 	if !cached {
 		compactID := stepID + ".compact"
 		record := metrics.StepRecord{
@@ -50,7 +51,13 @@ func (p *Proxy) maybeCompact(ctx context.Context, client *http.Request, proto st
 		}
 		if err != nil {
 			var denied proxyAuthError
-			if errors.As(err, &denied) || errors.Is(err, errBodyBudget) {
+			var rejected gatewayRejectedError
+			if errors.As(err, &denied) || errors.As(err, &rejected) || errors.Is(err, errBodyBudget) {
+				if errors.As(err, &rejected) {
+					msg := rejected.Error()
+					record.Error = &msg
+					p.journal(record)
+				}
 				return prepared, false, lookups, hits, err
 			}
 			msg := "compaction request failed"
@@ -105,7 +112,19 @@ func authorizeCompaction(client *http.Request, tier config.Tier) error {
 	if !tier.UsesEnvKey() {
 		return nil
 	}
-	clientKey := clientCredential(client, tier.Provider)
+	var clientKey string
+	if tier.Gateway {
+		key, err := gatewayClientKey(client)
+		if err != nil {
+			return err
+		}
+		clientKey = key
+	} else {
+		clientKey = clientCredential(client, tier.Provider)
+	}
+	if tier.Auth == config.AuthEnv {
+		clientKey = ""
+	}
 	needEnv := tier.APIKeyEnv != "" && (tier.Auth == config.AuthEnv || (tier.Auth == config.AuthPassthroughOrEnv && clientKey == ""))
 	if !needEnv {
 		return nil
@@ -118,7 +137,7 @@ type compactionInput struct {
 	count      *int
 }
 
-func (p *Proxy) tailSummary(ctx context.Context, client *http.Request, prefixHash, tail string) (string, usage.Usage, int, compactionInput, int, int, bool, error) {
+func (p *Proxy) tailSummary(ctx context.Context, client *http.Request, prefixHash, tail, reviewedLease string) (string, usage.Usage, int, compactionInput, int, int, bool, error) {
 	lookups, hits := 0, 0
 	if p.Notes != nil && p.Notes.Cache != nil {
 		lookups = 1
@@ -126,14 +145,20 @@ func (p *Proxy) tailSummary(ctx context.Context, client *http.Request, prefixHas
 			return cached, usage.UncertainUsage(), 0, compactionInput{}, lookups, 1, true, nil
 		}
 	}
-	summary, parsed, latency, input, err := p.cheapSummary(ctx, client, tail)
+	summary, parsed, latency, input, err := p.cheapSummary(ctx, client, tail, reviewedLease)
 	if err == nil && p.Notes != nil && p.Notes.Cache != nil {
 		p.Notes.Cache.Put("sum:"+notes.SummaryKey(prefixHash, tail), summary)
 	}
 	return summary, parsed, latency, input, lookups, hits, false, err
 }
 
-func (p *Proxy) cheapSummary(ctx context.Context, client *http.Request, tail string) (string, usage.Usage, int, compactionInput, error) {
+type gatewayRejectedError struct{ status int }
+
+func (e gatewayRejectedError) Error() string {
+	return fmt.Sprintf("gateway rejected the compaction summary: HTTP %d", e.status)
+}
+
+func (p *Proxy) cheapSummary(ctx context.Context, client *http.Request, tail, reviewedLease string) (string, usage.Usage, int, compactionInput, error) {
 	var input compactionInput
 	tier := p.Config.Cheap
 	payload := map[string]any{
@@ -142,6 +167,9 @@ func (p *Proxy) cheapSummary(ctx context.Context, client *http.Request, tail str
 			map[string]string{"role": "system", "content": "Summarize the conversation tail as goals, steps, facts, and notes."},
 			map[string]string{"role": "user", "content": tail},
 		},
+	}
+	if reviewedLease != "" {
+		payload["lease_id"] = reviewedLease
 	}
 	raw, err := json.Marshal(payload)
 	if err != nil {
@@ -198,6 +226,7 @@ func (p *Proxy) cheapSummary(ctx context.Context, client *http.Request, tail str
 			return "", usage.UncertainUsage(), 0, input, err
 		}
 	}
+	outgoingLease := gatewayLease(tier, bodyLease(bodyToSend), reviewedLease, nil)
 	bodyToSend, err = limitOutput(wire.Protocol, bodyToSend, tier.OutputLimit)
 	if err != nil {
 		return "", usage.UncertainUsage(), 0, input, err
@@ -214,7 +243,7 @@ func (p *Proxy) cheapSummary(ctx context.Context, client *http.Request, tail str
 		return "", usage.UncertainUsage(), 0, input, err
 	}
 	req.Header.Set("Content-Type", "application/json")
-	if _, err := applyAuth(req, client, tier); err != nil {
+	if _, err := applyGatewayDispatch(req, client, tier, outgoingLease); err != nil {
 		return "", usage.UncertainUsage(), 0, input, err
 	}
 	if tier.Provider == config.ProviderAnthropic || wire.Protocol == translate.ProtoMessages {
@@ -224,7 +253,7 @@ func (p *Proxy) cheapSummary(ctx context.Context, client *http.Request, tail str
 		}
 		req.Header.Set("anthropic-version", version)
 	}
-	input.count, _, err = p.checkContext(req, tier, wire.Protocol, bodyToSend)
+	input.count, _, err = p.checkContext(client, req, tier, wire.Protocol, bodyToSend, outgoingLease)
 	if err != nil {
 		return "", usage.UncertainUsage(), 0, input, err
 	}
@@ -242,6 +271,9 @@ func (p *Proxy) cheapSummary(ctx context.Context, client *http.Request, tail str
 		return "", usage.UncertainUsage(), latency, input, err
 	}
 	if err != nil || resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		if err == nil && tier.Gateway && (resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden) {
+			err = gatewayRejectedError{status: resp.StatusCode}
+		}
 		if err == nil {
 			err = fmt.Errorf("provider HTTP %d", resp.StatusCode)
 		}

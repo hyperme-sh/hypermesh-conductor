@@ -1,12 +1,20 @@
 package proxy
 
 import (
+	"bufio"
 	"bytes"
 	"context"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
+	"crypto/tls"
+	"crypto/x509"
 	"encoding/json"
+	"encoding/pem"
 	"errors"
 	"fmt"
 	"io"
+	"math/big"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -21,6 +29,7 @@ import (
 	"github.com/hyperme-sh/hypermesh-conductor/internal/aiuditor"
 	"github.com/hyperme-sh/hypermesh-conductor/internal/config"
 	"github.com/hyperme-sh/hypermesh-conductor/internal/history"
+	"github.com/hyperme-sh/hypermesh-conductor/internal/jsonbody"
 	"github.com/hyperme-sh/hypermesh-conductor/internal/metrics"
 	"github.com/hyperme-sh/hypermesh-conductor/internal/notes"
 	"github.com/hyperme-sh/hypermesh-conductor/internal/prefix"
@@ -2094,9 +2103,9 @@ func TestModelsAndUnknownClass(t *testing.T) {
 	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), "local-small") || !strings.Contains(rec.Body.String(), "frontier") {
 		t.Fatal(rec.Code, rec.Body.String())
 	}
-	missing := do(New(cfg, aiuditor.Stub{}, nil), "/v1/chat/completions", "", "task-1", "step-1", "", `{"messages":[{"role":"user","content":"hi"}]}`)
-	if missing.Code != http.StatusBadRequest {
-		t.Fatal(missing.Code, missing.Body.String())
+	unknown := do(New(cfg, aiuditor.Stub{}, nil), "/v1/chat/completions", "not-a-class", "task-1", "step-1", "", `{"messages":[{"role":"user","content":"hi"}]}`)
+	if unknown.Code != http.StatusBadRequest {
+		t.Fatal(unknown.Code, unknown.Body.String())
 	}
 	bare := httptest.NewRequest(http.MethodGet, "/v1/models", nil)
 	denied := httptest.NewRecorder()
@@ -2301,7 +2310,7 @@ func TestAIuditorSummaryModificationReservesBudget(t *testing.T) {
 	cfg := loadTestConfig(t, dir, "http://127.0.0.1:1/v1", "http://127.0.0.1:1/v1", config.AuthPassthrough, config.ProviderOpenAICompatible)
 	client := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
 	client.Header.Set("Authorization", "Bearer test-secret")
-	_, _, _, _, err := New(cfg, oversizedModify{}, openJournal(t, dir)).cheapSummary(context.Background(), client, "small summary input")
+	_, _, _, _, err := New(cfg, oversizedModify{}, openJournal(t, dir)).cheapSummary(context.Background(), client, "small summary input", "")
 	if !errors.Is(err, errBodyBudget) {
 		t.Fatalf("expected summary budget rejection: %v", err)
 	}
@@ -2577,6 +2586,730 @@ func TestRedactEncodedCredentialsPreservesUnrelatedJSON(t *testing.T) {
 	if got := string(redactEventData(append(append([]byte("data: "), raw...), '\n', '\n'), []string{key})); got != "data: "+want+"\n\n" {
 		t.Fatal(got)
 	}
+}
+
+func TestFrontierOnlyFileRoutesUnclassifiedRequests(t *testing.T) {
+	assertSingleTierFile(t, "frontier", "frontier-only", "code")
+	assertSingleTierFile(t, "cheap", "cheap-only", "parse")
+}
+
+func assertSingleTierFile(t *testing.T, tierName, model, missingClass string) {
+	t.Helper()
+	var got string
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var payload map[string]any
+		_ = json.NewDecoder(r.Body).Decode(&payload)
+		got, _ = payload["model"].(string)
+		_, _ = w.Write([]byte(`{"usage":{"prompt_tokens":1,"completion_tokens":1}}`))
+	}))
+	defer upstream.Close()
+	dir := t.TempDir()
+	raw := fmt.Sprintf(`{"listen":"127.0.0.1:8787","tiers":{%q:{"provider":"openai-compatible","base_url":%q,"model":%q}},"prefix":{"system":"You are Conductor.","tools":[]}}`, tierName, upstream.URL+"/v1", model)
+	path := filepath.Join(dir, "endpoints.json")
+	if err := os.WriteFile(path, []byte(raw), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := config.Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := New(cfg, aiuditor.Stub{}, openJournal(t, dir))
+	var logged strings.Builder
+	server.Logf = func(format string, args ...any) { fmt.Fprintf(&logged, format, args...) }
+	rec := do(server, "/v1/chat/completions", "", "task-1", "unclassified", "", `{"messages":[{"role":"user","content":"hi"}]}`)
+	if rec.Code != http.StatusOK || got != model || !strings.Contains(logged.String(), "class fallback="+missingClass) {
+		t.Fatalf("%s code %d model %s log %s body %s", tierName, rec.Code, got, logged.String(), rec.Body.String())
+	}
+	other := "parse"
+	if tierName == "cheap" {
+		other = "code"
+	}
+	rec = do(New(cfg, aiuditor.Stub{}, openJournal(t, dir)), "/v1/chat/completions", other, "task-1", "missing-tier", "", `{"messages":[{"role":"user","content":"hi"}]}`)
+	if rec.Code != http.StatusBadRequest || !strings.Contains(rec.Body.String(), "is not configured") {
+		t.Fatalf("%s missing tier code %d body %s", tierName, rec.Code, rec.Body.String())
+	}
+	if missingClass == "" {
+		t.Fatal("missing class")
+	}
+}
+
+func TestMissingClassFallsBackAndLogs(t *testing.T) {
+	var model string
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var payload map[string]any
+		_ = json.NewDecoder(r.Body).Decode(&payload)
+		model, _ = payload["model"].(string)
+		_, _ = w.Write([]byte(`{"usage":{"prompt_tokens":1,"completion_tokens":1}}`))
+	}))
+	defer upstream.Close()
+	dir := t.TempDir()
+	cfg := loadTestConfig(t, dir, upstream.URL+"/v1", "http://127.0.0.1:1/v1", config.AuthPassthrough, config.ProviderOpenAICompatible)
+	server := New(cfg, aiuditor.Stub{}, openJournal(t, dir))
+	var logged strings.Builder
+	server.Logf = func(format string, args ...any) {
+		fmt.Fprintf(&logged, format, args...)
+	}
+	rec := do(server, "/v1/chat/completions", "", "task-1", "fallback", "", `{"messages":[{"role":"user","content":"hi"}]}`)
+	if rec.Code != http.StatusOK || model != "local-small" || !strings.Contains(logged.String(), "class fallback=parse") {
+		t.Fatalf("code %d model %s log %s body %s", rec.Code, model, logged.String(), rec.Body.String())
+	}
+}
+
+func TestNoTiersStayBadRequest(t *testing.T) {
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{"messages":[{"role":"user","content":"hi"}]}`))
+	rec := httptest.NewRecorder()
+	New(config.Config{}, aiuditor.Stub{}, nil).ServeHTTP(rec, req)
+	if rec.Code != http.StatusBadRequest || !strings.Contains(rec.Body.String(), "no tiers are configured") {
+		t.Fatal(rec.Code, rec.Body.String())
+	}
+}
+
+func TestGatewayForwardsRenterIdentityAndKeepsLease(t *testing.T) {
+	const lease = "22222222-2222-2222-2222-222222222222"
+	const tenant = "11111111-1111-1111-1111-111111111111"
+	var header http.Header
+	var body string
+	var path string
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		raw, _ := io.ReadAll(r.Body)
+		header = r.Header.Clone()
+		body = string(raw)
+		path = r.URL.Path
+		_, _ = w.Write([]byte(`{"usage":{"prompt_tokens":1,"completion_tokens":1}}`))
+	}))
+	defer upstream.Close()
+	dir := t.TempDir()
+	cfg := loadTestConfig(t, dir, upstream.URL+"/v1", upstream.URL+"/v1", config.AuthPassthrough, config.ProviderOpenAICompatible)
+	cfg.Cheap.Gateway = true
+	cfg.Cheap.Model = "llama-3.1-8b-q4"
+	server := New(cfg, aiuditor.Stub{}, openJournal(t, dir))
+
+	req := request("/v1/chat/completions", "parse", lease, "lease-1", "", `{"model":"client-model","lease_id":"`+lease+`","messages":[{"role":"user","content":"hi"}]}`)
+	req.Header.Set("X-Api-Key", "renter.secret")
+	req.Header.Set("X-Tenant-ID", tenant)
+	req.Header.Set("X-Lease-Id", lease)
+	rec := httptest.NewRecorder()
+	server.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK || path != "/v1/chat/completions" {
+		t.Fatalf("code %d path %s body %s", rec.Code, path, rec.Body.String())
+	}
+	if header.Get("X-Api-Key") != "renter.secret" || header.Get("Authorization") != "" || header.Get("X-Tenant-ID") != tenant || header.Get("X-Hypermesh-Lease-Id") != lease || header.Get("X-Lease-Id") != "" {
+		t.Fatal(header)
+	}
+	if !strings.Contains(body, `"model":"llama-3.1-8b-q4"`) || !strings.Contains(body, `"lease_id":"`+lease+`"`) {
+		t.Fatal(body)
+	}
+
+	translated := request("/v1/messages", "parse", lease, "lease-2", "", `{"lease_id":"`+lease+`","messages":[{"role":"user","content":"hi"}]}`)
+	translated.Header.Set("Authorization", "Bearer renter.secret")
+	translated.Header.Set("X-Tenant-ID", tenant)
+	rec = httptest.NewRecorder()
+	server.ServeHTTP(rec, translated)
+	if rec.Code != http.StatusOK || header.Get("Authorization") != "Bearer renter.secret" || header.Get("X-Api-Key") != "" || header.Get("X-Hypermesh-Lease-Id") != lease || header.Get("X-Tenant-ID") != tenant {
+		t.Fatalf("code %d header %v body %s", rec.Code, header, body)
+	}
+	if !strings.Contains(body, `"lease_id":"`+lease+`"`) || !strings.Contains(body, `"model":"llama-3.1-8b-q4"`) || strings.Contains(body, "client-model") {
+		t.Fatal(body)
+	}
+}
+
+type leaseRewrite struct{ body string }
+
+func (h leaseRewrite) Review(context.Context, aiuditor.Envelope) (aiuditor.Verdict, error) {
+	return aiuditor.Verdict{Action: aiuditor.Modify, Reason: "lease", Body: []byte(h.body)}, nil
+}
+
+func TestReviewedBodyOwnsGatewayLeaseHeader(t *testing.T) {
+	const original = "22222222-2222-2222-2222-222222222222"
+	const replaced = "33333333-3333-3333-3333-333333333333"
+	chat := func(lease string) string {
+		if lease == "" {
+			return `{"messages":[{"role":"user","content":"hi"}]}`
+		}
+		return `{"lease_id":"` + lease + `","messages":[{"role":"user","content":"hi"}]}`
+	}
+	for _, tc := range []struct {
+		name        string
+		rewrite     string
+		header      string
+		headerVal   string
+		task        string
+		wantCode    int
+		wantLease   string
+		forbidLease bool
+	}{
+		{name: "remove", rewrite: chat(""), header: "X-Hypermesh-Lease-Id", headerVal: original, task: original, wantCode: http.StatusOK, forbidLease: true},
+		{name: "replace", rewrite: chat(replaced), header: "X-Hypermesh-Lease-Id", headerVal: original, task: original, wantCode: http.StatusOK, wantLease: replaced},
+		{name: "conflict-header", rewrite: chat(original), header: "X-Hypermesh-Lease-Id", headerVal: replaced, task: original, wantCode: http.StatusBadRequest},
+		{name: "conflict-task", rewrite: chat(original), header: "X-Lease-Id", headerVal: original, task: replaced, wantCode: http.StatusBadRequest},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			hits := 0
+			var got http.Header
+			var body string
+			upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				hits++
+				raw, _ := io.ReadAll(r.Body)
+				got = r.Header.Clone()
+				body = string(raw)
+				_, _ = w.Write([]byte(`{"usage":{"prompt_tokens":1,"completion_tokens":1}}`))
+			}))
+			defer upstream.Close()
+			dir := t.TempDir()
+			cfg := loadTestConfig(t, dir, upstream.URL+"/v1", upstream.URL+"/v1", config.AuthPassthrough, config.ProviderOpenAICompatible)
+			cfg.Cheap.Gateway = true
+			cfg.Cheap.Model = "llama-3.1-8b-q4"
+			req := request("/v1/chat/completions", "parse", tc.task, tc.name, "", chat(original))
+			req.Header.Set(tc.header, tc.headerVal)
+			rec := httptest.NewRecorder()
+			New(cfg, leaseRewrite{body: tc.rewrite}, openJournal(t, dir)).ServeHTTP(rec, req)
+			if rec.Code != tc.wantCode {
+				t.Fatalf("code %d body %s", rec.Code, rec.Body.String())
+			}
+			if tc.wantCode != http.StatusOK {
+				if hits != 0 || !strings.Contains(rec.Body.String(), "conflicts with body lease_id") {
+					t.Fatalf("hits %d body %s", hits, rec.Body.String())
+				}
+				return
+			}
+			if hits != 1 {
+				t.Fatalf("hits %d", hits)
+			}
+			if tc.forbidLease {
+				if got.Get("X-Hypermesh-Lease-Id") != "" || got.Get("X-Lease-Id") != "" || strings.Contains(body, "lease_id") {
+					t.Fatalf("header %v body %s", got, body)
+				}
+				return
+			}
+			if got.Get("X-Hypermesh-Lease-Id") != tc.wantLease || got.Get("X-Lease-Id") != "" || !strings.Contains(body, `"lease_id":"`+tc.wantLease+`"`) || strings.Contains(body, original) {
+				t.Fatalf("header %v body %s", got, body)
+			}
+		})
+	}
+}
+
+type stripSummaryLease struct{}
+
+func (stripSummaryLease) Review(_ context.Context, env aiuditor.Envelope) (aiuditor.Verdict, error) {
+	if !bytes.Contains(env.Request.Body, []byte("Summarize the conversation tail")) {
+		return aiuditor.Verdict{Action: aiuditor.Allow}, nil
+	}
+	obj, err := jsonbody.Parse(env.Request.Body)
+	if err != nil {
+		return aiuditor.Verdict{Action: aiuditor.Deny, Reason: "summary"}, nil
+	}
+	obj.Delete("lease_id")
+	raw, err := obj.Marshal()
+	if err != nil {
+		return aiuditor.Verdict{Action: aiuditor.Deny, Reason: "summary"}, nil
+	}
+	return aiuditor.Verdict{Action: aiuditor.Modify, Body: raw}, nil
+}
+
+func TestGatewayCompactionUsesReviewedLease(t *testing.T) {
+	const lease = "22222222-2222-2222-2222-222222222222"
+	const tenant = "11111111-1111-1111-1111-111111111111"
+	summary := func(body string) bool {
+		return strings.Contains(body, "Summarize the conversation tail")
+	}
+	newCfg := func(t *testing.T, upstream string) (config.Config, string) {
+		t.Helper()
+		dir := t.TempDir()
+		cfg := loadTestConfig(t, dir, upstream+"/v1", upstream+"/v1", config.AuthPassthrough, config.ProviderOpenAICompatible)
+		cfg.Cheap.Gateway = true
+		cfg.Cheap.Model = "llama-3.1-8b-q4"
+		cfg.Compaction.MaxTailTokens = 8
+		cfg.Compaction.RecentMessages = 0
+		return cfg, dir
+	}
+	body := `{"lease_id":"` + lease + `","messages":[{"role":"user","content":"` + strings.Repeat("tail fact ", 40) + `"}]}`
+	t.Run("keeps lease", func(t *testing.T) {
+		var summaryLease, mainLease string
+		upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			raw, _ := io.ReadAll(r.Body)
+			if summary(string(raw)) {
+				summaryLease = r.Header.Get("X-Hypermesh-Lease-Id")
+				if r.Header.Get("X-Api-Key") != "renter.secret" || r.Header.Get("X-Tenant-ID") != tenant {
+					t.Errorf("summary identity %v", r.Header)
+				}
+				fmt.Fprint(w, `{"choices":[{"message":{"role":"assistant","content":"goals and facts"},"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":1}}`)
+				return
+			}
+			mainLease = r.Header.Get("X-Hypermesh-Lease-Id")
+			fmt.Fprint(w, `{"usage":{"prompt_tokens":1,"completion_tokens":1}}`)
+		}))
+		defer upstream.Close()
+		cfg, dir := newCfg(t, upstream.URL)
+		req := request("/v1/chat/completions", "parse", lease, "compact-keep", "", body)
+		req.Header.Set("X-Api-Key", "renter.secret")
+		req.Header.Set("X-Tenant-ID", tenant)
+		req.Header.Set("X-Hypermesh-Lease-Id", lease)
+		rec := httptest.NewRecorder()
+		New(cfg, aiuditor.Stub{}, openJournal(t, dir)).ServeHTTP(rec, req)
+		if rec.Code != http.StatusOK || summaryLease != lease || mainLease != lease {
+			t.Fatalf("code %d summary %q main %q body %s", rec.Code, summaryLease, mainLease, rec.Body.String())
+		}
+	})
+	t.Run("review removes lease", func(t *testing.T) {
+		var summaryLease string
+		var sawSummary bool
+		upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			raw, _ := io.ReadAll(r.Body)
+			if summary(string(raw)) {
+				sawSummary = true
+				summaryLease = r.Header.Get("X-Hypermesh-Lease-Id")
+				if r.Header.Get("X-Lease-Id") != "" {
+					t.Errorf("stale lease header %s", r.Header.Get("X-Lease-Id"))
+				}
+			}
+			fmt.Fprint(w, `{"choices":[{"message":{"role":"assistant","content":"goals and facts"},"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":1}}`)
+		}))
+		defer upstream.Close()
+		cfg, dir := newCfg(t, upstream.URL)
+		req := request("/v1/chat/completions", "parse", lease, "compact-drop", "", body)
+		req.Header.Set("X-Api-Key", "renter.secret")
+		req.Header.Set("X-Hypermesh-Lease-Id", lease)
+		rec := httptest.NewRecorder()
+		New(cfg, stripSummaryLease{}, openJournal(t, dir)).ServeHTTP(rec, req)
+		if rec.Code != http.StatusOK || !sawSummary || summaryLease != "" {
+			t.Fatalf("code %d saw %v lease %q body %s", rec.Code, sawSummary, summaryLease, rec.Body.String())
+		}
+	})
+	t.Run("rejection is journaled", func(t *testing.T) {
+		calls := 0
+		upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			calls++
+			http.Error(w, "no lease", http.StatusUnauthorized)
+		}))
+		defer upstream.Close()
+		cfg, dir := newCfg(t, upstream.URL)
+		journal := openJournal(t, dir)
+		req := request("/v1/chat/completions", "parse", lease, "compact-deny", "", body)
+		req.Header.Set("X-Api-Key", "renter.secret")
+		req.Header.Set("X-Hypermesh-Lease-Id", lease)
+		rec := httptest.NewRecorder()
+		New(cfg, aiuditor.Stub{}, journal).ServeHTTP(rec, req)
+		rows, err := metrics.ReadJournal(journal.Path())
+		if rec.Code != http.StatusUnauthorized || calls != 1 || err != nil || len(rows) != 1 || rows[0].Error == nil || !strings.Contains(*rows[0].Error, "HTTP 401") {
+			t.Fatalf("code %d calls %d err %v rows %+v body %s", rec.Code, calls, err, rows, rec.Body.String())
+		}
+	})
+}
+
+func TestGatewayAuxiliaryCallsCarryIdentity(t *testing.T) {
+	const lease = "22222222-2222-2222-2222-222222222222"
+	t.Run("tokenizer", func(t *testing.T) {
+		var tokenLease, tokenKey, tokenBody string
+		upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			raw, _ := io.ReadAll(r.Body)
+			if strings.HasSuffix(r.URL.Path, "/tokenize") {
+				tokenLease = r.Header.Get("X-Hypermesh-Lease-Id")
+				tokenKey = r.Header.Get("X-Api-Key")
+				if r.Header.Get("Content-Type") != "application/json" {
+					t.Errorf("tokenizer content type %q", r.Header.Get("Content-Type"))
+				}
+				tokenBody = string(raw)
+				fmt.Fprint(w, `{"count":4,"max_model_len":128}`)
+				return
+			}
+			fmt.Fprint(w, `{"usage":{"prompt_tokens":4,"completion_tokens":1}}`)
+		}))
+		defer upstream.Close()
+		dir := t.TempDir()
+		cfg := loadTestConfig(t, dir, upstream.URL+"/v1", upstream.URL+"/v1", config.AuthPassthrough, config.ProviderOpenAICompatible)
+		cfg.Cheap.Gateway = true
+		cfg.Cheap.Model = "llama-3.1-8b-q4"
+		cfg.Cheap.InputCounter = "vllm"
+		cfg.Cheap.ContextWindow = 64
+		req := request("/v1/chat/completions", "parse", lease, "tokenize", "", `{"lease_id":"`+lease+`","max_tokens":4,"messages":[{"role":"user","content":"hi"}]}`)
+		req.Header.Set("X-Api-Key", "renter.secret")
+		req.Header.Set("X-Tenant-ID", "11111111-1111-1111-1111-111111111111")
+		rec := httptest.NewRecorder()
+		New(cfg, aiuditor.Stub{}, openJournal(t, dir)).ServeHTTP(rec, req)
+		if rec.Code != http.StatusOK || tokenLease != lease || tokenKey != "renter.secret" || strings.Contains(tokenBody, "lease_id") {
+			t.Fatalf("code %d lease %q key %q body %s resp %s", rec.Code, tokenLease, tokenKey, tokenBody, rec.Body.String())
+		}
+	})
+	t.Run("embeddings", func(t *testing.T) {
+		var got http.Header
+		var path string
+		upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			got = r.Header.Clone()
+			path = r.URL.Path
+			fmt.Fprint(w, `{"data":[{"embedding":[0.1]}],"usage":{"prompt_tokens":1,"total_tokens":1}}`)
+		}))
+		defer upstream.Close()
+		dir := t.TempDir()
+		cfg := loadTestConfig(t, dir, upstream.URL+"/v1", upstream.URL+"/v1", config.AuthPassthrough, config.ProviderOpenAICompatible)
+		cfg.Cheap.Gateway = true
+		cfg.Cheap.Model = "embed-minilm"
+		req := request("/v1/embeddings", "embed", lease, "embed-1", "", `{"input":"hi","lease_id":"`+lease+`"}`)
+		req.Header.Set("X-Api-Key", "renter.secret")
+		req.Header.Set("X-Tenant-ID", "11111111-1111-1111-1111-111111111111")
+		rec := httptest.NewRecorder()
+		New(cfg, aiuditor.Stub{}, openJournal(t, dir)).ServeHTTP(rec, req)
+		if rec.Code != http.StatusOK || path != "/v1/embeddings" || got.Get("X-Hypermesh-Lease-Id") != lease || got.Get("X-Api-Key") != "renter.secret" || got.Get("X-Tenant-ID") == "" {
+			t.Fatalf("code %d path %s header %v body %s", rec.Code, path, got, rec.Body.String())
+		}
+	})
+}
+
+func TestNonGatewayCompactionFailureKeepsTheConversation(t *testing.T) {
+	var sawFrontier bool
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		raw, _ := io.ReadAll(r.Body)
+		if strings.Contains(string(raw), "Summarize the conversation tail") {
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
+		}
+		sawFrontier = true
+		fmt.Fprint(w, `{"usage":{"prompt_tokens":1,"completion_tokens":1}}`)
+	}))
+	defer upstream.Close()
+	dir := t.TempDir()
+	cfg := loadTestConfig(t, dir, upstream.URL+"/v1", upstream.URL+"/v1", config.AuthPassthrough, config.ProviderOpenAICompatible)
+	cfg.Compaction.MaxTailTokens = 8
+	cfg.Compaction.RecentMessages = 0
+	req := request("/v1/chat/completions", "code", "task-1", "keep", "", `{"messages":[{"role":"user","content":"`+strings.Repeat("tail fact ", 40)+`"}]}`)
+	rec := httptest.NewRecorder()
+	New(cfg, aiuditor.Stub{}, openJournal(t, dir)).ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK || !sawFrontier {
+		t.Fatalf("code %d frontier %v body %s", rec.Code, sawFrontier, rec.Body.String())
+	}
+}
+
+func isTimeout(err error) bool {
+	var netErr net.Error
+	return errors.As(err, &netErr) && netErr.Timeout()
+}
+
+func TestNetworkAuthFailureReleasesTheConnection(t *testing.T) {
+	dir := t.TempDir()
+	cfg := loadTestConfig(t, dir, "http://127.0.0.1:1/v1", "http://127.0.0.1:1/v1", config.AuthPassthrough, config.ProviderOpenAICompatible)
+	certFile, keyFile := writeTestCert(t)
+	cfg.ListenMode = config.ListenModeNetwork
+	cfg.TLS = config.TLSFiles{CertFile: certFile, KeyFile: keyFile}
+	t.Setenv(config.ProxyTokenEnv, "proxy-token-for-tests")
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+	go func() { _ = New(cfg, aiuditor.Stub{}, nil).ServeListener(ln) }()
+	addr := ln.Addr().String()
+	dial := func() (*tls.Conn, error) {
+		return tls.Dial("tcp", addr, &tls.Config{InsecureSkipVerify: true})
+	}
+	deadline := time.Now().Add(3 * time.Second)
+	var failed *tls.Conn
+	for {
+		failed, err = dial()
+		if err == nil || time.Now().After(deadline) {
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer failed.Close()
+	if _, err := fmt.Fprintf(failed, "GET /v1/models HTTP/1.1\r\nHost: %s\r\nConnection: keep-alive\r\n\r\n", addr); err != nil {
+		t.Fatal(err)
+	}
+	resp, err := http.ReadResponse(bufio.NewReader(failed), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	io.Copy(io.Discard, resp.Body)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusUnauthorized || !resp.Close {
+		t.Fatalf("status %d close %v proto %s headers %v", resp.StatusCode, resp.Close, resp.Proto, resp.Header)
+	}
+	failed.SetReadDeadline(time.Now().Add(time.Second))
+	if _, err := failed.Read(make([]byte, 1)); err == nil || isTimeout(err) {
+		t.Fatal("unauthenticated connection stayed open", err)
+	}
+
+	var wg sync.WaitGroup
+	const badConns = 32
+	ready := make(chan struct{}, badConns)
+	for i := 0; i < badConns; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			conn, err := dial()
+			if err != nil {
+				return
+			}
+			defer conn.Close()
+			conn.SetDeadline(time.Now().Add(8 * time.Second))
+			fmt.Fprintf(conn, "GET /v1/models HTTP/1.1\r\nHost: %s\r\nConnection: keep-alive\r\n\r\n", addr)
+			res, err := http.ReadResponse(bufio.NewReader(conn), nil)
+			if err != nil {
+				return
+			}
+			io.Copy(io.Discard, res.Body)
+			res.Body.Close()
+			ready <- struct{}{}
+			conn.SetReadDeadline(time.Now().Add(2 * time.Second))
+			conn.Read(make([]byte, 1))
+		}()
+	}
+	timeout := time.After(10 * time.Second)
+	for n := 0; n < badConns; n++ {
+		select {
+		case <-ready:
+		case <-timeout:
+			t.Fatal("unauthenticated connections were not released")
+		}
+	}
+	client := &http.Client{Timeout: 2 * time.Second, Transport: &http.Transport{TLSClientConfig: &tls.Config{InsecureSkipVerify: true}}}
+	okReq, err := http.NewRequest(http.MethodGet, "https://"+addr+"/v1/models", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	okReq.Header.Set(config.ProxyTokenHeader, "proxy-token-for-tests")
+	okResp, err := client.Do(okReq)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer okResp.Body.Close()
+	if okResp.StatusCode != http.StatusOK {
+		t.Fatal(okResp.StatusCode)
+	}
+	wg.Wait()
+}
+
+func TestGatewayRefusesNonRenterAndAmbiguousCredentials(t *testing.T) {
+	hits := 0
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits++
+		_, _ = w.Write([]byte(`{"usage":{"prompt_tokens":1,"completion_tokens":1}}`))
+	}))
+	defer upstream.Close()
+	dir := t.TempDir()
+	cfg := loadTestConfig(t, dir, upstream.URL+"/v1", upstream.URL+"/v1", config.AuthPassthrough, config.ProviderOpenAICompatible)
+	cfg.Cheap.Gateway = true
+	cfg.Cheap.Model = "llama-3.1-8b-q4"
+	server := New(cfg, aiuditor.Stub{}, openJournal(t, dir))
+	for _, header := range []struct{ name, value string }{
+		{"Authorization", "Bearer hm_dev_secret"},
+		{"Authorization", "Bearer hm_rtr_secret"},
+		{"Authorization", "Bearer hm_site_secret"},
+		{"Authorization", "Bearer hm_gw_secret"},
+		{"X-Api-Key", "hm_gw_secret"},
+	} {
+		req := request("/v1/chat/completions", "parse", "task-1", header.name, "", `{"messages":[{"role":"user","content":"hi"}]}`)
+		req.Header.Set(header.name, header.value)
+		rec := httptest.NewRecorder()
+		server.ServeHTTP(rec, req)
+		if rec.Code != http.StatusBadRequest || !strings.Contains(rec.Body.String(), "non-renter") || hits != 0 {
+			t.Fatalf("%s %s code %d hits %d body %s", header.name, header.value, rec.Code, hits, rec.Body.String())
+		}
+	}
+	both := request("/v1/chat/completions", "parse", "task-1", "both", "", `{"messages":[{"role":"user","content":"hi"}]}`)
+	both.Header.Set("Authorization", "Bearer renter.secret")
+	both.Header.Set("X-Api-Key", "renter.other")
+	rec := httptest.NewRecorder()
+	server.ServeHTTP(rec, both)
+	if rec.Code != http.StatusBadRequest || hits != 0 || !strings.Contains(rec.Body.String(), "not both") {
+		t.Fatal(rec.Code, hits, rec.Body.String())
+	}
+}
+
+func TestNonGatewayDoesNotForwardRenterHeaders(t *testing.T) {
+	var header http.Header
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		header = r.Header.Clone()
+		_, _ = w.Write([]byte(`{"usage":{"prompt_tokens":1,"completion_tokens":1}}`))
+	}))
+	defer upstream.Close()
+	dir := t.TempDir()
+	cfg := loadTestConfig(t, dir, upstream.URL+"/v1", upstream.URL+"/v1", config.AuthPassthrough, config.ProviderOpenAICompatible)
+	req := request("/v1/chat/completions", "parse", "task-1", "plain", "", `{"messages":[{"role":"user","content":"hi"}]}`)
+	req.Header.Set("Authorization", "Bearer renter.secret")
+	req.Header.Set("X-Api-Key", "renter.secret")
+	req.Header.Set("X-Tenant-ID", "11111111-1111-1111-1111-111111111111")
+	req.Header.Set("X-Hypermesh-Lease-Id", "22222222-2222-2222-2222-222222222222")
+	rec := httptest.NewRecorder()
+	New(cfg, aiuditor.Stub{}, openJournal(t, dir)).ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK || header.Get("Authorization") != "Bearer renter.secret" || header.Get("X-Api-Key") != "" || header.Get("X-Tenant-ID") != "" || header.Get("X-Hypermesh-Lease-Id") != "" {
+		t.Fatalf("code %d header %v body %s", rec.Code, header, rec.Body.String())
+	}
+}
+
+func TestNetworkListenRequiresTLSAndProxyToken(t *testing.T) {
+	dir := t.TempDir()
+	cfg := loadTestConfig(t, dir, "http://127.0.0.1:1/v1", "http://127.0.0.1:1/v1", config.AuthPassthrough, config.ProviderOpenAICompatible)
+	plain, err := net.Listen("tcp", "0.0.0.0:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer plain.Close()
+	if err := New(cfg, aiuditor.Stub{}, nil).ServeListener(plain); err == nil || !strings.Contains(err.Error(), "loopback") {
+		t.Fatal(err)
+	}
+	cfg.Listen = "0.0.0.0:8787"
+	if err := New(cfg, aiuditor.Stub{}, nil).ListenAndServe(); err == nil || !strings.Contains(err.Error(), "loopback") {
+		t.Fatal(err)
+	}
+
+	certFile, keyFile := writeTestCert(t)
+	cfg.ListenMode = config.ListenModeNetwork
+	cfg.TLS = config.TLSFiles{CertFile: certFile, KeyFile: keyFile}
+	t.Setenv(config.ProxyTokenEnv, "")
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+	if err := New(cfg, aiuditor.Stub{}, nil).ServeListener(ln); err == nil || !strings.Contains(err.Error(), config.ProxyTokenEnv) {
+		t.Fatal(err)
+	}
+
+	t.Setenv(config.ProxyTokenEnv, "proxy-token-for-tests")
+	server := New(cfg, aiuditor.Stub{}, nil)
+	go func() { _ = server.ServeListener(ln) }()
+	client := &http.Client{Transport: &http.Transport{TLSClientConfig: &tls.Config{InsecureSkipVerify: true}}}
+	url := "https://" + ln.Addr().String() + "/v1/models"
+	var denied *http.Response
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		denied, err = client.Get(url)
+		if err == nil || time.Now().After(deadline) {
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer denied.Body.Close()
+	if denied.StatusCode != http.StatusUnauthorized {
+		t.Fatal(denied.StatusCode)
+	}
+	okReq, err := http.NewRequest(http.MethodGet, url, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	okReq.Header.Set(config.ProxyTokenHeader, "proxy-token-for-tests")
+	okReq.Header.Set("Origin", "https://"+ln.Addr().String())
+	okResp, err := client.Do(okReq)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer okResp.Body.Close()
+	raw, _ := io.ReadAll(okResp.Body)
+	if okResp.StatusCode != http.StatusOK || !strings.Contains(string(raw), "local-small") {
+		t.Fatal(okResp.StatusCode, string(raw))
+	}
+}
+
+func TestGatewayEnvKeyIsRedactedWithoutScheme(t *testing.T) {
+	const key = "gateway-env-secret-value"
+	t.Setenv("CONDUCTOR_CHEAP_API_KEY", key)
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Authorization") != "Bearer "+key {
+			t.Errorf("authorization %s", r.Header.Get("Authorization"))
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		_, _ = fmt.Fprintf(w, `{"error":{"message":"rejected %s"}}`, key)
+	}))
+	defer upstream.Close()
+	dir := t.TempDir()
+	cfg := loadTestConfig(t, dir, upstream.URL+"/v1", upstream.URL+"/v1", config.AuthEnv, config.ProviderOpenAICompatible)
+	cfg.Cheap.Gateway = true
+	cfg.Cheap.Model = "llama-3.1-8b-q4"
+	rec := do(New(cfg, aiuditor.Stub{}, openJournal(t, dir)), "/v1/chat/completions", "parse", "task-1", "redact-key", "", `{"messages":[{"role":"user","content":"hi"}]}`)
+	if rec.Code != http.StatusBadRequest || strings.Contains(rec.Body.String(), key) || !strings.Contains(rec.Body.String(), "[redacted]") {
+		t.Fatalf("code %d body %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestGatewayAPIKeyAuthorizesCompactionWithoutProxyToken(t *testing.T) {
+	t.Setenv("CONDUCTOR_CHEAP_API_KEY", "gateway-env-secret-value")
+	t.Setenv(config.ProxyTokenEnv, "")
+	tier := config.Tier{
+		Provider:  config.ProviderOpenAICompatible,
+		Auth:      config.AuthPassthroughOrEnv,
+		APIKeyEnv: "CONDUCTOR_CHEAP_API_KEY",
+		Gateway:   true,
+	}
+	withKey := httptest.NewRequest(http.MethodPost, "/", nil)
+	withKey.Header.Set("X-Api-Key", "renter.secret")
+	if err := authorizeCompaction(withKey, tier); err != nil {
+		t.Fatal(err)
+	}
+	missing := httptest.NewRequest(http.MethodPost, "/", nil)
+	if err := authorizeCompaction(missing, tier); err == nil {
+		t.Fatal("expected proxy token requirement")
+	}
+	envOnly := tier
+	envOnly.Auth = config.AuthEnv
+	if err := authorizeCompaction(withKey, envOnly); err == nil {
+		t.Fatal("env auth still needs the proxy token")
+	}
+
+	hits := 0
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits++
+		if r.Header.Get("X-Api-Key") != "renter.secret" {
+			t.Errorf("api key %s", r.Header.Get("X-Api-Key"))
+		}
+		_, _ = w.Write([]byte(`{"choices":[{"message":{"content":"goals"},"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":1}}`))
+	}))
+	defer upstream.Close()
+	dir := t.TempDir()
+	cfg := loadTestConfig(t, dir, upstream.URL+"/v1", upstream.URL+"/v1", config.AuthPassthroughOrEnv, config.ProviderOpenAICompatible)
+	cfg.Cheap.Gateway = true
+	cfg.Cheap.Model = "llama-3.1-8b-q4"
+	cfg.Compaction.MaxTailTokens = 8
+	cfg.Compaction.RecentMessages = 0
+	t.Setenv(config.ProxyTokenEnv, "")
+	req := request("/v1/chat/completions", "parse", "task-1", "compact-key", "", `{"messages":[{"role":"user","content":"`+strings.Repeat("tail fact ", 40)+`"}]}`)
+	req.Header.Del(config.ProxyTokenHeader)
+	req.Header.Set("X-Api-Key", "renter.secret")
+	rec := httptest.NewRecorder()
+	New(cfg, aiuditor.Stub{}, openJournal(t, dir)).ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK || hits == 0 || strings.Contains(rec.Body.String(), "proxy token") {
+		t.Fatalf("code %d hits %d body %s", rec.Code, hits, rec.Body.String())
+	}
+}
+
+func writeTestCert(t *testing.T) (string, string) {
+	t.Helper()
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tmpl := &x509.Certificate{
+		SerialNumber:          big.NewInt(1),
+		NotBefore:             time.Now().Add(-time.Hour),
+		NotAfter:              time.Now().Add(time.Hour),
+		IPAddresses:           []net.IP{net.ParseIP("127.0.0.1")},
+		KeyUsage:              x509.KeyUsageDigitalSignature,
+		ExtKeyUsage:           []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
+		BasicConstraintsValid: true,
+	}
+	der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &key.PublicKey, key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	keyDER, err := x509.MarshalECPrivateKey(key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dir := t.TempDir()
+	certFile := filepath.Join(dir, "cert.pem")
+	keyFile := filepath.Join(dir, "key.pem")
+	if err := os.WriteFile(certFile, pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der}), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(keyFile, pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: keyDER}), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return certFile, keyFile
 }
 
 func TestIncompleteSummaryKeepsOriginalConversation(t *testing.T) {

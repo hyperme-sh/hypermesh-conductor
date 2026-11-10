@@ -3,11 +3,14 @@ package proxy
 import (
 	"encoding/json"
 	"fmt"
-	"github.com/hyperme-sh/hypermesh-conductor/internal/config"
-	"github.com/hyperme-sh/hypermesh-conductor/internal/metrics"
+	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
+
+	"github.com/hyperme-sh/hypermesh-conductor/internal/config"
+	"github.com/hyperme-sh/hypermesh-conductor/internal/metrics"
 )
 
 func TestContextAdmissionAtGenerationBoundary(t *testing.T) {
@@ -67,5 +70,36 @@ func TestContextAdmissionAtGenerationBoundary(t *testing.T) {
 	dispatch(`"unsupported_template_option":true`, 400)
 	if counts != 4 || generations != 1 {
 		t.Fatalf("counts=%d generations=%d", counts, generations)
+	}
+}
+
+func TestLeaseIDStaysOnGenerationAndLeavesTheTokenizer(t *testing.T) {
+	const lease = "22222222-2222-2222-2222-222222222222"
+	var tokenBody, genBody string
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		raw, _ := io.ReadAll(r.Body)
+		switch r.URL.Path {
+		case "/tokenize":
+			tokenBody = string(raw)
+			fmt.Fprint(w, `{"count":4,"max_model_len":128}`)
+		case "/v1/chat/completions":
+			genBody = string(raw)
+			fmt.Fprint(w, `{"choices":[{"message":{"role":"assistant","content":"ok"}}],"usage":{"prompt_tokens":4,"completion_tokens":1}}`)
+		default:
+			t.Errorf("unexpected path %s", r.URL.Path)
+		}
+	}))
+	defer upstream.Close()
+	dir := t.TempDir()
+	cfg := loadTestConfig(t, dir, upstream.URL+"/v1", upstream.URL+"/v1", config.AuthPassthrough, config.ProviderOpenAICompatible)
+	cfg.Cheap.InputCounter = "vllm"
+	cfg.Cheap.ContextWindow = 64
+	cfg.Cheap.OutputLimit = 8
+	req := request("/v1/messages", "parse", "task-1", "lease-count", "", `{"lease_id":"`+lease+`","max_tokens":4,"messages":[{"role":"user","content":"hi"}]}`)
+	req.Header.Set("Authorization", "Bearer fixture")
+	rec := httptest.NewRecorder()
+	New(cfg, nil, openJournal(t, dir)).ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK || strings.Contains(tokenBody, "lease_id") || !strings.Contains(genBody, `"lease_id":"`+lease+`"`) {
+		t.Fatalf("code %d token %s gen %s body %s", rec.Code, tokenBody, genBody, rec.Body.String())
 	}
 }

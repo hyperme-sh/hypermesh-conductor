@@ -183,7 +183,7 @@ func serveCmd(args []string, stdout, stderr io.Writer) int {
 	configPath := fs.String("config", "", "endpoints file")
 	journalPath := fs.String("journal", "", "measurement journal")
 	peerGrantPath := fs.String("peer-grant", "", "optional single-hop peer ingress grant file")
-	stdinListener := fs.Bool("stdin-listener", false, "serve a loopback TCP listener inherited on stdin")
+	stdinListener := fs.Bool("stdin-listener", false, "serve a TCP listener inherited on stdin")
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
@@ -204,6 +204,10 @@ func serveCmd(args []string, stdout, stderr io.Writer) int {
 		return 2
 	}
 	if err := cfg.RequireProxyToken(); err != nil {
+		fmt.Fprintln(stderr, err.Error())
+		return 2
+	}
+	if err := cfg.RequireListen(); err != nil {
 		fmt.Fprintln(stderr, err.Error())
 		return 2
 	}
@@ -244,7 +248,11 @@ func serveCmd(args []string, stdout, stderr io.Writer) int {
 		defer listener.Close()
 		err = server.ServeListener(listener)
 	} else {
-		fmt.Fprintf(stdout, "listening on http://%s\n", cfg.Listen)
+		scheme := "http"
+		if cfg.ListenMode == config.ListenModeNetwork {
+			scheme = "https"
+		}
+		fmt.Fprintf(stdout, "listening on %s://%s\n", scheme, cfg.Listen)
 		err = server.ListenAndServe()
 	}
 	if err != nil {

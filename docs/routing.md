@@ -41,7 +41,7 @@ The preview does not include the endpoint URL or an API key.
 
 ## Endpoints
 
-`examples/endpoints.json` names an API root and a model id for each tier. `provider` is `openai`, `anthropic`, or `openai-compatible`. `base_url` is the API root, such as `http://127.0.0.1:8080/v1` or `https://api.anthropic.com/v1`. Keys are not written in the file. `api_key_env` names the environment variable that holds a key. A URL with userinfo is rejected.
+`examples/endpoints.json` names an API root and a model id for each tier. `provider` is `openai`, `anthropic`, or `openai-compatible`. `base_url` is the API root, such as `http://127.0.0.1:8080/v1` or `https://api.anthropic.com/v1`. Keys are not written in the file. `api_key_env` names the environment variable that holds a key. A URL with userinfo is rejected. Either `tiers.cheap` or `tiers.frontier` may be omitted. A tier key that is present must be a valid tier object. At least one of those two tiers is required. A job class whose tier was omitted is rejected.
 
 ## Prefix
 
@@ -49,9 +49,13 @@ The system prompt and tool definitions are canonicalized (sorted tool names and 
 
 ## Proxy
 
-`conductor serve` binds the `listen` address. That address must be loopback. The paths are `/v1/chat/completions`, `/v1/responses`, `/v1/embeddings`, `/v1/models`, and `/v1/messages`.
+`conductor serve` binds the `listen` address. The default is `127.0.0.1:8787`, and the default `listen_mode` is `loopback`. The paths are `/v1/chat/completions`, `/v1/responses`, `/v1/embeddings`, `/v1/models`, and `/v1/messages`.
 
-`X-Conductor-Class` or `conductor_class` selects the job class. `X-Conductor-Suggest` is a suggestion. `X-Conductor-Task` and `X-Conductor-Step` are optional stable ids. Conductor fields are removed before the destination sees the body. The policy model replaces the client's model. Clients that require a specific destination model can send its exact ID in `X-Conductor-Expected-Model`. A mismatch returns HTTP 409 before review, compaction, or provider dispatch.
+`hyperme-sh/controlplane-edge` `src/controlplane_edge/product_routes.json` lists no conductor product and no hostname. Operators who need reachability beyond the host terminate TLS on their own reverse proxy and forward to the loopback listener. `listen_mode: network` is the in-process alternative: `listen` may be a non-loopback `host:port`, `tls.cert_file` and `tls.key_file` are required, and `CONDUCTOR_PROXY_TOKEN` must be set or `serve` exits. Callers send that token as `X-Conductor-Token` on every request. The key material stays in those files.
+
+`X-Conductor-Class` or `conductor_class` selects the job class. `X-Conductor-Suggest` is a suggestion. `X-Conductor-Task` and `X-Conductor-Step` are optional stable ids. Conductor fields are removed before the destination sees the body. With no class and no `default_class`, Conductor logs a fallback to `parse` on the cheap tier, or to `code` when the file configures only the frontier tier. HTTP 400 `no tiers are configured` is reserved for a process with neither tier. A class that selects an omitted tier returns HTTP 400 `tier cheap is not configured` or `tier frontier is not configured`. The policy model replaces the client's model. Clients that require a specific destination model can send its exact ID in `X-Conductor-Expected-Model`. A mismatch returns HTTP 409 before review, compaction, or provider dispatch.
+
+A tier with `"gateway": true` is an OpenAI-compatible Hypermesh gateway. Its `model` must be a catalog id the gateway matches to the lease ticket (`llama-3.1-8b-q4`, `llama-3.1-70b-q4`, `qwen-2.5-32b-q4`, `whisper-small`, `embed-minilm`), or `catalog_model` must name one of those ids. That catalog id is what replaces the client's model. Conductor forwards `X-Api-Key` or `Authorization`, and forwards `X-Tenant-ID`, `X-Hypermesh-Lease-Id`, and `X-Lease-Id`. It sends one of `Authorization` or `X-Api-Key`, because the gateway rejects both. JSON `lease_id` is kept on chat and responses bodies. Anthropic messages does not accept that field, so a gateway tier also receives it as `X-Hypermesh-Lease-Id`. Values that start with `hm_dev_`, `hm_rtr_`, `hm_site_`, or `hm_gw_` are refused and are not sent as renter identity.
 
 `auth` on a tier is `passthrough`, `env`, or `passthrough_or_env` (the default). Passthrough forwards the client's `Authorization` header to an OpenAI-compatible destination, or `x-api-key` to Anthropic. It does not forward a client key to the other provider. `env` uses only `api_key_env`. Attaching that key also requires `X-Conductor-Token` to match `CONDUCTOR_PROXY_TOKEN`. A redirect from the destination is not followed, so that credential stays on the configured origin. When the client protocol and the destination protocol differ, Conductor translates text, tool definitions, tool calls, and the common stream events.
 
