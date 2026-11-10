@@ -2779,6 +2779,7 @@ func TestNetworkListenRequiresTLSAndProxyToken(t *testing.T) {
 		t.Fatal(err)
 	}
 	okReq.Header.Set(config.ProxyTokenHeader, "proxy-token-for-tests")
+	okReq.Header.Set("Origin", "https://"+ln.Addr().String())
 	okResp, err := client.Do(okReq)
 	if err != nil {
 		t.Fatal(err)
@@ -2787,6 +2788,78 @@ func TestNetworkListenRequiresTLSAndProxyToken(t *testing.T) {
 	raw, _ := io.ReadAll(okResp.Body)
 	if okResp.StatusCode != http.StatusOK || !strings.Contains(string(raw), "local-small") {
 		t.Fatal(okResp.StatusCode, string(raw))
+	}
+}
+
+func TestGatewayEnvKeyIsRedactedWithoutScheme(t *testing.T) {
+	const key = "gateway-env-secret-value"
+	t.Setenv("CONDUCTOR_CHEAP_API_KEY", key)
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Authorization") != "Bearer "+key {
+			t.Errorf("authorization %s", r.Header.Get("Authorization"))
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		_, _ = fmt.Fprintf(w, `{"error":{"message":"rejected %s"}}`, key)
+	}))
+	defer upstream.Close()
+	dir := t.TempDir()
+	cfg := loadTestConfig(t, dir, upstream.URL+"/v1", upstream.URL+"/v1", config.AuthEnv, config.ProviderOpenAICompatible)
+	cfg.Cheap.Gateway = true
+	cfg.Cheap.Model = "llama-3.1-8b-q4"
+	rec := do(New(cfg, aiuditor.Stub{}, openJournal(t, dir)), "/v1/chat/completions", "parse", "task-1", "redact-key", "", `{"messages":[{"role":"user","content":"hi"}]}`)
+	if rec.Code != http.StatusBadRequest || strings.Contains(rec.Body.String(), key) || !strings.Contains(rec.Body.String(), "[redacted]") {
+		t.Fatalf("code %d body %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestGatewayAPIKeyAuthorizesCompactionWithoutProxyToken(t *testing.T) {
+	t.Setenv("CONDUCTOR_CHEAP_API_KEY", "gateway-env-secret-value")
+	t.Setenv(config.ProxyTokenEnv, "")
+	tier := config.Tier{
+		Provider:  config.ProviderOpenAICompatible,
+		Auth:      config.AuthPassthroughOrEnv,
+		APIKeyEnv: "CONDUCTOR_CHEAP_API_KEY",
+		Gateway:   true,
+	}
+	withKey := httptest.NewRequest(http.MethodPost, "/", nil)
+	withKey.Header.Set("X-Api-Key", "renter.secret")
+	if err := authorizeCompaction(withKey, tier); err != nil {
+		t.Fatal(err)
+	}
+	missing := httptest.NewRequest(http.MethodPost, "/", nil)
+	if err := authorizeCompaction(missing, tier); err == nil {
+		t.Fatal("expected proxy token requirement")
+	}
+	envOnly := tier
+	envOnly.Auth = config.AuthEnv
+	if err := authorizeCompaction(withKey, envOnly); err == nil {
+		t.Fatal("env auth still needs the proxy token")
+	}
+
+	hits := 0
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits++
+		if r.Header.Get("X-Api-Key") != "renter.secret" {
+			t.Errorf("api key %s", r.Header.Get("X-Api-Key"))
+		}
+		_, _ = w.Write([]byte(`{"choices":[{"message":{"content":"goals"},"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":1}}`))
+	}))
+	defer upstream.Close()
+	dir := t.TempDir()
+	cfg := loadTestConfig(t, dir, upstream.URL+"/v1", upstream.URL+"/v1", config.AuthPassthroughOrEnv, config.ProviderOpenAICompatible)
+	cfg.Cheap.Gateway = true
+	cfg.Cheap.Model = "llama-3.1-8b-q4"
+	cfg.Compaction.MaxTailTokens = 8
+	cfg.Compaction.RecentMessages = 0
+	t.Setenv(config.ProxyTokenEnv, "")
+	req := request("/v1/chat/completions", "parse", "task-1", "compact-key", "", `{"messages":[{"role":"user","content":"`+strings.Repeat("tail fact ", 40)+`"}]}`)
+	req.Header.Del(config.ProxyTokenHeader)
+	req.Header.Set("X-Api-Key", "renter.secret")
+	rec := httptest.NewRecorder()
+	New(cfg, aiuditor.Stub{}, openJournal(t, dir)).ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK || hits == 0 || strings.Contains(rec.Body.String(), "proxy token") {
+		t.Fatalf("code %d hits %d body %s", rec.Code, hits, rec.Body.String())
 	}
 }
 

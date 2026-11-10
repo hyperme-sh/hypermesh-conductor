@@ -124,11 +124,14 @@ func (p *Proxy) ServeListener(listener net.Listener) error {
 		if err != nil {
 			return fmt.Errorf("tls certificate: %w", err)
 		}
-		listener = tls.NewListener(listener, &tls.Config{
+		// Limit the TCP listener first. Wrapping the TLS listener hides
+		// *tls.Conn from net/http, so r.TLS stays nil and a same-origin
+		// https Origin is rejected.
+		listener = tls.NewListener(limitConns(listener, maxConns), &tls.Config{
 			Certificates: []tls.Certificate{cert},
 			MinVersion:   tls.VersionTLS12,
 		})
-		return p.server().Serve(limitConns(listener, maxConns))
+		return p.server().Serve(listener)
 	}
 	if !addr.IP.IsLoopback() {
 		return fmt.Errorf("listener must be a loopback TCP socket")
@@ -961,6 +964,9 @@ func applyAuth(dst, src *http.Request, tier config.Tier) ([]string, error) {
 		}
 		if header := dst.Header.Get("Authorization"); header != "" {
 			secrets = append(secrets, header)
+			if len(header) > 7 && strings.EqualFold(header[:7], "bearer ") {
+				secrets = append(secrets, strings.TrimSpace(header[7:]))
+			}
 		}
 	} else {
 		switch tier.Provider {

@@ -45,6 +45,10 @@ func (p *Proxy) countChatContext(upstream *http.Request, tier config.Tier, proto
 			delete(fields, key)
 		case "temperature", "top_p", "top_k", "seed", "stream", "stream_options", "n", "best_of", "stop", "frequency_penalty", "presence_penalty", "logprobs", "top_logprobs":
 			delete(fields, key)
+		case "lease_id":
+			// Lease metadata is not part of the rendered prompt. It stays on
+			// the generation body and the gateway lease headers.
+			delete(fields, key)
 		default:
 			return nil, 400, fmt.Errorf("context counting does not support chat parameter %q", key)
 		}

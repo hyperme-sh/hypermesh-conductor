@@ -105,7 +105,19 @@ func authorizeCompaction(client *http.Request, tier config.Tier) error {
 	if !tier.UsesEnvKey() {
 		return nil
 	}
-	clientKey := clientCredential(client, tier.Provider)
+	var clientKey string
+	if tier.Gateway {
+		key, err := gatewayClientKey(client)
+		if err != nil {
+			return err
+		}
+		clientKey = key
+	} else {
+		clientKey = clientCredential(client, tier.Provider)
+	}
+	if tier.Auth == config.AuthEnv {
+		clientKey = ""
+	}
 	needEnv := tier.APIKeyEnv != "" && (tier.Auth == config.AuthEnv || (tier.Auth == config.AuthPassthroughOrEnv && clientKey == ""))
 	if !needEnv {
 		return nil
