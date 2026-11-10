@@ -236,6 +236,7 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	originalLease := strings.TrimSpace(rawString(obj.Values["lease_id"]))
+	callerTask := firstNonEmpty(r.Header.Get("X-Conductor-Task"), rawString(obj.Values["conductor_task"]))
 	className, suggest, taskID, stepID, err := p.identity(r, obj, proto)
 	if err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"error": map[string]any{"message": err.Error()}})
@@ -247,10 +248,6 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			writeJSON(w, http.StatusUnauthorized, map[string]any{"error": "proxy authorization required"})
 			return
 		}
-	}
-	if (accountingURL != "" || p.Config.Cheap.TaskTokenLimit > 0 || (p.Config.Cheap.TaskOutputLimit > 0 && proto != translate.ProtoEmbeddings)) && firstNonEmpty(r.Header.Get("X-Conductor-Task"), rawString(obj.Values["conductor_task"])) == "" {
-		writeJSON(w, http.StatusBadRequest, map[string]any{"error": map[string]any{"message": "task budget requires an explicit task ID"}})
-		return
 	}
 	obj.DropPrefix("conductor_")
 	p.injectPrefix(&obj, proto)
@@ -286,6 +283,10 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	tier, err := p.Config.Endpoint(decision.Tier)
 	if err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"error": map[string]any{"message": err.Error()}})
+		return
+	}
+	if taskIDRequired(accountingURL, tier, proto) && callerTask == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": map[string]any{"message": "task budget requires an explicit task ID"}})
 		return
 	}
 	if accountingURL != "" && tier.TaskTokenLimit <= 0 {
@@ -1430,11 +1431,20 @@ func (p *Proxy) upstreamClient(timeout time.Duration, stream bool) *http.Client 
 	return client
 }
 
+func taskIDRequired(accountingURL string, tier config.Tier, proto string) bool {
+	if accountingURL != "" || tier.TaskTokenLimit > 0 {
+		return true
+	}
+	return tier.TaskOutputLimit > 0 && proto != translate.ProtoEmbeddings
+}
+
 func (p *Proxy) sharedTransport() *http.Transport {
 	p.transportOnce.Do(func() {
-		headerTimeout := p.Config.Cheap.Timeout
-		if p.Config.Frontier.Timeout > headerTimeout {
-			headerTimeout = p.Config.Frontier.Timeout
+		var headerTimeout time.Duration
+		for _, candidate := range []config.Tier{p.Config.Cheap, p.Config.Frontier} {
+			if candidate.Configured() && candidate.Timeout > headerTimeout {
+				headerTimeout = candidate.Timeout
+			}
 		}
 		if headerTimeout <= 0 {
 			headerTimeout = 60 * time.Second

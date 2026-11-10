@@ -22,7 +22,7 @@ import (
 )
 
 func (p *Proxy) maybeCompact(ctx context.Context, client *http.Request, proto string, prepared []byte, taskID, stepID, prefixHash string, selected config.Tier) ([]byte, bool, int, int, error) {
-	if p.Journal == nil || selected.TaskTokenLimit > 0 || selected.TaskOutputLimit > 0 || p.Config.Compaction.MaxTailTokens <= 0 {
+	if p.Journal == nil || !p.Config.Cheap.Configured() || selected.TaskTokenLimit > 0 || selected.TaskOutputLimit > 0 || p.Config.Compaction.MaxTailTokens <= 0 {
 		return prepared, false, 0, 0, nil
 	}
 	if proto != "openai.chat" && proto != "anthropic.messages" {

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"sync"
 	"testing"
@@ -135,6 +136,51 @@ func TestTotalBudgetReconcilesAcrossProxyRestarts(t *testing.T) {
 	dispatch("c", 1, 1, 409)
 	if calls != 2 {
 		t.Fatal(calls)
+	}
+}
+
+func TestSingleTierFilesShareTaskBudget(t *testing.T) {
+	for _, tc := range []struct{ tier, class string }{{"frontier", "code"}, {"cheap", "parse"}} {
+		t.Run(tc.tier, func(t *testing.T) {
+			calls := 0
+			upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				calls++
+				fmt.Fprint(w, `{"choices":[{"message":{"role":"assistant","content":"ok"}}],"usage":{"prompt_tokens":1,"completion_tokens":6}}`)
+			}))
+			defer upstream.Close()
+			dir := t.TempDir()
+			recipe := `{"schema":"hypermesh.conductor.recipe.v1","max_task_output_tokens":10,"` + tc.tier + `":{"model":"only-model","max_output_tokens":8}}`
+			if err := os.WriteFile(filepath.Join(dir, "recipe.json"), []byte(recipe), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			endpoints := fmt.Sprintf(`{"listen":"127.0.0.1:8787","recipe_file":"recipe.json","tiers":{%q:{"provider":"openai-compatible","base_url":%q,"model":"only-model"}},"prefix":{"system":"You are Conductor.","tools":[]}}`, tc.tier, upstream.URL+"/v1")
+			path := filepath.Join(dir, "endpoints.json")
+			if err := os.WriteFile(path, []byte(endpoints), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			cfg, err := config.Load(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			dispatch := func(task, step string, limit, want int) {
+				t.Helper()
+				req := request("/v1/chat/completions", tc.class, task, step, "", fmt.Sprintf(`{"messages":[{"role":"user","content":"hi"}],"max_tokens":%d}`, limit))
+				rec := httptest.NewRecorder()
+				New(cfg, nil, openJournal(t, dir)).ServeHTTP(rec, req)
+				if rec.Code != want {
+					t.Fatalf("%s/%s got %d: %s", task, step, rec.Code, rec.Body.String())
+				}
+			}
+			dispatch("", "missing", 4, 400)
+			if calls != 0 {
+				t.Fatal("missing task reached upstream")
+			}
+			dispatch("lease", "one", 6, 200)
+			dispatch("lease", "two", 6, 409)
+			if calls != 1 {
+				t.Fatal(calls)
+			}
+		})
 	}
 }
 
