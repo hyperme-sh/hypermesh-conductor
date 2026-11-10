@@ -28,6 +28,7 @@ import (
 	"github.com/hyperme-sh/hypermesh-conductor/internal/aiuditor"
 	"github.com/hyperme-sh/hypermesh-conductor/internal/config"
 	"github.com/hyperme-sh/hypermesh-conductor/internal/history"
+	"github.com/hyperme-sh/hypermesh-conductor/internal/jsonbody"
 	"github.com/hyperme-sh/hypermesh-conductor/internal/metrics"
 	"github.com/hyperme-sh/hypermesh-conductor/internal/notes"
 	"github.com/hyperme-sh/hypermesh-conductor/internal/prefix"
@@ -2308,7 +2309,7 @@ func TestAIuditorSummaryModificationReservesBudget(t *testing.T) {
 	cfg := loadTestConfig(t, dir, "http://127.0.0.1:1/v1", "http://127.0.0.1:1/v1", config.AuthPassthrough, config.ProviderOpenAICompatible)
 	client := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
 	client.Header.Set("Authorization", "Bearer test-secret")
-	_, _, _, _, err := New(cfg, oversizedModify{}, openJournal(t, dir)).cheapSummary(context.Background(), client, "small summary input")
+	_, _, _, _, err := New(cfg, oversizedModify{}, openJournal(t, dir)).cheapSummary(context.Background(), client, "small summary input", "")
 	if !errors.Is(err, errBodyBudget) {
 		t.Fatalf("expected summary budget rejection: %v", err)
 	}
@@ -2784,6 +2785,169 @@ func TestReviewedBodyOwnsGatewayLeaseHeader(t *testing.T) {
 			}
 		})
 	}
+}
+
+type stripSummaryLease struct{}
+
+func (stripSummaryLease) Review(_ context.Context, env aiuditor.Envelope) (aiuditor.Verdict, error) {
+	if !bytes.Contains(env.Request.Body, []byte("Summarize the conversation tail")) {
+		return aiuditor.Verdict{Action: aiuditor.Allow}, nil
+	}
+	obj, err := jsonbody.Parse(env.Request.Body)
+	if err != nil {
+		return aiuditor.Verdict{Action: aiuditor.Deny, Reason: "summary"}, nil
+	}
+	obj.Delete("lease_id")
+	raw, err := obj.Marshal()
+	if err != nil {
+		return aiuditor.Verdict{Action: aiuditor.Deny, Reason: "summary"}, nil
+	}
+	return aiuditor.Verdict{Action: aiuditor.Modify, Body: raw}, nil
+}
+
+func TestGatewayCompactionUsesReviewedLease(t *testing.T) {
+	const lease = "22222222-2222-2222-2222-222222222222"
+	const tenant = "11111111-1111-1111-1111-111111111111"
+	summary := func(body string) bool {
+		return strings.Contains(body, "Summarize the conversation tail")
+	}
+	newCfg := func(t *testing.T, upstream string) (config.Config, string) {
+		t.Helper()
+		dir := t.TempDir()
+		cfg := loadTestConfig(t, dir, upstream+"/v1", upstream+"/v1", config.AuthPassthrough, config.ProviderOpenAICompatible)
+		cfg.Cheap.Gateway = true
+		cfg.Cheap.Model = "llama-3.1-8b-q4"
+		cfg.Compaction.MaxTailTokens = 8
+		cfg.Compaction.RecentMessages = 0
+		return cfg, dir
+	}
+	body := `{"lease_id":"` + lease + `","messages":[{"role":"user","content":"` + strings.Repeat("tail fact ", 40) + `"}]}`
+	t.Run("keeps lease", func(t *testing.T) {
+		var summaryLease, mainLease string
+		upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			raw, _ := io.ReadAll(r.Body)
+			if summary(string(raw)) {
+				summaryLease = r.Header.Get("X-Hypermesh-Lease-Id")
+				if r.Header.Get("X-Api-Key") != "renter.secret" || r.Header.Get("X-Tenant-ID") != tenant {
+					t.Errorf("summary identity %v", r.Header)
+				}
+				fmt.Fprint(w, `{"choices":[{"message":{"role":"assistant","content":"goals and facts"},"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":1}}`)
+				return
+			}
+			mainLease = r.Header.Get("X-Hypermesh-Lease-Id")
+			fmt.Fprint(w, `{"usage":{"prompt_tokens":1,"completion_tokens":1}}`)
+		}))
+		defer upstream.Close()
+		cfg, dir := newCfg(t, upstream.URL)
+		req := request("/v1/chat/completions", "parse", lease, "compact-keep", "", body)
+		req.Header.Set("X-Api-Key", "renter.secret")
+		req.Header.Set("X-Tenant-ID", tenant)
+		req.Header.Set("X-Hypermesh-Lease-Id", lease)
+		rec := httptest.NewRecorder()
+		New(cfg, aiuditor.Stub{}, openJournal(t, dir)).ServeHTTP(rec, req)
+		if rec.Code != http.StatusOK || summaryLease != lease || mainLease != lease {
+			t.Fatalf("code %d summary %q main %q body %s", rec.Code, summaryLease, mainLease, rec.Body.String())
+		}
+	})
+	t.Run("review removes lease", func(t *testing.T) {
+		var summaryLease string
+		var sawSummary bool
+		upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			raw, _ := io.ReadAll(r.Body)
+			if summary(string(raw)) {
+				sawSummary = true
+				summaryLease = r.Header.Get("X-Hypermesh-Lease-Id")
+				if r.Header.Get("X-Lease-Id") != "" {
+					t.Errorf("stale lease header %s", r.Header.Get("X-Lease-Id"))
+				}
+			}
+			fmt.Fprint(w, `{"choices":[{"message":{"role":"assistant","content":"goals and facts"},"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":1}}`)
+		}))
+		defer upstream.Close()
+		cfg, dir := newCfg(t, upstream.URL)
+		req := request("/v1/chat/completions", "parse", lease, "compact-drop", "", body)
+		req.Header.Set("X-Api-Key", "renter.secret")
+		req.Header.Set("X-Hypermesh-Lease-Id", lease)
+		rec := httptest.NewRecorder()
+		New(cfg, stripSummaryLease{}, openJournal(t, dir)).ServeHTTP(rec, req)
+		if rec.Code != http.StatusOK || !sawSummary || summaryLease != "" {
+			t.Fatalf("code %d saw %v lease %q body %s", rec.Code, sawSummary, summaryLease, rec.Body.String())
+		}
+	})
+	t.Run("rejection is journaled", func(t *testing.T) {
+		calls := 0
+		upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			calls++
+			http.Error(w, "no lease", http.StatusUnauthorized)
+		}))
+		defer upstream.Close()
+		cfg, dir := newCfg(t, upstream.URL)
+		journal := openJournal(t, dir)
+		req := request("/v1/chat/completions", "parse", lease, "compact-deny", "", body)
+		req.Header.Set("X-Api-Key", "renter.secret")
+		req.Header.Set("X-Hypermesh-Lease-Id", lease)
+		rec := httptest.NewRecorder()
+		New(cfg, aiuditor.Stub{}, journal).ServeHTTP(rec, req)
+		rows, err := metrics.ReadJournal(journal.Path())
+		if rec.Code != http.StatusUnauthorized || calls != 1 || err != nil || len(rows) != 1 || rows[0].Error == nil || !strings.Contains(*rows[0].Error, "HTTP 401") {
+			t.Fatalf("code %d calls %d err %v rows %+v body %s", rec.Code, calls, err, rows, rec.Body.String())
+		}
+	})
+}
+
+func TestGatewayAuxiliaryCallsCarryIdentity(t *testing.T) {
+	const lease = "22222222-2222-2222-2222-222222222222"
+	t.Run("tokenizer", func(t *testing.T) {
+		var tokenLease, tokenKey, tokenBody string
+		upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			raw, _ := io.ReadAll(r.Body)
+			if strings.HasSuffix(r.URL.Path, "/tokenize") {
+				tokenLease = r.Header.Get("X-Hypermesh-Lease-Id")
+				tokenKey = r.Header.Get("X-Api-Key")
+				tokenBody = string(raw)
+				fmt.Fprint(w, `{"count":4,"max_model_len":128}`)
+				return
+			}
+			fmt.Fprint(w, `{"usage":{"prompt_tokens":4,"completion_tokens":1}}`)
+		}))
+		defer upstream.Close()
+		dir := t.TempDir()
+		cfg := loadTestConfig(t, dir, upstream.URL+"/v1", upstream.URL+"/v1", config.AuthPassthrough, config.ProviderOpenAICompatible)
+		cfg.Cheap.Gateway = true
+		cfg.Cheap.Model = "llama-3.1-8b-q4"
+		cfg.Cheap.InputCounter = "vllm"
+		cfg.Cheap.ContextWindow = 64
+		req := request("/v1/chat/completions", "parse", lease, "tokenize", "", `{"lease_id":"`+lease+`","max_tokens":4,"messages":[{"role":"user","content":"hi"}]}`)
+		req.Header.Set("X-Api-Key", "renter.secret")
+		req.Header.Set("X-Tenant-ID", "11111111-1111-1111-1111-111111111111")
+		rec := httptest.NewRecorder()
+		New(cfg, aiuditor.Stub{}, openJournal(t, dir)).ServeHTTP(rec, req)
+		if rec.Code != http.StatusOK || tokenLease != lease || tokenKey != "renter.secret" || strings.Contains(tokenBody, "lease_id") {
+			t.Fatalf("code %d lease %q key %q body %s resp %s", rec.Code, tokenLease, tokenKey, tokenBody, rec.Body.String())
+		}
+	})
+	t.Run("embeddings", func(t *testing.T) {
+		var got http.Header
+		var path string
+		upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			got = r.Header.Clone()
+			path = r.URL.Path
+			fmt.Fprint(w, `{"data":[{"embedding":[0.1]}],"usage":{"prompt_tokens":1,"total_tokens":1}}`)
+		}))
+		defer upstream.Close()
+		dir := t.TempDir()
+		cfg := loadTestConfig(t, dir, upstream.URL+"/v1", upstream.URL+"/v1", config.AuthPassthrough, config.ProviderOpenAICompatible)
+		cfg.Cheap.Gateway = true
+		cfg.Cheap.Model = "embed-minilm"
+		req := request("/v1/embeddings", "embed", lease, "embed-1", "", `{"input":"hi","lease_id":"`+lease+`"}`)
+		req.Header.Set("X-Api-Key", "renter.secret")
+		req.Header.Set("X-Tenant-ID", "11111111-1111-1111-1111-111111111111")
+		rec := httptest.NewRecorder()
+		New(cfg, aiuditor.Stub{}, openJournal(t, dir)).ServeHTTP(rec, req)
+		if rec.Code != http.StatusOK || path != "/v1/embeddings" || got.Get("X-Hypermesh-Lease-Id") != lease || got.Get("X-Api-Key") != "renter.secret" || got.Get("X-Tenant-ID") == "" {
+			t.Fatalf("code %d path %s header %v body %s", rec.Code, path, got, rec.Body.String())
+		}
+	})
 }
 
 func TestGatewayRefusesNonRenterAndAmbiguousCredentials(t *testing.T) {

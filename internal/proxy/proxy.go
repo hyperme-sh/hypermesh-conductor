@@ -329,11 +329,16 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if useNotes {
 		query = userQuery(prepared)
 	}
-	next, didCompact, memLookups, memHits, compactErr := p.maybeCompact(r.Context(), r, proto, prepared, taskID, stepID, prelimHash, tier)
+	next, didCompact, memLookups, memHits, compactErr := p.maybeCompact(r.Context(), r, proto, prepared, taskID, stepID, prelimHash, tier, originalLease)
 	if compactErr != nil {
 		var denied proxyAuthError
 		if errors.As(compactErr, &denied) {
 			writeJSON(w, http.StatusUnauthorized, map[string]any{"error": map[string]any{"message": compactErr.Error()}})
+			return
+		}
+		var rejected gatewayRejectedError
+		if errors.As(compactErr, &rejected) {
+			writeJSON(w, rejected.status, map[string]any{"error": map[string]any{"message": rejected.Error()}})
 			return
 		}
 		if errors.Is(compactErr, errBodyBudget) {
@@ -410,7 +415,7 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, status, map[string]any{"error": map[string]any{"message": err.Error()}})
 		return
 	}
-	count, status, countErr := p.checkContext(authReq, tier, wire.Protocol, wire.Body)
+	count, status, countErr := p.checkContext(r, authReq, tier, wire.Protocol, wire.Body, gatewayLease(tier, wire.LeaseID, originalLease, r))
 	if countErr != nil {
 		writeJSON(w, status, map[string]any{"error": map[string]any{"message": countErr.Error()}})
 		return
@@ -918,11 +923,10 @@ func (p *Proxy) upstreamRequest(client *http.Request, tier config.Tier, wire tra
 		return nil, nil, err
 	}
 	req.Header.Set("Content-Type", "application/json")
-	secrets, err := applyAuth(req, client, tier)
+	secrets, err := applyGatewayDispatch(req, client, tier, gatewayLease(tier, wire.LeaseID, originalLease, client))
 	if err != nil {
 		return nil, nil, err
 	}
-	applyReviewedLease(req, client, tier, wire.LeaseID, originalLease)
 	if tier.Provider == config.ProviderAnthropic || wire.Protocol == translate.ProtoMessages {
 		version := client.Header.Get("anthropic-version")
 		if version == "" {
@@ -1043,25 +1047,48 @@ func applyGatewayIdentity(dst, src *http.Request, tier config.Tier, clientKey st
 	return nil
 }
 
-// applyReviewedLease sets the gateway lease selector from the reviewed body.
-// A caller header is not a second selector: AIuditor can remove or replace
-// lease_id, and that result is what the gateway sees.
-func applyReviewedLease(dst, src *http.Request, tier config.Tier, finalLease, originalLease string) {
+// applyGatewayDispatch is the only way a request is prepared for a tier.
+// Gateway auth, renter headers, and the reviewed lease are attached together.
+func applyGatewayDispatch(dst, src *http.Request, tier config.Tier, lease string) ([]string, error) {
+	secrets, err := applyAuth(dst, src, tier)
+	if err != nil {
+		return nil, err
+	}
 	if !tier.Gateway {
-		return
+		return secrets, nil
 	}
 	dst.Header.Del("X-Hypermesh-Lease-Id")
 	dst.Header.Del("X-Lease-Id")
+	if lease != "" {
+		dst.Header.Set("X-Hypermesh-Lease-Id", lease)
+	}
+	return secrets, nil
+}
+
+// gatewayLease is the selector AIuditor left on the body. A removed body
+// lease is not restored from a caller header.
+func gatewayLease(tier config.Tier, finalLease, originalLease string, src *http.Request) string {
+	if !tier.Gateway {
+		return ""
+	}
 	if finalLease != "" {
-		dst.Header.Set("X-Hypermesh-Lease-Id", finalLease)
-		return
+		return finalLease
 	}
 	if originalLease != "" {
-		return
+		return ""
 	}
-	if value := firstNonEmpty(src.Header.Get("X-Hypermesh-Lease-Id"), src.Header.Get("X-Lease-Id")); value != "" {
-		dst.Header.Set("X-Hypermesh-Lease-Id", value)
+	if src == nil {
+		return ""
 	}
+	return firstNonEmpty(src.Header.Get("X-Hypermesh-Lease-Id"), src.Header.Get("X-Lease-Id"))
+}
+
+func bodyLease(body []byte) string {
+	obj, err := jsonbody.Parse(body)
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(rawString(obj.Values["lease_id"]))
 }
 
 func leaseHeaderConflict(r *http.Request, bodyLease string) error {
