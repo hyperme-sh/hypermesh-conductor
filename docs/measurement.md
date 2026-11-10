@@ -55,3 +55,17 @@ Accuracy stays null. Compaction-mode scores belong to that bench issue. This sum
 `numbers_policy` on every summary repeats the same rule: unmeasured fields stay null, uncertain usage is never recorded as zero, and a cost figure is a labeled proxy or null.
 
 Use `conductor summary --journal journal.jsonl --task "$lease_id"` for one managed Visor lease. The command reads both retained journal segments and reports an error if the task is absent. Each summary block includes the summed `estimated_input_tokens` when every included step has an estimate. Missing estimates leave it null. Compare it with `input_tokens` for complete provider usage, or inspect `measured_input_tokens` and `uncertain_steps` when a step was interrupted.
+
+### Device-bound lease reservations
+
+A single-tenant instance may set CONDUCTOR_ACCOUNTING_URL to its trusted HTTPS
+plane base, CONDUCTOR_ACCOUNTING_TENANT and CONDUCTOR_ACCOUNTING_LEASE to the
+assigned UUIDs, and CONDUCTOR_ACCOUNTING_TOKEN to its lease owner bearer. Use
+this mode only for endpoints served by that lease's host. Authenticate local
+clients with CONDUCTOR_PROXY_TOKEN. Each accounted tier needs a total task
+limit, counted input and a bounded output. The instance records the original
+counts and a fresh attempt UUID in the task SQLite transaction, registers the
+hold with the plane and sends X-Hypermesh-Token-Attempt to the inference adapter.
+An ambiguous registration keeps its local hold and prevents inference dispatch.
+Reconcile that attempt before retrying. The plane credential is separate from
+the inference credential. The host adapter owns final usage submission.
