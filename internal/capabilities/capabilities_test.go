@@ -28,3 +28,12 @@ func TestIndependentRequestFeatures(t *testing.T) {
 		}
 	}
 }
+
+func TestPlainTextFormatsDoNotRequireStructure(t *testing.T) {
+	for _, raw := range []string{`{"response_format":{"type":"text"}}`, `{"text":{"format":{"type":"text"}}}`} {
+		required, err := Required("/v1/responses", []byte(raw))
+		if err != nil || len(required) != 1 || required[0] != "chat" {
+			t.Fatalf("%v %v", required, err)
+		}
+	}
+}

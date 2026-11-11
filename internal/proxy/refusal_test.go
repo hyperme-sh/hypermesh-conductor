@@ -79,11 +79,15 @@ func TestRefusalRerouteAndDenyContract(t *testing.T) {
 			cfg.MaxRefusalAttempts = 2
 			hop := &refusalHop{deny: deny}
 			p := New(cfg, hop, openJournal(t, dir))
-			req := request("/v1/chat/completions", "code", "task", "step", "", `{"messages":[{"role":"user","content":"ordinary request"}]}`)
+			req := request("/v1/chat/completions", "code", "task", "step", "", `{"conductor_task":"body-task","messages":[{"role":"user","content":"ordinary request"}]}`)
+			req.Header.Del("X-Conductor-Task")
 			rec := httptest.NewRecorder()
 			p.ServeHTTP(rec, req)
 			if rec.Code != 200 || calls["frontier"] != 1 || hop.events != 1 {
 				t.Fatalf("%d %v %d %s", rec.Code, calls, hop.events, rec.Body.String())
+			}
+			if !deny && rec.Header().Get("X-Conductor-Task") != "body-task" {
+				t.Fatal("retry changed task", rec.Header())
 			}
 			if deny && calls["cheap"] != 0 || !deny && calls["cheap"] != 1 {
 				t.Fatal(calls)

@@ -20,3 +20,9 @@ func TestOCRMultipageTableAndCoordinates(t *testing.T) {
 		}
 	}
 }
+
+func TestRequiredTableMustContainContent(t *testing.T) {
+	if ValidateResponse([]byte(`{"pages":[{"index":0,"markdown":"[t0]","tables":[{"id":"t0","format":"html"}]}]}`), []string{"tables"}) == nil {
+		t.Fatal("missing table content accepted")
+	}
+}

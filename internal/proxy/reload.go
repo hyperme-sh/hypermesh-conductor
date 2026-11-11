@@ -20,6 +20,7 @@ type recipeRuntime struct {
 // Listener, endpoint and policy changes require a process restart.
 func (p *Proxy) EnableRecipeReload(path string) {
 	child := New(p.Config, p.Hop, p.Journal)
+	child.PeerFactory = p.PeerFactory
 	child.PeerIngress = p.PeerIngress
 	child.Notes = p.Notes
 	child.Logf = p.Logf
@@ -52,7 +53,14 @@ func (r *recipeRuntime) reload() error {
 		return fmt.Errorf("only recipe limits may reload; endpoint or policy changes require restart")
 	}
 	child := New(next, old.Hop, old.Journal)
+	child.PeerFactory = old.PeerFactory
 	child.PeerIngress = old.PeerIngress
+	if child.PeerFactory != nil {
+		child.PeerIngress, err = child.PeerFactory(next)
+		if err != nil {
+			return err
+		}
+	}
 	child.Notes = old.Notes
 	child.Logf = old.Logf
 	r.active.Store(child)

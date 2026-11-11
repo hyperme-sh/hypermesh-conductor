@@ -91,8 +91,8 @@ type replayBody struct {
 // are replayed unchanged if rerouting is denied. Buffered bytes are bounded.
 func sniffRefusal(body io.ReadCloser) (io.ReadCloser, []byte, bool) {
 	reader := bufio.NewReader(body)
-	var prefix []byte
-	var event []byte
+	prefix := make([]byte, 0, 1<<20)
+	event := make([]byte, 0, 1<<20)
 	var refusal []byte
 	for len(prefix) < 1<<20 {
 		line, err := reader.ReadSlice('\n')
@@ -102,7 +102,7 @@ func sniffRefusal(body io.ReadCloser) (io.ReadCloser, []byte, bool) {
 			continue
 		}
 		data := bytes.TrimSpace(event)
-		event = nil
+		event = event[:0]
 		if bytes.HasPrefix(data, []byte("data:")) {
 			raw := bytes.TrimSpace(bytes.TrimPrefix(data, []byte("data:")))
 			refused, content := refusalSignal(raw)
@@ -182,6 +182,7 @@ func (p *Proxy) rerouteRefusal(w http.ResponseWriter, client *http.Request, tier
 	if len(step) > 180 {
 		step = step[:180]
 	}
+	retry.Header.Set("X-Conductor-Task", record.TaskID)
 	retry.Header.Set("X-Conductor-Step", step+".retry")
 	// Credentials remain scoped to the original endpoint across tiers.
 	if retry.Header.Get("X-Conductor-Credential-Origin") == "" {

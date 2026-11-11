@@ -69,11 +69,11 @@ func Required(path string, body []byte) ([]string, error) {
 			break
 		}
 	}
-	if raw := obj["response_format"]; len(raw) > 0 && string(raw) != "null" {
+	if requiresStructure(obj["response_format"]) {
 		features = append(features, "structured_output")
 	}
 	var text map[string]json.RawMessage
-	if json.Unmarshal(obj["text"], &text) == nil && len(text["format"]) > 0 {
+	if json.Unmarshal(obj["text"], &text) == nil && requiresStructure(text["format"]) {
 		features = append(features, "structured_output")
 	}
 	var value any
@@ -103,4 +103,14 @@ func hasImage(value any) bool {
 		}
 	}
 	return false
+}
+
+func requiresStructure(raw json.RawMessage) bool {
+	if len(raw) == 0 || string(raw) == "null" {
+		return false
+	}
+	var format struct {
+		Type string `json:"type"`
+	}
+	return json.Unmarshal(raw, &format) != nil || format.Type != "text"
 }

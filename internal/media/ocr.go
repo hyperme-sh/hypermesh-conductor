@@ -71,9 +71,9 @@ func ValidateResponse(raw []byte, required []string) error {
 			Index    *int    `json:"index"`
 			Markdown *string `json:"markdown"`
 			Tables   *[]struct {
-				ID      string `json:"id"`
-				Content string `json:"content"`
-				Format  string `json:"format"`
+				ID      string  `json:"id"`
+				Content *string `json:"content"`
+				Format  string  `json:"format"`
 			} `json:"tables"`
 			Dimensions struct {
 				Width  int `json:"width"`
@@ -99,7 +99,7 @@ func ValidateResponse(raw []byte, required []string) error {
 				return fmt.Errorf("missing OCR tables")
 			}
 			for _, table := range *page.Tables {
-				if table.ID == "" || table.Format != "html" {
+				if table.ID == "" || table.Format != "html" || table.Content == nil {
 					return fmt.Errorf("invalid OCR table")
 				}
 			}

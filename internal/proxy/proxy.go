@@ -67,6 +67,7 @@ var idPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._:-]{0,199}$`)
 type Proxy struct {
 	recipes     *recipeRuntime
 	PeerIngress http.Handler
+	PeerFactory func(config.Config) (http.Handler, error)
 	Config      config.Config
 	Hop         aiuditor.Hop
 	Journal     *metrics.Journal
@@ -764,6 +765,14 @@ func (p *Proxy) forward(w http.ResponseWriter, client *http.Request, upstream *h
 		}
 		resp.Body = &idleReadBody{ReadCloser: resp.Body, timeout: timeout}
 		if p.Config.RefusalFallbackTier != "" {
+			const refusalBufferBudget = 4 << 20
+			if !reserveBody(refusalBufferBudget) {
+				message := "refusal buffer budget exceeded"
+				record.Error = &message
+				p.finish(w, client, 503, nil, record, secrets, false)
+				return
+			}
+			defer releaseBody(refusalBufferBudget)
 			var raw []byte
 			var refused bool
 			resp.Body, raw, refused = sniffRefusal(resp.Body)

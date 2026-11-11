@@ -2,8 +2,11 @@ package proxy
 
 import (
 	"github.com/hyperme-sh/hypermesh-conductor/internal/config"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strconv"
 	"testing"
 )
 
@@ -28,6 +31,12 @@ func TestRecipeReloadPreservesLastValidSnapshot(t *testing.T) {
 	}
 	cfg.Journal = filepath.Join(dir, "command-line-journal.jsonl")
 	p := New(cfg, nil, nil)
+	p.PeerFactory = func(next config.Config) (http.Handler, error) {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("limit", strconv.Itoa(next.Frontier.OutputLimit))
+		}), nil
+	}
+	p.PeerIngress, _ = p.PeerFactory(cfg)
 	p.EnableRecipeReload(path)
 	original := p.recipes.active.Load()
 	write(`{"schema":"broken"}`)
@@ -40,6 +49,11 @@ func TestRecipeReloadPreservesLastValidSnapshot(t *testing.T) {
 	}
 	if p.recipes.active.Load().Config.Frontier.OutputLimit != 4 || original.Config.Frontier.OutputLimit != 8 {
 		t.Fatal("in-flight snapshot was mutated")
+	}
+	rec := httptest.NewRecorder()
+	p.recipes.active.Load().PeerIngress.ServeHTTP(rec, httptest.NewRequest("POST", "/v1/peer/prompt-submit", nil))
+	if rec.Header().Get("limit") != "4" {
+		t.Fatal("peer handler retained startup limits")
 	}
 	if p.recipes.active.Load().Config.Frontier.RecipeDigest == original.Config.Frontier.RecipeDigest {
 		t.Fatal("revision did not change")

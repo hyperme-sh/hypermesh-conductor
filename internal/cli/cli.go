@@ -224,8 +224,11 @@ func serveCmd(args []string, stdout, stderr io.Writer) int {
 	server := proxy.New(cfg, hop, journal)
 	if *peerGrantPath != "" {
 		// Peer submissions have no access to the operator's local note service.
-		receiver := proxy.New(cfg, hop, journal)
-		server.PeerIngress, err = loadPeerIngress(*peerGrantPath, receiver)
+		server.PeerFactory = func(next config.Config) (http.Handler, error) {
+			receiver := proxy.New(next, hop, journal)
+			return loadPeerIngress(*peerGrantPath, receiver)
+		}
+		server.PeerIngress, err = server.PeerFactory(cfg)
 		if err != nil {
 			fmt.Fprintln(stderr, err)
 			return 2
