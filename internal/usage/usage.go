@@ -14,10 +14,11 @@ const (
 
 // Usage is the token report for one provider response.
 type Usage struct {
-	Input  *int
-	Output *int
-	Cache  *int
-	Status string
+	Reasoning *int
+	Input     *int
+	Output    *int
+	Cache     *int
+	Status    string
 }
 
 // UncertainUsage is an explicit missing report.
@@ -72,6 +73,10 @@ func Absorb(dst *Usage, payload []byte, embeddings bool) {
 	if usage, ok := root["usage"].(map[string]any); ok {
 		applyPartial(dst, usage, embeddings)
 	}
+	if dst.Reasoning != nil && dst.Output != nil && *dst.Reasoning > *dst.Output {
+		*dst = UncertainUsage()
+		return
+	}
 	if dst.Input != nil && dst.Output != nil {
 		dst.Status = Measured
 		return
@@ -102,6 +107,13 @@ func applyPartial(dst *Usage, usage map[string]any, embeddings bool) {
 	}
 	if inputOK && dst.Input == nil {
 		dst.Input = input
+	}
+	reasoning, valid := reasoningCount(usage)
+	if !valid || (reasoning != nil && outputOK && *reasoning > *output) {
+		return
+	}
+	if reasoning != nil {
+		dst.Reasoning = reasoning
 	}
 	if outputOK {
 		dst.Output = output
@@ -135,7 +147,11 @@ func fromUsageObject(usage map[string]any, embeddings bool) Usage {
 	if !inputOK || !outputOK {
 		return UncertainUsage()
 	}
-	out := Usage{Input: input, Output: output, Status: Measured}
+	reasoning, valid := reasoningCount(usage)
+	if !valid || (reasoning != nil && *reasoning > *output) {
+		return UncertainUsage()
+	}
+	out := Usage{Input: input, Output: output, Reasoning: reasoning, Status: Measured}
 	if cacheOK {
 		out.Cache = cache
 	}
@@ -249,4 +265,26 @@ func nonNegInt(value any) (int, bool) {
 	default:
 		return 0, false
 	}
+}
+
+// reasoningCount is a subset of output, never an additional token charge.
+func reasoningCount(usage map[string]any) (*int, bool) {
+	for _, key := range []string{"completion_tokens_details", "output_tokens_details"} {
+		details, ok := usage[key].(map[string]any)
+		if !ok {
+			continue
+		}
+		for _, field := range []string{"reasoning_tokens", "thinking_tokens"} {
+			value, present := details[field]
+			if !present || value == nil {
+				continue
+			}
+			count, valid := nonNegInt(value)
+			if !valid {
+				return nil, false
+			}
+			return &count, true
+		}
+	}
+	return nil, true
 }

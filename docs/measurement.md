@@ -79,3 +79,8 @@ publishes a new immutable snapshot. Invalid input retains the last good revision
 in-flight requests retain their original snapshot. Existing tasks retain their
 ledger recipe revision and cannot silently switch budgets. Endpoint, listener,
 review, notes, and policy changes require restart rather than partial reload.
+
+`reasoning_tokens` records provider-reported reasoning/thinking output as a
+separate nullable subcount. It is never added to output totals or reservations.
+A subcount above total output is invalid; an absent field stays null. The parser
+accepts OpenAI completion/output detail fields and Anthropic thinking detail fields.

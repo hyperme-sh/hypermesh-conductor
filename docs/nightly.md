@@ -10,7 +10,7 @@ policy denial and output limits before dispatch, replay rejection after process
 restart, and prompt/credential privacy. Results feed the central JUnit report
 and failure issue reconciliation. A closed failure recurring creates a new issue.
 
-PR CI runs Go unit/contract tests and builds packages on debrunner. No integration
+PR CI runs Go unit/contract tests and builds packages on hosted runners for public runs and debrunners for private runs. No integration
 suite is triggered by a PR, configuration edit, manual dispatch, or release.
 The central nightly concurrency group serializes the batch and cancels superseded
 runs. No detached Conductor workflow is started.

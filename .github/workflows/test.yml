@@ -7,7 +7,7 @@ permissions:
   contents: read
 jobs:
   test:
-    runs-on: [self-hosted, linux, x64, debrunner]
+    runs-on: ${{ github.event.repository.private && fromJSON('["self-hosted", "linux", "x64", "debrunner"]') || 'ubuntu-24.04' }}
     container:
       image: golang:1.25-bookworm
     steps:
@@ -27,7 +27,7 @@ jobs:
           grep -q 'not a dynamic executable' /tmp/ldd.txt
 
   packages:
-    runs-on: [self-hosted, linux, x64, debrunner]
+    runs-on: ${{ github.event.repository.private && fromJSON('["self-hosted", "linux", "x64", "debrunner"]') || 'ubuntu-24.04' }}
     container:
       image: golang:1.25-bookworm
     steps:
@@ -56,7 +56,7 @@ jobs:
           if-no-files-found: error
 
   raw-binaries:
-    runs-on: [self-hosted, linux, x64, debrunner]
+    runs-on: ${{ github.event.repository.private && fromJSON('["self-hosted", "linux", "x64", "debrunner"]') || 'ubuntu-24.04' }}
     container:
       image: golang:1.25-bookworm
     strategy:

@@ -1001,6 +1001,7 @@ func (p *Proxy) stream(w http.ResponseWriter, client *http.Request, resp *http.R
 		record.InputTokens = nil
 		record.OutputTokens = nil
 		record.CacheHitTokens = nil
+		record.ReasoningTokens = nil
 		record.CostProxy = nil
 		record.CostProxyLabel = nil
 	} else {
@@ -1407,6 +1408,7 @@ func applyUsage(record *metrics.StepRecord, parsed usage.Usage, cfg config.Confi
 		record.InputTokens = nil
 		record.OutputTokens = nil
 		record.CacheHitTokens = nil
+		record.ReasoningTokens = nil
 		record.CostProxy = nil
 		record.CostProxyLabel = nil
 		return
@@ -1415,6 +1417,7 @@ func applyUsage(record *metrics.StepRecord, parsed usage.Usage, cfg config.Confi
 	record.InputTokens = parsed.Input
 	record.OutputTokens = parsed.Output
 	record.CacheHitTokens = parsed.Cache
+	record.ReasoningTokens = parsed.Reasoning
 	if rate, ok := cfg.Rate(tier); ok {
 		amount := float64(*parsed.Input)/1_000_000*rate.InputPerMillion + float64(*parsed.Output)/1_000_000*rate.OutputPerMillion
 		label := fmt.Sprintf("proxy: tokens × published rate (%s); not a charge", rate.Source)
