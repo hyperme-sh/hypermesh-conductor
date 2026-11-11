@@ -35,6 +35,8 @@ type Accuracy struct {
 
 // StepRecord is one journal row. Token fields are nil when unmeasured.
 type StepRecord struct {
+	Destination          string   `json:"destination,omitempty"`
+	ProviderHost         string   `json:"provider_host,omitempty"`
 	CountedInputTokens   *int     `json:"counted_input_tokens,omitempty"`
 	EstimatedInputTokens *int     `json:"estimated_input_tokens,omitempty"`
 	RecipeSHA256         string   `json:"recipe_sha256,omitempty"`
@@ -96,6 +98,8 @@ func (r StepRecord) Validate() error {
 }
 
 type wireRecord struct {
+	Destination          string    `json:"destination,omitempty"`
+	ProviderHost         string    `json:"provider_host,omitempty"`
 	CountedInputTokens   *int      `json:"counted_input_tokens,omitempty"`
 	EstimatedInputTokens *int      `json:"estimated_input_tokens,omitempty"`
 	RecipeSHA256         string    `json:"recipe_sha256,omitempty"`
@@ -133,6 +137,7 @@ func (r StepRecord) Wire() wireRecord {
 		peak = r.InputTokens
 	}
 	return wireRecord{
+		Destination: r.Destination, ProviderHost: r.ProviderHost,
 		Schema: SchemaStep, CountedInputTokens: r.CountedInputTokens, EstimatedInputTokens: r.EstimatedInputTokens, RecipeSHA256: r.RecipeSHA256,
 		TaskID:             r.TaskID,
 		StepID:             r.StepID,
@@ -308,6 +313,7 @@ func parseLine(line []byte, lineNo int) (StepRecord, error) {
 		return StepRecord{}, fmt.Errorf("journal line %d has a bad field", lineNo)
 	}
 	record := StepRecord{
+		Destination: wire.Destination, ProviderHost: wire.ProviderHost,
 		CountedInputTokens: wire.CountedInputTokens, EstimatedInputTokens: wire.EstimatedInputTokens, RecipeSHA256: wire.RecipeSHA256, TaskID: wire.TaskID, StepID: wire.StepID, JobClass: wire.JobClass, Tier: wire.Tier,
 		ModelID: wire.ModelID, Reason: wire.Reason, SuggestionTier: wire.SuggestionTier,
 		SuggestionAccepted: wire.SuggestionAccepted, InputTokens: wire.InputTokens,

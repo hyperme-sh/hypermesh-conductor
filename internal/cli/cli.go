@@ -244,6 +244,7 @@ func serveCmd(args []string, stdout, stderr io.Writer) int {
 	server.Logf = func(format string, args ...any) {
 		fmt.Fprintf(stderr, format+"\n", args...)
 	}
+	server.EnableRecipeReload(*configPath)
 	if *socket {
 		if *stdinListener || cfg.ListenMode == config.ListenModeNetwork {
 			fmt.Fprintln(stderr, "--socket cannot be combined with stdin-listener or network mode")

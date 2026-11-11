@@ -19,6 +19,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"regexp"
 	"strings"
@@ -26,6 +27,7 @@ import (
 	"time"
 
 	"github.com/hyperme-sh/hypermesh-conductor/internal/aiuditor"
+	"github.com/hyperme-sh/hypermesh-conductor/internal/capabilities"
 	"github.com/hyperme-sh/hypermesh-conductor/internal/compact"
 	"github.com/hyperme-sh/hypermesh-conductor/internal/config"
 	"github.com/hyperme-sh/hypermesh-conductor/internal/jsonbody"
@@ -63,6 +65,7 @@ var idPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._:-]{0,199}$`)
 
 // Proxy serves the local endpoints.
 type Proxy struct {
+	recipes     *recipeRuntime
 	PeerIngress http.Handler
 	Config      config.Config
 	Hop         aiuditor.Hop
@@ -327,6 +330,10 @@ func promoteNetworkConn(w http.ResponseWriter, r *http.Request) bool {
 
 // ServeHTTP implements the local API.
 func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	if p.recipes != nil {
+		p.serveRuntime(w, r)
+		return
+	}
 	if p.Config.ListenMode == config.ListenModeNetwork {
 		if err := authorizeNetwork(r); err != nil {
 			closeNetworkConn(w)
@@ -353,6 +360,14 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	w = deadlineWriter{ResponseWriter: w, idle: writeIdle}
 	if p.PeerIngress != nil && r.Method == http.MethodPost && r.URL.Path == "/v1/peer/prompt-submit" {
 		p.PeerIngress.ServeHTTP(w, r)
+		return
+	}
+	if r.URL.Path == "/v1/ocr" && r.Method == "POST" {
+		p.serveOCR(w, r)
+		return
+	}
+	if r.URL.Path == "/v1/operations" && r.Method == "GET" {
+		p.serveOperations(w, r)
 		return
 	}
 	proto, ok := protocolOf(r.Method, r.URL.Path)
@@ -429,9 +444,42 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"error": map[string]any{"message": err.Error()}})
 		return
 	}
+	if state, ok := r.Context().Value(refusalKey{}).(refusalState); ok && state.nextTier != "" {
+		decision.Tier = state.nextTier
+		decision.Reason = "AIuditor-authorized refusal fallback"
+	}
 	tier, err := p.Config.Endpoint(decision.Tier)
 	if err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"error": map[string]any{"message": err.Error()}})
+		return
+	}
+	// Explicit locality or capability requirements fail closed. Legacy plain chat
+	// remains compatible when no record has been configured.
+	localOnly := r.Header.Get("X-Conductor-Local-Only") == "true"
+	required, capErr := capabilities.Required(r.URL.Path, prepared)
+	if value := r.Header.Get("X-Conductor-Local-Only"); value != "" && value != "true" && value != "false" {
+		capErr = fmt.Errorf("invalid local-only flag")
+	}
+	if capErr == nil && (tier.Capabilities != nil || localOnly || r.Header.Get("X-Conductor-Require-Capabilities") == "true") {
+		if tier.Capabilities == nil {
+			capErr = fmt.Errorf("route has no verified capability record")
+		} else {
+			capErr = tier.Capabilities.Require(tier.Model, tier.RuntimeRevision, tier.Provider, required, localOnly)
+		}
+	}
+	if capErr == nil && localOnly && !localReview(p.Config.AIU) {
+		capErr = fmt.Errorf("local-only requests require local review")
+	}
+	if capErr == nil && localOnly && (p.Config.Compaction.MaxTailTokens > 0 || (p.Notes != nil && p.Config.Notes.Embed)) {
+		cheap := p.Config.Cheap
+		if cheap.Capabilities == nil {
+			capErr = fmt.Errorf("local-only auxiliary calls require verified local capabilities")
+		} else {
+			capErr = cheap.Capabilities.Require(cheap.Model, cheap.RuntimeRevision, cheap.Provider, []string{"chat"}, true)
+		}
+	}
+	if capErr != nil {
+		writeJSON(w, http.StatusUnprocessableEntity, map[string]any{"error": map[string]any{"message": capErr.Error()}})
 		return
 	}
 	if taskIDRequired(accountingURL, tier, proto) && callerTask == "" {
@@ -455,6 +503,13 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	stream := boolField(obj, "stream")
 	prelimHash, _ := hashBody(proto, prepared)
 	base := p.baseRecord(taskID, stepID, decision, tier.Model, prelimHash)
+	base.Destination = "direct"
+	if tier.Gateway {
+		base.Destination = "gateway"
+	}
+	if parsed, err := url.Parse(tier.BaseURL); err == nil {
+		base.ProviderHost = parsed.Hostname()
+	}
 	if prefixMatch {
 		yes := true
 		base.PrefixCacheMatch = &yes
@@ -529,6 +584,9 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	held = len(prepared)
+	state, _ := r.Context().Value(refusalKey{}).(refusalState)
+	state.body = prepared
+	r = r.WithContext(context.WithValue(r.Context(), refusalKey{}, state))
 	forced, err := forceModel(prepared, tier.Model)
 	if err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"error": map[string]any{"message": err.Error()}})
@@ -538,6 +596,16 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"error": map[string]any{"message": err.Error()}})
 		return
+	}
+	if tier.Capabilities != nil {
+		finalRequired, checkErr := capabilities.Required(r.URL.Path, wire.Body)
+		if checkErr == nil {
+			checkErr = tier.Capabilities.Require(tier.Model, tier.RuntimeRevision, tier.Provider, finalRequired, localOnly)
+		}
+		if checkErr != nil {
+			writeJSON(w, 422, map[string]any{"error": "reviewed request requires unsupported capabilities"})
+			return
+		}
 	}
 	var allowance generationAllowance
 	wire.Body, allowance, err = boundedOutput(wire.Protocol, wire.Body, tier.OutputLimit)
@@ -624,6 +692,10 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 }
 
 func (p *Proxy) forward(w http.ResponseWriter, client *http.Request, upstream *http.Request, tier config.Tier, wire translate.Wire, stream bool, secrets []string, record metrics.StepRecord) {
+	state, _ := client.Context().Value(refusalKey{}).(refusalState)
+	if len(state.tried) > 0 {
+		w.Header().Set("X-Conductor-Attempted-Models", strings.Join(append(append([]string(nil), state.tried...), tier.Model), ","))
+	}
 	start := time.Now()
 	ctx, cancel := context.WithCancel(upstream.Context())
 	defer cancel()
@@ -679,6 +751,9 @@ func (p *Proxy) forward(w http.ResponseWriter, client *http.Request, upstream *h
 		msg := fmt.Sprintf("provider HTTP %d", resp.StatusCode)
 		record.Error = &msg
 		record.UsageStatus = metrics.StatusUncertain
+		if refused, _ := refusalSignal(raw); refused && (resp.StatusCode == 400 || resp.StatusCode == 403) && p.rerouteRefusal(w, client, tier, raw, record) {
+			return
+		}
 		p.finish(w, client, resp.StatusCode, raw, record, secrets, false)
 		return
 	}
@@ -688,6 +763,14 @@ func (p *Proxy) forward(w http.ResponseWriter, client *http.Request, upstream *h
 			timeout = 60 * time.Second
 		}
 		resp.Body = &idleReadBody{ReadCloser: resp.Body, timeout: timeout}
+		if p.Config.RefusalFallbackTier != "" {
+			var raw []byte
+			var refused bool
+			resp.Body, raw, refused = sniffRefusal(resp.Body)
+			if refused && p.rerouteRefusal(w, client, tier, raw, record) {
+				return
+			}
+		}
 		p.stream(w, client, resp, wire, start, secrets, record)
 		return
 	}
@@ -711,6 +794,9 @@ func (p *Proxy) forward(w http.ResponseWriter, client *http.Request, upstream *h
 		record.Error = &msg
 		record.UsageStatus = metrics.StatusUncertain
 		p.finish(w, client, http.StatusBadGateway, nil, record, secrets, false)
+		return
+	}
+	if refused, _ := refusalSignal(raw); refused && p.rerouteRefusal(w, client, tier, raw, record) {
 		return
 	}
 	if providerError(raw) {
@@ -1088,6 +1174,18 @@ func (p *Proxy) upstreamRequest(client *http.Request, tier config.Tier, wire tra
 
 func applyAuth(dst, src *http.Request, tier config.Tier) ([]string, error) {
 	var secrets []string
+	if tier.Direct && tier.Gateway {
+		return nil, fmt.Errorf("conflicting destination kinds")
+	}
+	if tier.Auth != config.AuthEnv && (bearerToken(src) != "" || src.Header.Get("X-Api-Key") != "") {
+		origins := src.Header.Values("X-Conductor-Credential-Origin")
+		if tier.Direct || len(origins) > 0 {
+			parsed, err := url.Parse(tier.BaseURL)
+			if err != nil || len(origins) != 1 || origins[0] != parsed.Scheme+"://"+parsed.Host || (tier.CredentialOrigin != "" && origins[0] != tier.CredentialOrigin) {
+				return nil, fmt.Errorf("credential origin does not match destination")
+			}
+		}
+	}
 	if err := rejectNonRenterCredentials(src); err != nil {
 		return nil, err
 	}

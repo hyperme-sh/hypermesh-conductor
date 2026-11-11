@@ -110,3 +110,52 @@ Run `conductor submit -routes routes.json -destination lab -class summarize` and
 The client POSTs a JSON object containing `destination`, `class` and `prompt` to `/v1/peer/prompt-submit` using TLS 1.3 and the configured bearer credential. Provision a dedicated grant for that destination. Its ingress must authenticate the caller, bind the grant to its own destination and permitted classes, and authorize dispatch. Enable the receiver with `conductor serve -config endpoints.json -peer-grant grant.json`. Its grant file contains `{"destination":"lab","allowed_classes":["summarize"],"token_env":"INBOUND_SUMMARY_GRANT"}`. Provision the matching secret independently of the local proxy token. Expose only the peer POST path through an operator-managed TLS ingress to the loopback listener. The destination constructs a fresh local inference request, applies its own routing and review, and excludes local note retrieval. Omitting the grant leaves the peer path disabled. The client sends no conversation history, tools or local provider keys and rejects redirects. This path is independent of automatic tier routing.
 
 The receiver reads the grant file for every peer submission. Remove it to revoke access immediately for subsequent requests. To change the authorized destination, classes or credential reference, write a complete replacement and rename it over the configured path. Missing or invalid grants deny dispatch. Requests already admitted may finish.
+
+## Revision-bound capabilities
+
+A tier may declare `runtime_revision` and a `capabilities` object containing
+`model`, `runtime_revision`, `protocol` (the tier provider), `local`, and
+`features`. Each feature is `verified`, `unknown`, or `unsupported`; absent
+features are unknown. Model, runtime, and protocol must match at configuration
+load and dispatch, so changing either revision invalidates the record.
+
+Features are `chat`, `streaming`, `tools`, `structured_output`, `image`,
+`embeddings`, and `ocr`. The proxy derives requirements from structured request
+fields. A configured record must verify every requested feature before dispatch.
+`X-Conductor-Local-Only: true` requires a local record;
+`X-Conductor-Require-Capabilities: true` requires a record even on legacy tiers.
+Legacy requests without either header remain compatible on unqualified tiers;
+that compatibility path does not claim verified capability support.
+
+## Direct provider credentials (#37)
+
+`direct: true` explicitly identifies a provider tier and conflicts with
+`gateway: true`. For passthrough credentials, configure `credential_origin` as
+the exact scheme and authority of `base_url`, without a path. Capturing clients
+send `X-Conductor-Credential-Origin` from their original configured endpoint.
+Conductor rejects a missing or different origin before sending credentials.
+Environment-authenticated tiers use only their configured environment key.
+Legacy tiers remain compatible; clients can send the origin header to enforce
+binding there as well. An opaque provider key cannot independently prove origin.
+
+`gateway_enforcement: true` refuses any configured non-gateway tier. It defaults
+off. Journal rows include `destination` (`direct` or `gateway`) and `provider_host`
+without credentials or prompt text. CLI capture configuration remains owned by
+hypermesh-cli; this contract does not claim that its route command has migrated.
+
+## Refusal fallback (#36)
+
+Set `refusal_fallback_tier` to an explicitly permitted alternate tier and
+`max_refusal_attempts` (default 2, range 1–8). Without a written fallback, a refusal
+is returned unchanged. Structured refusal/content-filter responses and policy
+error codes trigger an `upstream_refusal` AIuditor event. Only a `reroute` verdict
+whose `allowed_models` contains that candidate permits another attempt. Ordinary
+allow does not authorize rerouting. A natural-language refusal classifier is off.
+
+Streaming buffers a bounded prefix until text/tool content or a refusal appears.
+After visible content, no reroute occurs. A retry uses a distinct step, reserves
+again under the same task, and cannot escape its existing task limits. Missing
+usage remains uncertain. Credentials stay bound to the original origin unless
+the new tier explicitly uses its own environment credential. The response header
+`X-Conductor-Attempted-Models` records tried models. The second request is reviewed
+again, including protocol translation and capability/locality checks.
