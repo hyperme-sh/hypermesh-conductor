@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -12,7 +13,9 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"os/signal"
 	"strings"
+	"syscall"
 
 	"github.com/hyperme-sh/hypermesh-conductor/internal/aiuditor"
 	"github.com/hyperme-sh/hypermesh-conductor/internal/config"
@@ -251,6 +254,8 @@ func serveCmd(args []string, stdout, stderr io.Writer) int {
 			fmt.Fprintln(stderr, e)
 			return 2
 		}
+		ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+		defer stop()
 		listener, e := localtransport.Listen(path)
 		if e != nil {
 			fmt.Fprintln(stderr, e)
@@ -258,7 +263,10 @@ func serveCmd(args []string, stdout, stderr io.Writer) int {
 		}
 		defer listener.Close()
 		fmt.Fprintf(stdout, "listening on protected socket %s\n", path)
-		err = server.ServeLocalListener(listener)
+		err = server.ServeLocalListenerContext(ctx, listener)
+		if ctx.Err() != nil && errors.Is(err, net.ErrClosed) {
+			err = nil
+		}
 	} else if *stdinListener {
 		listener, openErr := net.FileListener(os.Stdin)
 		if openErr != nil {

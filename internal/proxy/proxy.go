@@ -122,6 +122,20 @@ func (p *Proxy) ServeLocalListener(listener net.Listener) error {
 	return p.server().Serve(limitConns(listener, maxConns))
 }
 
+// ServeLocalListenerContext closes the socket on shutdown, removing its path.
+func (p *Proxy) ServeLocalListenerContext(ctx context.Context, listener net.Listener) error {
+	done := make(chan struct{})
+	defer close(done)
+	go func() {
+		select {
+		case <-ctx.Done():
+			listener.Close()
+		case <-done:
+		}
+	}()
+	return p.ServeLocalListener(listener)
+}
+
 // ServeListener applies the loopback policy, or TLS for listen_mode network,
 // and the connection limit to an inherited listener.
 func (p *Proxy) ServeListener(listener net.Listener) error {
