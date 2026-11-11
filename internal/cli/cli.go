@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -12,12 +13,15 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"os/signal"
 	"strings"
+	"syscall"
 
 	"github.com/hyperme-sh/hypermesh-conductor/internal/aiuditor"
 	"github.com/hyperme-sh/hypermesh-conductor/internal/config"
 	"github.com/hyperme-sh/hypermesh-conductor/internal/history"
 	"github.com/hyperme-sh/hypermesh-conductor/internal/leases"
+	"github.com/hyperme-sh/hypermesh-conductor/internal/localtransport"
 	"github.com/hyperme-sh/hypermesh-conductor/internal/metrics"
 	"github.com/hyperme-sh/hypermesh-conductor/internal/notes"
 	"github.com/hyperme-sh/hypermesh-conductor/internal/proxy"
@@ -183,6 +187,7 @@ func serveCmd(args []string, stdout, stderr io.Writer) int {
 	configPath := fs.String("config", "", "endpoints file")
 	journalPath := fs.String("journal", "", "measurement journal")
 	peerGrantPath := fs.String("peer-grant", "", "optional single-hop peer ingress grant file")
+	socket := fs.Bool("socket", false, "serve a protected local socket (HYPERMESH_CONDUCTOR_SOCKET overrides its path)")
 	stdinListener := fs.Bool("stdin-listener", false, "serve a TCP listener inherited on stdin")
 	if err := fs.Parse(args); err != nil {
 		return 2
@@ -239,7 +244,30 @@ func serveCmd(args []string, stdout, stderr io.Writer) int {
 	server.Logf = func(format string, args ...any) {
 		fmt.Fprintf(stderr, format+"\n", args...)
 	}
-	if *stdinListener {
+	if *socket {
+		if *stdinListener || cfg.ListenMode == config.ListenModeNetwork {
+			fmt.Fprintln(stderr, "--socket cannot be combined with stdin-listener or network mode")
+			return 2
+		}
+		path, e := localtransport.DefaultPath()
+		if e != nil {
+			fmt.Fprintln(stderr, e)
+			return 2
+		}
+		ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+		defer stop()
+		listener, e := localtransport.Listen(path)
+		if e != nil {
+			fmt.Fprintln(stderr, e)
+			return 2
+		}
+		defer listener.Close()
+		fmt.Fprintf(stdout, "listening on protected socket %s\n", path)
+		err = server.ServeLocalListenerContext(ctx, listener)
+		if ctx.Err() != nil && (errors.Is(err, net.ErrClosed) || errors.Is(err, http.ErrServerClosed)) {
+			err = nil
+		}
+	} else if *stdinListener {
 		listener, openErr := net.FileListener(os.Stdin)
 		if openErr != nil {
 			fmt.Fprintln(stderr, "stdin must be a listening TCP socket")
