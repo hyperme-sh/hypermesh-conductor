@@ -114,6 +114,14 @@ func (p *Proxy) ListenAndServe() error {
 	return p.ServeListener(listener)
 }
 
+// ServeLocalListener serves a socket created in the owner's private directory.
+func (p *Proxy) ServeLocalListener(listener net.Listener) error {
+	if _, ok := listener.Addr().(*net.UnixAddr); !ok {
+		return fmt.Errorf("local listener must be a Unix socket")
+	}
+	return p.server().Serve(limitConns(listener, maxConns))
+}
+
 // ServeListener applies the loopback policy, or TLS for listen_mode network,
 // and the connection limit to an inherited listener.
 func (p *Proxy) ServeListener(listener net.Listener) error {
