@@ -35,6 +35,12 @@ func refusalSignal(raw []byte) (refused, content bool) {
 	if kind, _ := obj["type"].(string); strings.Contains(kind, "refusal") {
 		refused = true
 	}
+	if kind, _ := obj["type"].(string); kind == "response.function_call_arguments.delta" {
+		content = true
+	}
+	if item, ok := obj["item"].(map[string]any); ok && item["type"] == "function_call" {
+		content = true
+	}
 	if kind, _ := obj["type"].(string); kind == "response.output_text.delta" {
 		if text, _ := obj["delta"].(string); text != "" {
 			content = true
@@ -113,7 +119,7 @@ func sniffRefusal(body io.ReadCloser) (io.ReadCloser, []byte, bool) {
 				refusal = append([]byte(nil), raw...)
 				break
 			}
-			if bytes.Equal(raw, []byte("[DONE]")) {
+			if refusalTerminal(raw) {
 				break
 			}
 		}
@@ -192,4 +198,28 @@ func (p *Proxy) rerouteRefusal(w http.ResponseWriter, client *http.Request, tier
 	}
 	p.ServeHTTP(w, retry)
 	return true
+}
+
+// markRefusal records a bounded category, never the provider refusal text.
+func markRefusal(record *metrics.StepRecord) {
+	reason := "upstream refusal"
+	record.Error = &reason
+}
+
+func refusalTerminal(raw []byte) bool {
+	if bytes.Equal(raw, []byte("[DONE]")) {
+		return true
+	}
+	var obj map[string]any
+	if json.Unmarshal(raw, &obj) != nil {
+		return false
+	}
+	if _, ok := obj["error"]; ok {
+		return true
+	}
+	switch obj["type"] {
+	case "response.completed", "response.failed", "response.incomplete", "message_stop", "error":
+		return true
+	}
+	return false
 }

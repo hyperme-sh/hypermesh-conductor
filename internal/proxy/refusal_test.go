@@ -5,6 +5,7 @@ import (
 	"context"
 	"github.com/hyperme-sh/hypermesh-conductor/internal/aiuditor"
 	"github.com/hyperme-sh/hypermesh-conductor/internal/config"
+	"github.com/hyperme-sh/hypermesh-conductor/internal/metrics"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -78,7 +79,8 @@ func TestRefusalRerouteAndDenyContract(t *testing.T) {
 			cfg.RefusalFallbackTier = "cheap"
 			cfg.MaxRefusalAttempts = 2
 			hop := &refusalHop{deny: deny}
-			p := New(cfg, hop, openJournal(t, dir))
+			journal := openJournal(t, dir)
+			p := New(cfg, hop, journal)
 			req := request("/v1/chat/completions", "code", "task", "step", "", `{"conductor_task":"body-task","messages":[{"role":"user","content":"ordinary request"}]}`)
 			req.Header.Del("X-Conductor-Task")
 			rec := httptest.NewRecorder()
@@ -88,6 +90,10 @@ func TestRefusalRerouteAndDenyContract(t *testing.T) {
 			}
 			if !deny && rec.Header().Get("X-Conductor-Task") != "body-task" {
 				t.Fatal("retry changed task", rec.Header())
+			}
+			rows, err := metrics.ReadJournal(journal.Path())
+			if err != nil || len(rows) == 0 || rows[0].Error == nil || *rows[0].Error != "upstream refusal" {
+				t.Fatalf("missing refusal classification: %v %v", rows, err)
 			}
 			if deny && calls["cheap"] != 0 || !deny && calls["cheap"] != 1 {
 				t.Fatal(calls)
