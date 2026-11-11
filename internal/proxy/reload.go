@@ -47,6 +47,7 @@ func (r *recipeRuntime) reload() error {
 		return err
 	}
 	old := r.active.Load()
+	next.Journal = old.Config.Journal
 	if !reflect.DeepEqual(withoutRecipe(next), withoutRecipe(old.Config)) {
 		return fmt.Errorf("only recipe limits may reload; endpoint or policy changes require restart")
 	}

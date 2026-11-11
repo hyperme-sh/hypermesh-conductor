@@ -26,6 +26,7 @@ func TestRecipeReloadPreservesLastValidSnapshot(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	cfg.Journal = filepath.Join(dir, "command-line-journal.jsonl")
 	p := New(cfg, nil, nil)
 	p.EnableRecipeReload(path)
 	original := p.recipes.active.Load()
