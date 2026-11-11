@@ -8,6 +8,7 @@ import (
 	"github.com/hyperme-sh/hypermesh-conductor/internal/config"
 	"github.com/hyperme-sh/hypermesh-conductor/internal/localtransport"
 	"net"
+	"net/http"
 	"os"
 	"path/filepath"
 	"testing"
@@ -28,7 +29,7 @@ func TestLocalShutdownRemovesSocketAndAllowsRestart(t *testing.T) {
 	cancel()
 	select {
 	case err := <-done:
-		if !errors.Is(err, net.ErrClosed) {
+		if !errors.Is(err, net.ErrClosed) && !errors.Is(err, http.ErrServerClosed) {
 			t.Fatalf("shutdown: %v", err)
 		}
 	case <-time.After(time.Second):
@@ -42,4 +43,25 @@ func TestLocalShutdownRemovesSocketAndAllowsRestart(t *testing.T) {
 		t.Fatal(err)
 	}
 	next.Close()
+}
+
+func TestClosingFullLimiterUnblocksAccept(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "run", "conductor.sock")
+	listener, err := localtransport.Listen(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	limiter := limitConns(listener, 1).(*connLimiter)
+	limiter.slots <- struct{}{}
+	done := make(chan error, 1)
+	go func() { _, err := limiter.Accept(); done <- err }()
+	limiter.Close()
+	select {
+	case err := <-done:
+		if !errors.Is(err, net.ErrClosed) {
+			t.Fatal(err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("full limiter did not stop")
+	}
 }

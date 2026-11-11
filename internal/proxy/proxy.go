@@ -124,16 +124,21 @@ func (p *Proxy) ServeLocalListener(listener net.Listener) error {
 
 // ServeLocalListenerContext closes the socket on shutdown, removing its path.
 func (p *Proxy) ServeLocalListenerContext(ctx context.Context, listener net.Listener) error {
+	if _, ok := listener.Addr().(*net.UnixAddr); !ok {
+		return fmt.Errorf("local listener must be a Unix socket")
+	}
+	server := p.server()
+	defer listener.Close()
 	done := make(chan struct{})
 	defer close(done)
 	go func() {
 		select {
 		case <-ctx.Done():
-			listener.Close()
+			server.Close()
 		case <-done:
 		}
 	}()
-	return p.ServeLocalListener(listener)
+	return server.Serve(limitConns(listener, maxConns))
 }
 
 // ServeListener applies the loopback policy, or TLS for listen_mode network,
@@ -192,22 +197,33 @@ func (p *Proxy) server() *http.Server {
 // limitConns stops Accept once n connections are open, so a drip of
 // unfinished handshakes cannot create an unbounded number of goroutines.
 func limitConns(ln net.Listener, n int) net.Listener {
-	return &connLimiter{Listener: ln, slots: make(chan struct{}, n)}
+	return &connLimiter{Listener: ln, slots: make(chan struct{}, n), done: make(chan struct{})}
 }
 
 type connLimiter struct {
 	net.Listener
 	slots chan struct{}
+	done  chan struct{}
+	once  sync.Once
 }
 
 func (l *connLimiter) Accept() (net.Conn, error) {
-	l.slots <- struct{}{}
+	select {
+	case l.slots <- struct{}{}:
+	case <-l.done:
+		return nil, net.ErrClosed
+	}
 	conn, err := l.Listener.Accept()
 	if err != nil {
 		<-l.slots
 		return nil, err
 	}
 	return &trackedConn{Conn: conn, release: func() { <-l.slots }}, nil
+}
+
+func (l *connLimiter) Close() error {
+	l.once.Do(func() { close(l.done) })
+	return l.Listener.Close()
 }
 
 type trackedConn struct {

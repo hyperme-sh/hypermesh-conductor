@@ -264,7 +264,7 @@ func serveCmd(args []string, stdout, stderr io.Writer) int {
 		defer listener.Close()
 		fmt.Fprintf(stdout, "listening on protected socket %s\n", path)
 		err = server.ServeLocalListenerContext(ctx, listener)
-		if ctx.Err() != nil && errors.Is(err, net.ErrClosed) {
+		if ctx.Err() != nil && (errors.Is(err, net.ErrClosed) || errors.Is(err, http.ErrServerClosed)) {
 			err = nil
 		}
 	} else if *stdinListener {
