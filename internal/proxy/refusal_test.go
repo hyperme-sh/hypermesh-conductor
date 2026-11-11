@@ -101,3 +101,20 @@ func TestRefusalRerouteAndDenyContract(t *testing.T) {
 		})
 	}
 }
+
+func TestResponsesToolEventsEndRefusalWindow(t *testing.T) {
+	for _, event := range []string{
+		`{"type":"response.output_item.added","item":{"type":"function_call","name":"read_file"}}`,
+		`{"type":"response.function_call_arguments.delta","delta":"{}"}`,
+	} {
+		raw := "data: " + event + "\n\ndata: {\"type\":\"response.refusal.delta\",\"delta\":\"no\"}\n\n"
+		body, _, refused := sniffRefusal(io.NopCloser(bytes.NewBufferString(raw)))
+		if refused {
+			t.Fatal("retried after visible tool event")
+		}
+		replayed, err := io.ReadAll(body)
+		if err != nil || string(replayed) != raw {
+			t.Fatal("changed tool stream")
+		}
+	}
+}
