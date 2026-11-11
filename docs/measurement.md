@@ -69,3 +69,18 @@ hold with the plane and sends X-Hypermesh-Token-Attempt to the inference adapter
 An ambiguous registration keeps its local hold and prevents inference dispatch.
 Reconcile that attempt before retrying. The plane credential is separate from
 the inference credential. The host adapter owns final usage submission.
+
+### Recipe snapshots and reload (#16)
+
+The server exposes authenticated `GET /v1/config` and `POST /v1/config/reload` for
+clients holding `X-Conductor-Token`. The effective view returns model, recipe
+hash, context/output/task limits only. Reload validates the file and atomically
+publishes a new immutable snapshot. Invalid input retains the last good revision;
+in-flight requests retain their original snapshot. Existing tasks retain their
+ledger recipe revision and cannot silently switch budgets. Endpoint, listener,
+review, notes, and policy changes require restart rather than partial reload.
+
+`reasoning_tokens` records provider-reported reasoning/thinking output as a
+separate nullable subcount. It is never added to output totals or reservations.
+A subcount above total output is invalid; an absent field stays null. The parser
+accepts OpenAI completion/output detail fields and Anthropic thinking detail fields.

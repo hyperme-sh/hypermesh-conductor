@@ -179,3 +179,7 @@ On Linux, start `conductor serve --socket --config examples/endpoints.json` to s
 The CLI checks filesystem permissions and the connected peer's OS user before sending credentials. Socket mode does not open the configured TCP listener, and cannot be combined with `--stdin-listener` or network mode. Existing loopback and TLS modes remain available. Visor's inherited listener continues to work independently.
 
 This authenticates the local transport. It does not create a Hypermesh login session: renter credentials currently arrive per request, and Conductor does not run a JWT refresh or device-code flow. Provider credentials and proxy-token requirements still apply.
+
+The [issue implementation map](docs/issue-map.md) distinguishes implemented paths,
+design contracts and remaining work. [Nightly process checks](docs/nightly.md)
+belong to the central Infra batch; PR CI runs unit and contract tests only.

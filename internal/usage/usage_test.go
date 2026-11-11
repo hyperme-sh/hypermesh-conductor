@@ -89,3 +89,18 @@ func TestCacheOnlyInputDoesNotBecomeMeasuredUsage(t *testing.T) {
 		}
 	}
 }
+
+func TestReasoningIsOutputSubset(t *testing.T) {
+	got := ParseOpenAI([]byte(`{"usage":{"input_tokens":10,"output_tokens":8,"output_tokens_details":{"reasoning_tokens":5}}}`), false)
+	if got.Status != Measured || got.Reasoning == nil || *got.Reasoning != 5 || *got.Output != 8 {
+		t.Fatalf("%+v", got)
+	}
+	bad := ParseOpenAI([]byte(`{"usage":{"input_tokens":10,"output_tokens":8,"output_tokens_details":{"reasoning_tokens":9}}}`), false)
+	if bad.Status != Uncertain {
+		t.Fatal("invalid subcount measured")
+	}
+	absent := ParseOpenAI([]byte(`{"usage":{"input_tokens":10,"output_tokens":8}}`), false)
+	if absent.Reasoning != nil {
+		t.Fatal("missing reasoning became zero")
+	}
+}

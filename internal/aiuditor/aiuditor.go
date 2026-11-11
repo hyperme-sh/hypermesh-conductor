@@ -46,16 +46,19 @@ type Routing struct {
 
 // Envelope is the HTTP body posted to AIuditor.
 type Envelope struct {
-	Request Request `json:"request"`
-	Routing Routing `json:"routing"`
+	Event      string   `json:"event,omitempty"`
+	Candidates []string `json:"candidates,omitempty"`
+	Request    Request  `json:"request"`
+	Routing    Routing  `json:"routing"`
 }
 
 // Verdict is allow, deny, or modify. Modify carries a replacement JSON body.
 type Verdict struct {
-	release func()
-	Action  string          `json:"action"`
-	Reason  string          `json:"reason"`
-	Body    json.RawMessage `json:"body,omitempty"`
+	AllowedModels []string `json:"allowed_models,omitempty"`
+	release       func()
+	Action        string          `json:"action"`
+	Reason        string          `json:"reason"`
+	Body          json.RawMessage `json:"body,omitempty"`
 }
 
 // Release drops the HTTP response reservation after the verdict is no longer used.
@@ -347,6 +350,13 @@ func (h HTTP) Review(ctx context.Context, env Envelope) (Verdict, error) {
 	}
 	verdict.Reason = ReasonText(verdict.Reason)
 	switch verdict.Action {
+	case "reroute":
+		if env.Event != "upstream_refusal" || len(verdict.AllowedModels) == 0 {
+			return Verdict{}, fmt.Errorf("unexpected reroute verdict")
+		}
+		verdict.release = release
+		transferred = true
+		return verdict, nil
 	case Allow, Deny, Modify:
 		verdict.release = release
 		transferred = true

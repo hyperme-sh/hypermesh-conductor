@@ -14,6 +14,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/hyperme-sh/hypermesh-conductor/internal/capabilities"
 	"github.com/hyperme-sh/hypermesh-conductor/internal/prefix"
 	"github.com/hyperme-sh/hypermesh-conductor/internal/routing"
 )
@@ -53,20 +54,25 @@ var forbiddenKeys = map[string]struct{}{
 
 // Tier is one configured destination.
 type Tier struct {
-	InputCounter    string
-	ContextWindow   int
-	TaskTokenLimit  int
-	TaskOutputLimit int
-	RecipeDigest    string
-	OutputLimit     int
-	Name            string
-	Provider        string
-	BaseURL         string
-	Model           string
-	APIKeyEnv       string
-	Timeout         time.Duration
-	Auth            string
-	IncludeUsage    bool
+	OCROutputs       []string
+	Direct           bool
+	CredentialOrigin string
+	Capabilities     *capabilities.Record
+	RuntimeRevision  string
+	InputCounter     string
+	ContextWindow    int
+	TaskTokenLimit   int
+	TaskOutputLimit  int
+	RecipeDigest     string
+	OutputLimit      int
+	Name             string
+	Provider         string
+	BaseURL          string
+	Model            string
+	APIKeyEnv        string
+	Timeout          time.Duration
+	Auth             string
+	IncludeUsage     bool
 	// Gateway marks an OpenAI-compatible Hypermesh gateway tier. The model
 	// written upstream is a catalog id that tier recognizes.
 	Gateway bool
@@ -170,20 +176,23 @@ type AIU struct {
 
 // Config is the process configuration.
 type Config struct {
-	Listen       string
-	ListenMode   string
-	TLS          TLSFiles
-	Journal      string
-	DefaultClass string
-	Cheap        Tier
-	Frontier     Tier
-	Prefix       prefix.Prefix
-	ClassTiers   map[string]string
-	CostRates    map[string]CostRate
-	AIU          AIU
-	Compaction   Compaction
-	RulesFile    string
-	Notes        NotesConfig
+	RefusalFallbackTier string
+	MaxRefusalAttempts  int
+	GatewayEnforcement  bool
+	Listen              string
+	ListenMode          string
+	TLS                 TLSFiles
+	Journal             string
+	DefaultClass        string
+	Cheap               Tier
+	Frontier            Tier
+	Prefix              prefix.Prefix
+	ClassTiers          map[string]string
+	CostRates           map[string]CostRate
+	AIU                 AIU
+	Compaction          Compaction
+	RulesFile           string
+	Notes               NotesConfig
 }
 
 // NotesConfig is the on-disk linked-note index. An empty Dir leaves it off.
@@ -336,7 +345,34 @@ func Load(path string) (Config, error) {
 	if err != nil {
 		return Config{}, err
 	}
+	fallback, _ := raw["refusal_fallback_tier"].(string)
+	if fallback != "" {
+		fallback, err = routing.CanonicalTier(fallback)
+		if err != nil {
+			return Config{}, err
+		}
+	}
+	attempts := 2
+	if value, ok := raw["max_refusal_attempts"]; ok {
+		n, valid := asFloat(value)
+		if !valid || n < 1 || n > 8 || n != float64(int(n)) {
+			return Config{}, fmt.Errorf("max_refusal_attempts must be 1 through 8")
+		}
+		attempts = int(n)
+	}
+	enforce := false
+	if value, present := raw["gateway_enforcement"]; present {
+		var ok bool
+		enforce, ok = value.(bool)
+		if !ok {
+			return Config{}, fmt.Errorf("gateway_enforcement must be boolean")
+		}
+	}
+	if enforce && ((cheap.Configured() && !cheap.Gateway) || (frontier.Configured() && !frontier.Gateway)) {
+		return Config{}, fmt.Errorf("gateway enforcement refuses direct tiers")
+	}
 	return Config{
+		GatewayEnforcement: enforce, RefusalFallbackTier: fallback, MaxRefusalAttempts: attempts,
 		Listen:       listen,
 		ListenMode:   listenMode,
 		TLS:          tlsFiles,
@@ -563,6 +599,25 @@ func parseTier(name string, block any) (Tier, error) {
 	} else if _, present := obj["gateway"]; present {
 		return Tier{}, fmt.Errorf("tiers.%s.gateway must be a boolean", name)
 	}
+	direct := false
+	if value, present := obj["direct"]; present {
+		var ok bool
+		direct, ok = value.(bool)
+		if !ok || (direct && gateway) {
+			return Tier{}, fmt.Errorf("direct must be boolean and cannot combine with gateway")
+		}
+	}
+	origin, _ := obj["credential_origin"].(string)
+	if origin != "" {
+		parsed, err := url.Parse(baseURL)
+		scoped, scopeErr := url.Parse(origin)
+		if err != nil || scopeErr != nil || scoped.User != nil || scoped.RawQuery != "" || scoped.Fragment != "" || scoped.Path != "" || scoped.Scheme+"://"+scoped.Host != parsed.Scheme+"://"+parsed.Host {
+			return Tier{}, fmt.Errorf("credential_origin must match the destination origin")
+		}
+	}
+	if direct && auth != AuthEnv && origin == "" {
+		return Tier{}, fmt.Errorf("direct passthrough requires credential_origin")
+	}
 	catalogModel := ""
 	if value, ok := obj["catalog_model"].(string); ok {
 		catalogModel = value
@@ -581,7 +636,34 @@ func parseTier(name string, block any) (Tier, error) {
 	} else if strings.TrimSpace(catalogModel) != "" {
 		return Tier{}, fmt.Errorf("tiers.%s.catalog_model requires gateway true", name)
 	}
+	var ocrOutputs []string
+	if value, present := obj["ocr_outputs"]; present {
+		data, _ := json.Marshal(value)
+		if json.Unmarshal(data, &ocrOutputs) != nil {
+			return Tier{}, fmt.Errorf("ocr_outputs must be a list")
+		}
+		for _, field := range ocrOutputs {
+			if field != "text" && field != "tables" && field != "bounding_boxes" {
+				return Tier{}, fmt.Errorf("unsupported OCR output")
+			}
+		}
+	}
+	var caps *capabilities.Record
+	runtime, _ := obj["runtime_revision"].(string)
+	if raw, present := obj["capabilities"]; present {
+		encoded, err := json.Marshal(raw)
+		if err != nil {
+			return Tier{}, err
+		}
+		if err = json.Unmarshal(encoded, &caps); err != nil || caps == nil {
+			return Tier{}, fmt.Errorf("invalid capabilities")
+		}
+		if err = caps.Validate(model, runtime, provider); err != nil {
+			return Tier{}, err
+		}
+	}
 	return Tier{
+		OCROutputs: ocrOutputs, Capabilities: caps, RuntimeRevision: runtime, Direct: direct, CredentialOrigin: origin,
 		Name:         name,
 		InputCounter: counter,
 		Provider:     provider,

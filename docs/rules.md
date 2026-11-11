@@ -22,3 +22,9 @@ Prompt bodies stay out of the proposal unless `--bodies` is set. That flag reads
 `apply` refuses a file that contains `aiuditor`, `fail_closed`, `deny_job_classes`, `bypass`, or `fail_open`. The previous active file is copied under `rules/revisions/` with the next free revision name. That name is not the policy version, so a version-zero baseline is not overwritten by the next apply. `rollback` restores that copy.
 
 Activation here is the local `apply` command. A bench replay of compaction modes stays in hypermesh-bench issue 12. This command does not claim a measured saving.
+
+Before activating a proposal, compare its task outcomes and token scorecard with
+[hypermesh-bench#12](https://github.com/hyperme-sh/hypermesh-bench/issues/12).
+Regressed accuracy or higher tokens/context without an explicit tradeoff leaves
+the proposal inactive. This is a policy evaluation contract, not a GitHub human
+approval requirement. The current local apply command does not execute bench.
