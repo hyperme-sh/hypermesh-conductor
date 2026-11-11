@@ -752,8 +752,11 @@ func (p *Proxy) forward(w http.ResponseWriter, client *http.Request, upstream *h
 		msg := fmt.Sprintf("provider HTTP %d", resp.StatusCode)
 		record.Error = &msg
 		record.UsageStatus = metrics.StatusUncertain
-		if refused, _ := refusalSignal(raw); refused && (resp.StatusCode == 400 || resp.StatusCode == 403) && p.rerouteRefusal(w, client, tier, raw, record) {
-			return
+		if refused, _ := refusalSignal(raw); refused && (resp.StatusCode == 400 || resp.StatusCode == 403) {
+			markRefusal(&record)
+			if p.rerouteRefusal(w, client, tier, raw, record) {
+				return
+			}
 		}
 		p.finish(w, client, resp.StatusCode, raw, record, secrets, false)
 		return
@@ -776,8 +779,11 @@ func (p *Proxy) forward(w http.ResponseWriter, client *http.Request, upstream *h
 			var raw []byte
 			var refused bool
 			resp.Body, raw, refused = sniffRefusal(resp.Body)
-			if refused && p.rerouteRefusal(w, client, tier, raw, record) {
-				return
+			if refused {
+				markRefusal(&record)
+				if p.rerouteRefusal(w, client, tier, raw, record) {
+					return
+				}
 			}
 		}
 		p.stream(w, client, resp, wire, start, secrets, record)
@@ -805,8 +811,11 @@ func (p *Proxy) forward(w http.ResponseWriter, client *http.Request, upstream *h
 		p.finish(w, client, http.StatusBadGateway, nil, record, secrets, false)
 		return
 	}
-	if refused, _ := refusalSignal(raw); refused && p.rerouteRefusal(w, client, tier, raw, record) {
-		return
+	if refused, _ := refusalSignal(raw); refused {
+		markRefusal(&record)
+		if p.rerouteRefusal(w, client, tier, raw, record) {
+			return
+		}
 	}
 	if providerError(raw) {
 		msg := "provider response failed"

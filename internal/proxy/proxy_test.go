@@ -2351,6 +2351,7 @@ func TestTerminalProviderEventsCloseOpenHTTPBody(t *testing.T) {
 			defer func() { close(release); upstream.Close() }()
 			dir := t.TempDir()
 			cfg := loadTestConfig(t, dir, upstream.URL+"/v1", upstream.URL+"/v1", config.AuthPassthrough, tc.provider)
+			cfg.RefusalFallbackTier = "frontier"
 			p := New(cfg, aiuditor.Stub{}, openJournal(t, dir))
 			done := make(chan struct{})
 			go func() {
