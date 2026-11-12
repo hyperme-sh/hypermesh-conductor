@@ -690,7 +690,7 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 		defer ledger.Close()
 		if accountingURL != "" {
-			hold := planeReservation{Task: taskID, Step: stepID, Model: tier.Model, Recipe: tier.RecipeDigest, Source: tier.InputCounter, Input: inputCharge, Output: allowance.output}
+			hold := planeReservation{ModelRevision: tier.ModelRevision, Task: taskID, Step: stepID, Model: tier.Model, Recipe: tier.RecipeDigest, Source: tier.InputCounter, Input: inputCharge, Output: allowance.output}
 			if err := registerConfiguredReservation(r.Context(), accountingURL, attemptID, hold); err != nil {
 				writeJSON(w, http.StatusServiceUnavailable, map[string]any{"error": "plane reservation unconfirmed; attempt remains held"})
 				return

@@ -18,13 +18,14 @@ import (
 )
 
 type planeReservation struct {
-	Task   string `json:"task"`
-	Step   string `json:"step"`
-	Model  string `json:"model"`
-	Recipe string `json:"recipe"`
-	Source string `json:"input_source"`
-	Input  int    `json:"input_tokens"`
-	Output int    `json:"output_tokens"`
+	ModelRevision string `json:"model_revision,omitempty"`
+	Task          string `json:"task"`
+	Step          string `json:"step"`
+	Model         string `json:"model"`
+	Recipe        string `json:"recipe"`
+	Source        string `json:"input_source"`
+	Input         int    `json:"input_tokens"`
+	Output        int    `json:"output_tokens"`
 }
 
 func registerReservation(ctx context.Context, endpoint, tenant, lease, token, attempt string, hold planeReservation, transport http.RoundTripper) error {
