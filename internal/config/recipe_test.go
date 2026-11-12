@@ -3,6 +3,7 @@ package config
 import (
 	"crypto/sha256"
 	"fmt"
+	"github.com/hyperme-sh/hypermesh-conductor/internal/capabilities"
 	"os"
 	"path/filepath"
 	"testing"
@@ -25,5 +26,22 @@ func TestRecipeBindsLimitsToConfiguredModels(t *testing.T) {
 	frontier.Model = "c"
 	if err := loadRecipe(path, &cheap, &frontier); err == nil {
 		t.Fatal("accepted mismatched model")
+	}
+}
+
+func TestRecipeRequiresVerifiedCapabilities(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "recipe.json")
+	if err := os.WriteFile(path, []byte(`{"schema":"hypermesh.conductor.recipe.v1","frontier":{"model":"b","max_output_tokens":8,"required_capabilities":["tools"]}}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	for _, state := range []string{"unknown", "unsupported", "verified"} {
+		cheap, frontier := Tier{}, Tier{Model: "b", RuntimeRevision: "r1", Provider: ProviderOpenAICompatible, Capabilities: &capabilities.Record{Model: "b", Runtime: "r1", Protocol: ProviderOpenAICompatible, Features: map[string]string{"tools": state}}}
+		err := loadRecipe(path, &cheap, &frontier)
+		if (err == nil) != (state == "verified") {
+			t.Fatal(state, err)
+		}
+		if err == nil && len(frontier.RequiredCapabilities) != 1 {
+			t.Fatal("lost recipe capabilities")
+		}
 	}
 }

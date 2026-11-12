@@ -143,6 +143,9 @@ func (p *Proxy) rerouteRefusal(w http.ResponseWriter, client *http.Request, tier
 		return false
 	}
 	next, err := p.Config.Endpoint(nextName)
+	if _, captured := client.Context().Value(captureKey{}).(config.Tier); captured && nextName == "frontier" {
+		return false
+	}
 	if err != nil || next.Model == tier.Model {
 		return false
 	}

@@ -38,6 +38,9 @@ func registerReservation(ctx context.Context, endpoint, tenant, lease, token, at
 	if _, err := uuid.Parse(lease); err != nil {
 		return errors.New("invalid plane accounting lease")
 	}
+	if _, err := uuid.Parse(attempt); err != nil {
+		return errors.New("invalid plane accounting attempt")
+	}
 	if token == "" {
 		return errors.New("missing plane accounting credential")
 	}

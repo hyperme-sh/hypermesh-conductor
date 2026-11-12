@@ -358,6 +358,9 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "cross-origin request denied", http.StatusForbidden)
 		return
 	}
+	if !p.prepareCapture(w, &r) {
+		return
+	}
 	w = deadlineWriter{ResponseWriter: w, idle: writeIdle}
 	if p.PeerIngress != nil && r.Method == http.MethodPost && r.URL.Path == "/v1/peer/prompt-submit" {
 		p.PeerIngress.ServeHTTP(w, r)
@@ -454,14 +457,21 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"error": map[string]any{"message": err.Error()}})
 		return
 	}
+	tier, err = p.captureTier(r, tier, rawString(obj.Values["model"]))
+	if err != nil {
+		writeJSON(w, 422, map[string]any{"error": err.Error()})
+		return
+	}
+
 	// Explicit locality or capability requirements fail closed. Legacy plain chat
 	// remains compatible when no record has been configured.
 	localOnly := r.Header.Get("X-Conductor-Local-Only") == "true"
 	required, capErr := capabilities.Required(r.URL.Path, prepared)
+	required = append(required, tier.RequiredCapabilities...)
 	if value := r.Header.Get("X-Conductor-Local-Only"); value != "" && value != "true" && value != "false" {
 		capErr = fmt.Errorf("invalid local-only flag")
 	}
-	if capErr == nil && (tier.Capabilities != nil || localOnly || r.Header.Get("X-Conductor-Require-Capabilities") == "true") {
+	if capErr == nil && (tier.Capabilities != nil || len(tier.RequiredCapabilities) > 0 || localOnly || r.Header.Get("X-Conductor-Require-Capabilities") == "true") {
 		if tier.Capabilities == nil {
 			capErr = fmt.Errorf("route has no verified capability record")
 		} else {
@@ -1436,7 +1446,8 @@ func applyUsage(record *metrics.StepRecord, parsed usage.Usage, cfg config.Confi
 	record.OutputTokens = parsed.Output
 	record.CacheHitTokens = parsed.Cache
 	record.ReasoningTokens = parsed.Reasoning
-	if rate, ok := cfg.Rate(tier); ok {
+	endpoint, endpointErr := cfg.Endpoint(tier)
+	if rate, ok := cfg.Rate(tier); ok && endpointErr == nil && endpoint.Model == record.ModelID {
 		amount := float64(*parsed.Input)/1_000_000*rate.InputPerMillion + float64(*parsed.Output)/1_000_000*rate.OutputPerMillion
 		label := fmt.Sprintf("proxy: tokens × published rate (%s); not a charge", rate.Source)
 		record.CostProxy = &amount

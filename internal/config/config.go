@@ -54,25 +54,26 @@ var forbiddenKeys = map[string]struct{}{
 
 // Tier is one configured destination.
 type Tier struct {
-	OCROutputs       []string
-	Direct           bool
-	CredentialOrigin string
-	Capabilities     *capabilities.Record
-	RuntimeRevision  string
-	InputCounter     string
-	ContextWindow    int
-	TaskTokenLimit   int
-	TaskOutputLimit  int
-	RecipeDigest     string
-	OutputLimit      int
-	Name             string
-	Provider         string
-	BaseURL          string
-	Model            string
-	APIKeyEnv        string
-	Timeout          time.Duration
-	Auth             string
-	IncludeUsage     bool
+	RequiredCapabilities []string
+	OCROutputs           []string
+	Direct               bool
+	CredentialOrigin     string
+	Capabilities         *capabilities.Record
+	RuntimeRevision      string
+	InputCounter         string
+	ContextWindow        int
+	TaskTokenLimit       int
+	TaskOutputLimit      int
+	RecipeDigest         string
+	OutputLimit          int
+	Name                 string
+	Provider             string
+	BaseURL              string
+	Model                string
+	APIKeyEnv            string
+	Timeout              time.Duration
+	Auth                 string
+	IncludeUsage         bool
 	// Gateway marks an OpenAI-compatible Hypermesh gateway tier. The model
 	// written upstream is a catalog id that tier recognizes.
 	Gateway bool
@@ -176,6 +177,7 @@ type AIU struct {
 
 // Config is the process configuration.
 type Config struct {
+	Captures            map[string]Tier
 	RefusalFallbackTier string
 	MaxRefusalAttempts  int
 	GatewayEnforcement  bool
@@ -371,7 +373,12 @@ func Load(path string) (Config, error) {
 	if enforce && ((cheap.Configured() && !cheap.Gateway) || (frontier.Configured() && !frontier.Gateway)) {
 		return Config{}, fmt.Errorf("gateway enforcement refuses direct tiers")
 	}
+	captures, err := loadCaptures(raw["capture_dir"], path, enforce)
+	if err != nil {
+		return Config{}, err
+	}
 	return Config{
+		Captures:           captures,
 		GatewayEnforcement: enforce, RefusalFallbackTier: fallback, MaxRefusalAttempts: attempts,
 		Listen:       listen,
 		ListenMode:   listenMode,

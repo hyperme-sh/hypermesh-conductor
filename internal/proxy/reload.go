@@ -32,6 +32,7 @@ func (p *Proxy) EnableRecipeReload(path string) {
 func withoutRecipe(c config.Config) config.Config {
 	for _, tier := range []*config.Tier{&c.Cheap, &c.Frontier} {
 		tier.RecipeDigest = ""
+		tier.RequiredCapabilities = nil
 		tier.OutputLimit = 0
 		tier.TaskTokenLimit = 0
 		tier.TaskOutputLimit = 0

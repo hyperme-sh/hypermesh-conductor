@@ -13,9 +13,10 @@ import (
 )
 
 type recipeTier struct {
-	ContextWindow   json.RawMessage `json:"context_window_tokens"`
-	Model           string          `json:"model"`
-	MaxOutputTokens int             `json:"max_output_tokens"`
+	RequiredCapabilities []string        `json:"required_capabilities"`
+	ContextWindow        json.RawMessage `json:"context_window_tokens"`
+	Model                string          `json:"model"`
+	MaxOutputTokens      int             `json:"max_output_tokens"`
 }
 
 func loadRecipe(path string, cheap, frontier *Tier) error {
@@ -62,6 +63,15 @@ func loadRecipe(path string, cheap, frontier *Tier) error {
 		if entry.settings.Model != entry.tier.Model || entry.settings.MaxOutputTokens < 1 || entry.settings.MaxOutputTokens > 2147483647 {
 			return fmt.Errorf("recipe %s requires configured model %q and a positive 32-bit output limit", entry.tier.Name, entry.tier.Model)
 		}
+		if len(entry.settings.RequiredCapabilities) > 0 {
+			if entry.tier.Capabilities == nil {
+				return fmt.Errorf("recipe requires a verified capability record")
+			}
+			if err := entry.tier.Capabilities.Require(entry.tier.Model, entry.tier.RuntimeRevision, entry.tier.Provider, entry.settings.RequiredCapabilities, false); err != nil {
+				return err
+			}
+		}
+		entry.tier.RequiredCapabilities = append([]string(nil), entry.settings.RequiredCapabilities...)
 		var window int
 		if entry.settings.ContextWindow != nil {
 			if json.Unmarshal(entry.settings.ContextWindow, &window) != nil || window <= 0 || window > 2147483647 || entry.tier.InputCounter != "vllm" {
