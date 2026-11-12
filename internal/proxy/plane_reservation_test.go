@@ -37,3 +37,25 @@ func TestPlaneRequiresMatchingUnfinalizedHold(t *testing.T) {
 		})
 	}
 }
+
+func TestPlaneScopeAndAmbiguousAcknowledgements(t *testing.T) {
+	tenant, lease, attempt := uuid.NewString(), uuid.NewString(), uuid.NewString()
+	hold := planeReservation{Task: "task", Step: "step", Model: "catalog-model", Recipe: "revision", Source: "vllm", Input: 11, Output: 22}
+	calls := 0
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { calls++; w.WriteHeader(503) }))
+	defer server.Close()
+	for _, scope := range []struct{ tenant, lease, attempt string }{{"bad", lease, attempt}, {tenant, "bad", attempt}, {tenant, lease, "../../other"}} {
+		if err := registerReservation(context.Background(), server.URL, scope.tenant, scope.lease, "lease-token", scope.attempt, hold, server.Client().Transport); err == nil {
+			t.Fatal("invalid scope accepted")
+		}
+	}
+	if calls != 0 {
+		t.Fatal("invalid scope dispatched")
+	}
+	if err := registerReservation(context.Background(), server.URL, tenant, lease, "lease-token", attempt, hold, server.Client().Transport); err == nil {
+		t.Fatal("ambiguous response accepted")
+	}
+	if calls != 1 {
+		t.Fatal(calls)
+	}
+}

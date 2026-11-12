@@ -159,3 +159,42 @@ usage remains uncertain. Credentials stay bound to the original origin unless
 the new tier explicitly uses its own environment credential. The response header
 `X-Conductor-Attempted-Models` records tried models. The second request is reviewed
 again, including protocol translation and capability/locality checks.
+
+### Captured provider profiles (#37)
+
+`capture_dir` explicitly enables a local directory of JSON profiles written by
+`hypermesh route enable`. Each filename is a tool ID (for example `codex.json`);
+symlinks, invalid IDs and more than 64 profiles are rejected. Profiles load at
+startup and changing them requires restart. Unknown profiles never proxy traffic.
+
+```json
+{
+  "schema": "hypermesh.conductor.capture.v1",
+  "provider": "openai-compatible",
+  "base_url": "https://provider.example/v1",
+  "model": "$client",
+  "direct": true,
+  "auth": "passthrough",
+  "credential_origin": "https://provider.example"
+}
+```
+
+Clients use `/capture/codex/v1/chat/completions` or the corresponding Responses,
+Anthropic or embeddings path. This ingress binds the credential to the configured
+origin; a conflicting client binding fails before dispatch. `$client` preserves
+the caller's model. Classification and AIuditor review still apply. Frontier work
+uses the captured provider; a policy-selected cheap route requires its own
+environment credential. A gateway receives only its configured Hypermesh key.
+Network clients still require `X-Conductor-Token`; capture never bypasses listener
+authentication or browser-origin checks. `gateway_enforcement` rejects captures.
+
+Existing recipe limits cannot disappear: the captured model and counter must
+match the active frontier recipe, whose limits and revision carry across. Unknown
+capabilities still fail explicit capability/locality requirements. Provider models
+do not inherit another model's published cost proxy. Refusal fallback to a written
+cheap tier is supported; fallback from cheap to a dynamically captured frontier
+is refused because that candidate is not the configured frontier model reviewed
+by AIuditor. Credentials remain bound across every attempt.
+
+The CLI preserves credential selectors in the tool config and backs up both the
+tool and profile files. It does not store keys in these profiles or install a CA.
