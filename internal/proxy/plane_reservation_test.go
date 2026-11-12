@@ -6,6 +6,7 @@ import (
 	"github.com/google/uuid"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 )
 
@@ -57,5 +58,29 @@ func TestPlaneScopeAndAmbiguousAcknowledgements(t *testing.T) {
 	}
 	if calls != 1 {
 		t.Fatal(calls)
+	}
+}
+
+func TestPlaneModelRevisionIsOptionalAndBound(t *testing.T) {
+	hold := planeReservation{Task: "task", Step: "step", Model: "catalog", Recipe: "revision", Source: "vllm", Input: 3, Output: 4}
+	legacy, err := json.Marshal(hold)
+	if err != nil || strings.Contains(string(legacy), "model_revision") {
+		t.Fatal("legacy shape changed", err)
+	}
+	hold.ModelRevision = "sha256:original"
+	for _, revision := range []string{"sha256:original", "sha256:other", ""} {
+		server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			var got planeReservation
+			if err := json.NewDecoder(r.Body).Decode(&got); err != nil || got.ModelRevision != hold.ModelRevision {
+				t.Error("revision missing from request")
+			}
+			got.ModelRevision = revision
+			json.NewEncoder(w).Encode(map[string]any{"state": "reserved", "reserved": got})
+		}))
+		err := registerReservation(context.Background(), server.URL, uuid.NewString(), uuid.NewString(), "key", uuid.NewString(), hold, server.Client().Transport)
+		server.Close()
+		if (err == nil) != (revision == hold.ModelRevision) {
+			t.Fatal(revision, err)
+		}
 	}
 }

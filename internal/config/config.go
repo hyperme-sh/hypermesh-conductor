@@ -54,6 +54,7 @@ var forbiddenKeys = map[string]struct{}{
 
 // Tier is one configured destination.
 type Tier struct {
+	ModelRevision        string
 	RequiredCapabilities []string
 	OCROutputs           []string
 	Direct               bool
@@ -669,8 +670,17 @@ func parseTier(name string, block any) (Tier, error) {
 			return Tier{}, err
 		}
 	}
+	modelRevision := ""
+	if value, ok := obj["model_revision"]; ok {
+		var valid bool
+		modelRevision, valid = value.(string)
+		if !valid || len(modelRevision) > 256 || strings.ContainsAny(modelRevision, "\r\n") {
+			return Tier{}, fmt.Errorf("invalid model_revision")
+		}
+	}
 	return Tier{
-		OCROutputs: ocrOutputs, Capabilities: caps, RuntimeRevision: runtime, Direct: direct, CredentialOrigin: origin,
+		ModelRevision: modelRevision,
+		OCROutputs:    ocrOutputs, Capabilities: caps, RuntimeRevision: runtime, Direct: direct, CredentialOrigin: origin,
 		Name:         name,
 		InputCounter: counter,
 		Provider:     provider,

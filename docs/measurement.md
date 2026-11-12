@@ -84,3 +84,12 @@ review, notes, and policy changes require restart rather than partial reload.
 separate nullable subcount. It is never added to output totals or reservations.
 A subcount above total output is invalid; an absent field stays null. The parser
 accepts OpenAI completion/output detail fields and Anthropic thinking detail fields.
+
+For peers supporting revision-bound token attempts, a tier may declare
+`model_revision` as the exact model artifact revision. Conductor includes it in
+the reservation and requires an identical acknowledgement before inference.
+A mismatch, omission or unsupported peer keeps the hold uncertain and prevents
+dispatch. Omitted configuration preserves the legacy wire document; it does not
+claim a known model revision. Enable the field only with the corresponding Plane
+and host contract support. Runtime revision and model artifact revision are
+separate identities. Optional cache/reasoning counts remain input/output subcounts.
