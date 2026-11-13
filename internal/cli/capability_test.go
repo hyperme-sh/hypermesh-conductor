@@ -79,3 +79,13 @@ func TestCapabilityIndexCommandAndProposal(t *testing.T) {
 		t.Fatal("baseline was modified")
 	}
 }
+
+func TestCapabilityReviewCommandRefusesUnsignedInput(t *testing.T) {
+	var out, stderr bytes.Buffer
+	if code := capabilityReviewCmd([]string{"--endpoint", "https://example.test/api/v1/aiuditor/capabilities/review"}, strings.NewReader(`{"decision":"allow"}`), &out, &stderr); code != 1 || out.Len() != 0 || stderr.String() != "capability review refused\n" {
+		t.Fatal(code, out.String(), stderr.String())
+	}
+	if code := capabilityReviewCmd(nil, strings.NewReader(""), &out, &stderr); code != 2 {
+		t.Fatal(code)
+	}
+}

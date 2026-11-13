@@ -32,10 +32,12 @@ import (
 // Main runs one invocation. args do not include the program name.
 func Main(args []string, stdout, stderr io.Writer) int {
 	if len(args) == 0 {
-		fmt.Fprintln(stderr, "usage: conductor <prepare-leases|route|submit|run|summary|serve|index|primer|dream|rules>")
+		fmt.Fprintln(stderr, "usage: conductor <prepare-leases|route|submit|run|summary|serve|index|primer|dream|rules|capability-review>")
 		return 2
 	}
 	switch args[0] {
+	case "capability-review":
+		return capabilityReviewCmd(args[1:], os.Stdin, stdout, stderr)
 	case "prepare-leases":
 		return prepareLeasesCmd(args[1:], stdout, stderr)
 	case "submit":
@@ -57,7 +59,7 @@ func Main(args []string, stdout, stderr io.Writer) int {
 	case "rules":
 		return rulesCmd(args[1:], stdout, stderr)
 	case "-h", "--help", "help":
-		fmt.Fprintln(stdout, "usage: conductor <prepare-leases|route|submit|run|summary|serve|index|primer|dream|rules>")
+		fmt.Fprintln(stdout, "usage: conductor <prepare-leases|route|submit|run|summary|serve|index|primer|dream|rules|capability-review>")
 		return 0
 	default:
 		fmt.Fprintf(stderr, "unknown command %s\n", args[0])
