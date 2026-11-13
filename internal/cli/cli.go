@@ -14,6 +14,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"os/signal"
+	"runtime"
 	"strings"
 	"syscall"
 
@@ -199,8 +200,8 @@ func serveCmd(args []string, stdout, stderr io.Writer) int {
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
-	if *parentPID != 0 && (!*socket || *parentPID < 2 || os.Getppid() != *parentPID) {
-		fmt.Fprintln(stderr, "parent-pid requires the current parent and private socket mode")
+	if *parentPID != 0 && (runtime.GOOS == "windows" || !*socket || *parentPID < 2 || os.Getppid() != *parentPID) {
+		fmt.Fprintln(stderr, "parent-pid requires Linux or macOS, the current parent, and private socket mode")
 		return 2
 	}
 	cfg, code := load(configPath, stderr)

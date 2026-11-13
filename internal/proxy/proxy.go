@@ -31,6 +31,7 @@ import (
 	"github.com/hyperme-sh/hypermesh-conductor/internal/compact"
 	"github.com/hyperme-sh/hypermesh-conductor/internal/config"
 	"github.com/hyperme-sh/hypermesh-conductor/internal/jsonbody"
+	"github.com/hyperme-sh/hypermesh-conductor/internal/localtransport"
 	"github.com/hyperme-sh/hypermesh-conductor/internal/metrics"
 	"github.com/hyperme-sh/hypermesh-conductor/internal/notes"
 	"github.com/hyperme-sh/hypermesh-conductor/internal/prefix"
@@ -124,16 +125,16 @@ func (p *Proxy) ListenAndServe() error {
 
 // ServeLocalListener serves a socket created in the owner's private directory.
 func (p *Proxy) ServeLocalListener(listener net.Listener) error {
-	if _, ok := listener.Addr().(*net.UnixAddr); !ok {
-		return fmt.Errorf("local listener must be a Unix socket")
+	if err := localtransport.ValidateListener(listener); err != nil {
+		return err
 	}
 	return p.server().Serve(limitConns(listener, maxConns))
 }
 
 // ServeLocalListenerContext closes the socket on shutdown, removing its path.
 func (p *Proxy) ServeLocalListenerContext(ctx context.Context, listener net.Listener) error {
-	if _, ok := listener.Addr().(*net.UnixAddr); !ok {
-		return fmt.Errorf("local listener must be a Unix socket")
+	if err := localtransport.ValidateListener(listener); err != nil {
+		return err
 	}
 	server := p.server()
 	defer listener.Close()
