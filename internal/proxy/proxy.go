@@ -78,10 +78,14 @@ type Proxy struct {
 	transport     *http.Transport
 }
 
-// New builds a proxy. A nil hop is replaced with an allow-all stub.
+// New builds a proxy. HTTP configuration selects the production review contract.
 func New(cfg config.Config, hop aiuditor.Hop, journal *metrics.Journal) *Proxy {
 	if hop == nil {
-		hop = aiuditor.Stub{}
+		if cfg.AIU.Mode == config.AIUModeHTTP {
+			hop = aiuditor.ProductionHTTP{URL: cfg.AIU.URL, Timeout: cfg.AIU.Timeout}
+		} else {
+			hop = aiuditor.Stub{}
+		}
 	}
 	return &Proxy{Config: cfg, Hop: hop, Journal: journal, Logf: func(string, ...any) {}}
 }
@@ -461,6 +465,17 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		writeJSON(w, 422, map[string]any{"error": err.Error()})
 		return
+	}
+
+	previousTier := tier.Name
+	tier, err = p.reviewChoice(r, proto, prepared, boolField(obj, "stream"), decision, tier)
+	if err != nil {
+		writeJSON(w, http.StatusForbidden, map[string]any{"error": "model routing denied by policy"})
+		return
+	}
+	if tier.Name != previousTier {
+		decision.Tier = tier.Name
+		decision.Reason = "AIuditor-constrained route"
 	}
 
 	// Explicit locality or capability requirements fail closed. Legacy plain chat
@@ -1673,7 +1688,7 @@ func providerError(payload []byte) bool {
 }
 
 func (p *Proxy) applyReview(w http.ResponseWriter, r *http.Request, base *metrics.StepRecord, proto string, prepared []byte, stream bool, decision routing.Decision, tier config.Tier, hash string) ([]byte, bool, func()) {
-	verdict, hopErr := p.Hop.Review(aiuditor.WithResponseBudget(r.Context(), reserveBody, releaseBody), aiuditor.Envelope{
+	verdict, hopErr := p.review(aiuditor.WithResponseBudget(r.Context(), reserveBody, releaseBody), aiuditor.Envelope{
 		Request: aiuditor.Request{
 			Protocol: proto,
 			Method:   r.Method,
@@ -1691,9 +1706,9 @@ func (p *Proxy) applyReview(w http.ResponseWriter, r *http.Request, base *metric
 			SuggestionAccepted: decision.SuggestionAccepted,
 			PrefixSHA256:       hash,
 		},
-	})
+	}, tier, []config.Tier{tier}, false)
 	if hopErr != nil {
-		if p.Config.AIU.FailClosed || errors.Is(hopErr, aiuditor.ErrResponseBudget) {
+		if p.Config.AIU.FailClosed || errors.Is(hopErr, aiuditor.ErrProductionReview) || errors.Is(hopErr, aiuditor.ErrResponseBudget) {
 			msg := "aiuditor unreachable"
 			if errors.Is(hopErr, aiuditor.ErrResponseBudget) {
 				msg = "request body budget exceeded"

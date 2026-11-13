@@ -773,7 +773,7 @@ func readOutcomes(path string) ([]rules.Outcome, error) {
 
 func hopFrom(cfg config.Config) (aiuditor.Hop, error) {
 	if cfg.AIU.Mode == config.AIUModeHTTP {
-		return aiuditor.HTTP{URL: cfg.AIU.URL, Timeout: cfg.AIU.Timeout}, nil
+		return aiuditor.ProductionHTTP{URL: cfg.AIU.URL, Timeout: cfg.AIU.Timeout}, nil
 	}
 	rules, err := aiuditor.LoadRules(cfg.AIU.RulesFile)
 	if err != nil {

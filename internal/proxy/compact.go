@@ -188,7 +188,7 @@ func (p *Proxy) cheapSummary(ctx context.Context, client *http.Request, tail, re
 		return "", usage.UncertainUsage(), 0, input, errBodyBudget
 	}
 	defer func() { releaseBody(held) }()
-	verdict, hopErr := p.Hop.Review(aiuditor.WithResponseBudget(ctx, reserveBody, releaseBody), aiuditor.Envelope{
+	verdict, hopErr := p.review(aiuditor.WithResponseBudget(ctx, reserveBody, releaseBody), aiuditor.Envelope{
 		Request: aiuditor.Request{
 			Protocol: wire.Protocol,
 			Method:   http.MethodPost,
@@ -200,14 +200,14 @@ func (p *Proxy) cheapSummary(ctx context.Context, client *http.Request, tail, re
 			JobClass: "summarize", Tier: "cheap", ModelID: tier.Model,
 			Reason: "compaction of the tail on the cheap tier",
 		},
-	})
+	}, tier, []config.Tier{tier}, false)
 	defer verdict.Release()
 	bodyToSend := wire.Body
 	if hopErr != nil {
 		if errors.Is(hopErr, aiuditor.ErrResponseBudget) {
 			return "", usage.UncertainUsage(), 0, input, errBodyBudget
 		}
-		if p.Config.AIU.FailClosed {
+		if p.Config.AIU.FailClosed || errors.Is(hopErr, aiuditor.ErrProductionReview) {
 			return "", usage.UncertainUsage(), 0, input, hopErr
 		}
 	} else if verdict.Action == aiuditor.Deny {

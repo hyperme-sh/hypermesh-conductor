@@ -231,3 +231,23 @@ func write(t *testing.T, dir, name string, payload map[string]any) string {
 	}
 	return path
 }
+
+func TestPolicyMetadataParsing(t *testing.T) {
+	for _, field := range []string{"policy_provider", "locality"} {
+		for _, value := range []any{true, ""} {
+			base := example(t)
+			base["tiers"].(map[string]any)["cheap"].(map[string]any)[field] = value
+			if _, err := Load(write(t, t.TempDir(), "invalid.json", base)); err == nil {
+				t.Fatal("invalid policy metadata accepted", field, value)
+			}
+		}
+	}
+	base := example(t)
+	cheap := base["tiers"].(map[string]any)["cheap"].(map[string]any)
+	cheap["policy_provider"] = "vendor"
+	cheap["locality"] = "remote"
+	cfg, err := Load(write(t, t.TempDir(), "valid.json", base))
+	if err != nil || cfg.Cheap.PolicyProvider != "vendor" || cfg.Cheap.Locality != "remote" {
+		t.Fatal("metadata lost", err)
+	}
+}
