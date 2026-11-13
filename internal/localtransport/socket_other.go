@@ -1,4 +1,4 @@
-//go:build !linux
+//go:build !linux && !darwin
 
 package localtransport
 
@@ -9,8 +9,12 @@ import (
 )
 
 func Listen(path string) (net.Listener, error) {
-	return nil, fmt.Errorf("protected Conductor sockets currently require Linux; use verified HTTPS on this platform")
+	return nil, fmt.Errorf("protected Conductor sockets currently require Linux or macOS; use verified HTTPS on this platform")
 }
 func DialContext(ctx context.Context, path string) (net.Conn, error) {
-	return nil, fmt.Errorf("protected Conductor sockets currently require Linux; use verified HTTPS on this platform")
+	return nil, fmt.Errorf("protected Conductor sockets currently require Linux or macOS; use verified HTTPS on this platform")
+}
+
+func ValidateListener(listener net.Listener) error {
+	return fmt.Errorf("protected Conductor sockets unavailable")
 }
