@@ -687,3 +687,22 @@ func narrowerInput(p, q CapabilityInput) bool {
 	}
 	return true
 }
+
+// CapabilityRequirements is a detached description for a trusted controller to
+// reserve locks and sample current state. It is not permission to execute.
+type CapabilityRequirements struct {
+	Conditions  []string        `json:"conditions"`
+	Limits      []CapabilityRef `json:"limits"`
+	Locks       []string        `json:"locks"`
+	TimeoutMS   int             `json:"timeout_ms"`
+	FreshnessMS int             `json:"freshness_ms"`
+}
+
+func (c *CapabilityCatalog) Requirements(call CapabilityCall) (CapabilityRequirements, error) {
+	key := capabilityKey(call.Scope, call.ID)
+	entry, ok := c.entries[key]
+	if !ok || entry.Definition.Kind != "verb" || call.Owner != entry.Definition.Owner || call.Revision != entry.Definition.Revision || call.SourceHash != entry.SourceHash || call.GraphHash != c.hashes[key] {
+		return CapabilityRequirements{}, errors.New("capability call refused")
+	}
+	return CapabilityRequirements{append([]string{}, c.conditions[key]...), append([]CapabilityRef{}, c.limits[key]...), append([]string{}, c.locks[key]...), c.bounds[key][0], c.bounds[key][1]}, nil
+}
