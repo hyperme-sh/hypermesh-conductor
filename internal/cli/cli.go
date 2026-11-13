@@ -194,8 +194,13 @@ func serveCmd(args []string, stdout, stderr io.Writer) int {
 	journalPath := fs.String("journal", "", "measurement journal")
 	peerGrantPath := fs.String("peer-grant", "", "optional single-hop peer ingress grant file")
 	socket := fs.Bool("socket", false, "serve a protected local socket (HYPERMESH_CONDUCTOR_SOCKET overrides its path)")
+	parentPID := fs.Int("parent-pid", 0, "stop the private socket server when this parent exits")
 	stdinListener := fs.Bool("stdin-listener", false, "serve a TCP or protected Unix listener inherited on stdin")
 	if err := fs.Parse(args); err != nil {
+		return 2
+	}
+	if *parentPID != 0 && (!*socket || *parentPID < 2 || os.Getppid() != *parentPID) {
+		fmt.Fprintln(stderr, "parent-pid requires the current parent and private socket mode")
 		return 2
 	}
 	cfg, code := load(configPath, stderr)
@@ -266,6 +271,12 @@ func serveCmd(args []string, stdout, stderr io.Writer) int {
 		}
 		ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 		defer stop()
+		ctx, stopParent, parentErr := managedParentContext(ctx, *parentPID)
+		if parentErr != nil {
+			fmt.Fprintln(stderr, parentErr)
+			return 2
+		}
+		defer stopParent()
 		listener, e := localtransport.Listen(path)
 		if e != nil {
 			fmt.Fprintln(stderr, e)
