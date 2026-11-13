@@ -156,3 +156,14 @@ func (p IPC) bindings(ctx context.Context) ([]Call, error) {
 	}
 	return reply.Enabled, nil
 }
+
+// ReadCall bounds the encoded envelope separately from decoded argument bytes.
+func ReadCall(reader io.Reader) (Call, error) {
+	const wireMax = 6*65536 + 4096
+	raw, err := io.ReadAll(io.LimitReader(reader, wireMax+1))
+	var call Call
+	if err != nil || len(raw) > wireMax || Decode(raw, &call) != nil || len(call.Arguments) > 65536 {
+		return Call{}, Refused
+	}
+	return call, nil
+}

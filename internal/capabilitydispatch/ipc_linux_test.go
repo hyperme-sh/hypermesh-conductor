@@ -3,6 +3,7 @@
 package capabilitydispatch
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"net"
@@ -61,5 +62,22 @@ func TestExecuteAcceptsEscapedOutputWithinDecodedLimit(t *testing.T) {
 	result, err := client.Execute(context.Background(), Execution{})
 	if err != nil || result.Output != output {
 		t.Fatalf("valid escaped output refused: %v", err)
+	}
+}
+
+func TestCallWireAllowsEscapingButBoundsDecodedArguments(t *testing.T) {
+	for _, size := range []int{65534, 65535} {
+		args := `"` + strings.Repeat("<", size) + `"`
+		raw, _ := json.Marshal(Call{Arguments: args})
+		call, err := ReadCall(bytes.NewReader(raw))
+		if size == 65534 && (err != nil || call.Arguments != args) {
+			t.Fatal("valid escaped arguments refused")
+		}
+		if size == 65535 && err == nil {
+			t.Fatal("oversized decoded arguments accepted")
+		}
+	}
+	if _, err := ReadCall(strings.NewReader(strings.Repeat(" ", 6*65536+4097))); err == nil {
+		t.Fatal("oversized wire accepted")
 	}
 }

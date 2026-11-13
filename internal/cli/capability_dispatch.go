@@ -23,9 +23,8 @@ func capabilityDispatchCmd(args []string, stdin io.Reader, stdout, stderr io.Wri
 	if *configPath == "" || fs.NArg() != 0 {
 		return 2
 	}
-	raw, err := io.ReadAll(io.LimitReader(stdin, 140001))
-	var call capabilitydispatch.Call
-	if err != nil || len(raw) > 140000 || capabilitydispatch.Decode(raw, &call) != nil {
+	call, err := capabilitydispatch.ReadCall(stdin)
+	if err != nil {
 		fmt.Fprintln(stderr, "capability dispatch refused")
 		return 1
 	}
