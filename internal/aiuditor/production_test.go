@@ -112,14 +112,18 @@ func TestProductionRequiresIdentityAndProtectedAuthority(t *testing.T) {
 }
 
 func TestProductionRefusesUnauthenticatedLoopbackBeforeSendingSecrets(t *testing.T) {
- env := productionFixture(t)
- var calls atomic.Int32
- server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { calls.Add(1) }))
- defer server.Close()
- _, err := (ProductionHTTP{URL: server.URL + "/api/v1/aiuditor/review"}).Review(context.Background(), env)
- if !errors.Is(err, ErrProductionReview) || calls.Load() != 0 { t.Fatal("unauthenticated loopback contacted") }
- tlsServer := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { calls.Add(1) }))
- defer tlsServer.Close()
- _, err = (ProductionHTTP{URL: tlsServer.URL + "/api/v1/aiuditor/review"}).Review(context.Background(), env)
- if !errors.Is(err, ErrProductionReview) || calls.Load() != 0 { t.Fatal("untrusted certificate accepted") }
+	env := productionFixture(t)
+	var calls atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { calls.Add(1) }))
+	defer server.Close()
+	_, err := (ProductionHTTP{URL: server.URL + "/api/v1/aiuditor/review"}).Review(context.Background(), env)
+	if !errors.Is(err, ErrProductionReview) || calls.Load() != 0 {
+		t.Fatal("unauthenticated loopback contacted")
+	}
+	tlsServer := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { calls.Add(1) }))
+	defer tlsServer.Close()
+	_, err = (ProductionHTTP{URL: tlsServer.URL + "/api/v1/aiuditor/review"}).Review(context.Background(), env)
+	if !errors.Is(err, ErrProductionReview) || calls.Load() != 0 {
+		t.Fatal("untrusted certificate accepted")
+	}
 }
