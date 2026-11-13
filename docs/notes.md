@@ -1,5 +1,9 @@
 # Linked notes
 
+Typed noun/verb definitions reuse this collection and index. See
+[scoped capability notes](capability-notes.md) for the private catalog command,
+revision-bound preflight contract and proposal checks.
+
 Markdown files in `notes.dir` are the source of truth. The SQLite index is derived from them and can be deleted and rebuilt. Wikilinks use `[[id]]` or `[[title]]`. Frontmatter may set `id`, `type`, `status`, `order` or `step_order`, and `tags`.
 
 Types are the note verbs: goal, steps, done, drop, fact, note, find, ask, show. A goal marked done or closed stays open in the session primer while a linked step is still open. `conductor index status` prints that violation. The index does not rewrite the file.
