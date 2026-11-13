@@ -1,7 +1,7 @@
 # Production model review
 
 Configured `aiuditor.mode: "http"` uses the AIuditor service contract at
-`/api/v1/aiuditor/review`. HTTPS is required except for an IP loopback authority.
+`/api/v1/aiuditor/review`. HTTPS with a trusted server certificate is required, including on loopback.
 The service credential comes only from `CONDUCTOR_AIUDITOR_TOKEN` (at least 32
 characters); `CONDUCTOR_AIUDITOR_TENANT_ID` is its nonzero tenant UUID. These must
 match the service's dedicated Conductor credential and tenant. They are never

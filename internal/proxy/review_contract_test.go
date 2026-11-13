@@ -64,7 +64,7 @@ func TestProductionPolicySelectsProviderAndRetainsBudgetChecks(t *testing.T) {
 				cfg.Cheap.PolicyProvider = ""
 			}
 			var reviews atomic.Int32
-			authority := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			authority := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				reviews.Add(1)
 				var env serviceReview
 				if json.NewDecoder(r.Body).Decode(&env) != nil || env.Routing.Provider == "" || env.Routing.Locality == "" || len(env.Candidates) == 0 {
@@ -83,7 +83,7 @@ func TestProductionPolicySelectsProviderAndRetainsBudgetChecks(t *testing.T) {
 			defer authority.Close()
 			cfg.AIU.Mode = config.AIUModeHTTP
 			cfg.AIU.URL = authority.URL + "/api/v1/aiuditor/review"
-			p := New(cfg, aiuditor.ProductionHTTP{URL: cfg.AIU.URL}, openJournal(t, dir))
+			p := New(cfg, aiuditor.ProductionHTTP{URL: cfg.AIU.URL, Client: authority.Client()}, openJournal(t, dir))
 			result := do(p, "/v1/chat/completions", "parse", "task", "step", "", `{"messages":[{"role":"user","content":"hello"}]}`)
 			if mode == "route" {
 				if result.Code != 200 || sent.Load() != 1 || reviews.Load() != 2 {
@@ -104,7 +104,7 @@ func TestProductionAuxiliaryCallsCarryContractAndStayDenied(t *testing.T) {
 	cfg.Cheap.Capabilities = &capabilities.Record{Model: cfg.Cheap.Model, Runtime: "ocr-v1", Protocol: cfg.Cheap.Provider, Local: true, Features: map[string]string{"ocr": "verified", "chat": "verified"}}
 	cfg.Cheap.OCROutputs = []string{"text"}
 	var summary, ocr atomic.Int32
-	authority := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	authority := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		var env serviceReview
 		json.NewDecoder(r.Body).Decode(&env)
 		if len(env.Candidates) != 1 || env.Routing.Provider != "local-vendor" || env.Routing.Locality != "local" {
@@ -121,7 +121,7 @@ func TestProductionAuxiliaryCallsCarryContractAndStayDenied(t *testing.T) {
 	defer authority.Close()
 	cfg.AIU.Mode = config.AIUModeHTTP
 	cfg.AIU.URL = authority.URL + "/api/v1/aiuditor/review"
-	p := New(cfg, aiuditor.ProductionHTTP{URL: cfg.AIU.URL}, nil)
+	p := New(cfg, aiuditor.ProductionHTTP{URL: cfg.AIU.URL, Client: authority.Client()}, nil)
 	_, _, _, _, err := p.cheapSummary(context.Background(), httptest.NewRequest("POST", "/v1/chat/completions", nil), "private summary", "")
 	if err == nil {
 		t.Fatal("summary ignored deny")
@@ -150,7 +150,7 @@ func TestProductionUpstreamRefusalCannotEscapeRemainingCandidates(t *testing.T) 
 			cfg, dir := serviceConfig(t, upstream.URL)
 			cfg.RefusalFallbackTier = "cheap"
 			cfg.MaxRefusalAttempts = 2
-			authority := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			authority := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				var env serviceReview
 				json.NewDecoder(r.Body).Decode(&env)
 				action, model := "allow", env.Routing.ModelID
@@ -174,7 +174,7 @@ func TestProductionUpstreamRefusalCannotEscapeRemainingCandidates(t *testing.T) 
 			defer authority.Close()
 			cfg.AIU.Mode = config.AIUModeHTTP
 			cfg.AIU.URL = authority.URL + "/api/v1/aiuditor/review"
-			p := New(cfg, aiuditor.ProductionHTTP{URL: cfg.AIU.URL}, openJournal(t, dir))
+			p := New(cfg, aiuditor.ProductionHTTP{URL: cfg.AIU.URL, Client: authority.Client()}, openJournal(t, dir))
 			result := do(p, "/v1/chat/completions", "code", "task", "step", "", `{"messages":[{"role":"user","content":"hello"}]}`)
 			if result.Code != 200 || frontier.Load() != 1 || refusals.Load() != 1 || (!deny && cheap.Load() != 1) || (deny && cheap.Load() != 0) {
 				t.Fatalf("refusal routing failed: %d %s frontier=%d cheap=%d refusals=%d", result.Code, result.Body.String(), frontier.Load(), cheap.Load(), refusals.Load())

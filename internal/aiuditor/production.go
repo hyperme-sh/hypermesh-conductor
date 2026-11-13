@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -71,8 +70,7 @@ func (h ProductionHTTP) review(ctx context.Context, env Envelope) (Verdict, erro
 	if err != nil || endpoint.User != nil || endpoint.RawQuery != "" || endpoint.Fragment != "" || endpoint.Path != "/api/v1/aiuditor/review" {
 		return Verdict{}, ErrProductionReview
 	}
-	ip := net.ParseIP(endpoint.Hostname())
-	if endpoint.Scheme != "https" && !(endpoint.Scheme == "http" && ip != nil && ip.IsLoopback()) {
+	if endpoint.Scheme != "https" || endpoint.Hostname() == "" {
 		return Verdict{}, ErrProductionReview
 	}
 	token := os.Getenv(ServiceTokenEnv)

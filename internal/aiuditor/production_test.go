@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+"sync/atomic"
 	"testing"
 )
 
@@ -19,7 +20,7 @@ func productionFixture(t *testing.T) Envelope {
 }
 func TestProductionWireAuthAndProviderConstraint(t *testing.T) {
 	env := productionFixture(t)
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/api/v1/aiuditor/review" || r.Header.Get("X-Internal-Token") != strings.Repeat("s", 32) || r.Header.Get("X-Tenant-ID") != "11111111-1111-4111-8111-111111111111" || r.Header.Get("Authorization") != "" {
 			t.Error("wrong dedicated authority headers")
 		}
@@ -39,7 +40,7 @@ func TestProductionWireAuthAndProviderConstraint(t *testing.T) {
 		w.Write([]byte(`{"action":"allow","reason":"provider rule","route":{"allow_models":[{"provider":"vendor"}]}}`))
 	}))
 	defer server.Close()
-	verdict, err := (ProductionHTTP{URL: server.URL + "/api/v1/aiuditor/review"}).Review(context.Background(), env)
+	verdict, err := (ProductionHTTP{URL: server.URL + "/api/v1/aiuditor/review", Client: server.Client()}).Review(context.Background(), env)
 	defer verdict.Release()
 	if err != nil || verdict.Action != Allow || len(verdict.AllowedModels) != 1 || verdict.AllowedModels[0] != "remote-model" {
 		t.Fatal("provider rule lost", err, verdict)
@@ -54,16 +55,16 @@ func TestProductionRefusesInvalidConstraintsAndServiceFailures(t *testing.T) {
 		`{"action":"allow","reason":"bad selector","route":{"allow_models":[{"provider":"vendor","model_id":"remote-model"}]}}`,
 		`{"action":"reroute","reason":"wrong event","allowed_models":["remote-model"],"route":{"allow_models":[{"model_id":"remote-model"}]}}`,
 	} {
-		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.Write([]byte(body)) }))
-		_, err := (ProductionHTTP{URL: server.URL + "/api/v1/aiuditor/review"}).Review(context.Background(), env)
+		server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.Write([]byte(body)) }))
+		_, err := (ProductionHTTP{URL: server.URL + "/api/v1/aiuditor/review", Client: server.Client()}).Review(context.Background(), env)
 		server.Close()
 		if !errors.Is(err, ErrProductionReview) {
 			t.Fatal("invalid grant accepted", body, err)
 		}
 	}
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(401) }))
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(401) }))
 	defer server.Close()
-	if _, err := (ProductionHTTP{URL: server.URL + "/api/v1/aiuditor/review"}).Review(context.Background(), env); !errors.Is(err, ErrProductionReview) {
+	if _, err := (ProductionHTTP{URL: server.URL + "/api/v1/aiuditor/review", Client: server.Client()}).Review(context.Background(), env); !errors.Is(err, ErrProductionReview) {
 		t.Fatal("service auth failure accepted")
 	}
 }
@@ -72,7 +73,7 @@ func TestProductionRefusalCarriesSelectedModelAndChecksRerouteSet(t *testing.T) 
 	env.Event = "upstream_refusal"
 	env.Metadata = env.Metadata[1:]
 	for _, allowed := range []string{"remote-model", "unlisted"} {
-		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			var body struct {
 				Event   string `json:"event"`
 				Refusal struct {
@@ -86,7 +87,7 @@ func TestProductionRefusalCarriesSelectedModelAndChecksRerouteSet(t *testing.T) 
 			}
 			json.NewEncoder(w).Encode(map[string]any{"action": "reroute", "reason": "policy", "allowed_models": []string{allowed}, "route": map[string]any{"allow_models": []map[string]string{{"model_id": "remote-model"}}}})
 		}))
-		verdict, err := (ProductionHTTP{URL: server.URL + "/api/v1/aiuditor/review"}).Review(context.Background(), env)
+		verdict, err := (ProductionHTTP{URL: server.URL + "/api/v1/aiuditor/review", Client: server.Client()}).Review(context.Background(), env)
 		verdict.Release()
 		server.Close()
 		if allowed == "remote-model" && err != nil {
@@ -108,4 +109,17 @@ func TestProductionRequiresIdentityAndProtectedAuthority(t *testing.T) {
 	if _, err := (ProductionHTTP{URL: "https://authority.example/api/v1/aiuditor/review"}).Review(context.Background(), env); err == nil {
 		t.Fatal("missing identity accepted")
 	}
+}
+
+func TestProductionRefusesUnauthenticatedLoopbackBeforeSendingSecrets(t *testing.T) {
+ env := productionFixture(t)
+ var calls atomic.Int32
+ server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { calls.Add(1) }))
+ defer server.Close()
+ _, err := (ProductionHTTP{URL: server.URL + "/api/v1/aiuditor/review"}).Review(context.Background(), env)
+ if !errors.Is(err, ErrProductionReview) || calls.Load() != 0 { t.Fatal("unauthenticated loopback contacted") }
+ tlsServer := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { calls.Add(1) }))
+ defer tlsServer.Close()
+ _, err = (ProductionHTTP{URL: tlsServer.URL + "/api/v1/aiuditor/review"}).Review(context.Background(), env)
+ if !errors.Is(err, ErrProductionReview) || calls.Load() != 0 { t.Fatal("untrusted certificate accepted") }
 }
