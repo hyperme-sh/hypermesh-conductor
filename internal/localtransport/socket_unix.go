@@ -1,4 +1,4 @@
-//go:build linux
+//go:build linux || darwin
 
 package localtransport
 
@@ -73,14 +73,7 @@ func DialContext(ctx context.Context, path string) (net.Conn, error) {
 		return nil, err
 	}
 	var peerErr error
-	err = raw.Control(func(fd uintptr) {
-		cred, e := syscall.GetsockoptUcred(int(fd), syscall.SOL_SOCKET, syscall.SO_PEERCRED)
-		if e != nil {
-			peerErr = e
-		} else if cred.Uid != uint32(os.Geteuid()) {
-			peerErr = fmt.Errorf("Conductor socket peer belongs to another user")
-		}
-	})
+	err = raw.Control(func(fd uintptr) { peerErr = checkPeer(int(fd)) })
 	if err != nil || peerErr != nil {
 		conn.Close()
 		if err != nil {
@@ -89,4 +82,15 @@ func DialContext(ctx context.Context, path string) (net.Conn, error) {
 		return nil, peerErr
 	}
 	return conn, nil
+}
+
+func ValidateListener(listener net.Listener) error {
+	addr, ok := listener.Addr().(*net.UnixAddr)
+	if !ok || !filepath.IsAbs(addr.Name) {
+		return fmt.Errorf("local listener must have an absolute Unix path")
+	}
+	if err := validate(filepath.Dir(addr.Name), false); err != nil {
+		return err
+	}
+	return validate(addr.Name, true)
 }

@@ -194,7 +194,7 @@ func serveCmd(args []string, stdout, stderr io.Writer) int {
 	journalPath := fs.String("journal", "", "measurement journal")
 	peerGrantPath := fs.String("peer-grant", "", "optional single-hop peer ingress grant file")
 	socket := fs.Bool("socket", false, "serve a protected local socket (HYPERMESH_CONDUCTOR_SOCKET overrides its path)")
-	stdinListener := fs.Bool("stdin-listener", false, "serve a TCP listener inherited on stdin")
+	stdinListener := fs.Bool("stdin-listener", false, "serve a TCP or protected Unix listener inherited on stdin")
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
@@ -280,11 +280,28 @@ func serveCmd(args []string, stdout, stderr io.Writer) int {
 	} else if *stdinListener {
 		listener, openErr := net.FileListener(os.Stdin)
 		if openErr != nil {
-			fmt.Fprintln(stderr, "stdin must be a listening TCP socket")
+			fmt.Fprintln(stderr, "stdin must be a listening socket")
 			return 2
 		}
 		defer listener.Close()
-		err = server.ServeListener(listener)
+		if _, local := listener.Addr().(*net.UnixAddr); local {
+			if cfg.ListenMode == config.ListenModeNetwork {
+				fmt.Fprintln(stderr, "inherited Unix listener cannot use network mode")
+				return 2
+			}
+			if err := localtransport.ValidateListener(listener); err != nil {
+				fmt.Fprintln(stderr, err)
+				return 2
+			}
+			ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+			defer stop()
+			err = server.ServeLocalListenerContext(ctx, listener)
+			if ctx.Err() != nil && (errors.Is(err, net.ErrClosed) || errors.Is(err, http.ErrServerClosed)) {
+				err = nil
+			}
+		} else {
+			err = server.ServeListener(listener)
+		}
 	} else {
 		scheme := "http"
 		if cfg.ListenMode == config.ListenModeNetwork {

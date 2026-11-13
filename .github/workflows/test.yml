@@ -81,3 +81,15 @@ jobs:
           mkdir -p dist
           go build -buildvcs=false -trimpath -ldflags='-s -w' -o "dist/conductor-${GOOS}-${GOARCH}${ext}" ./cmd/conductor
           ls -l "dist/conductor-${GOOS}-${GOARCH}${ext}"
+
+  local-socket-macos:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+      - name: Private socket unit contracts
+        run: go test -race ./internal/localtransport

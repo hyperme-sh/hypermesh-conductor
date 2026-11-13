@@ -1,16 +1,17 @@
-//go:build linux
+//go:build linux || darwin
 
 package localtransport
 
 import (
 	"context"
+	"net"
 	"os"
 	"path/filepath"
 	"testing"
 )
 
 func TestProtectedSocket(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "run", "conductor.sock")
+	path := filepath.Join(socketTestDir(t), "run", "conductor.sock")
 	ln, err := Listen(path)
 	if err != nil {
 		t.Fatal(err)
@@ -33,7 +34,7 @@ func TestProtectedSocket(t *testing.T) {
 	}
 }
 func TestRejectSymlinkAndRegularFile(t *testing.T) {
-	dir := t.TempDir()
+	dir := socketTestDir(t)
 	target := filepath.Join(dir, "target")
 	link := filepath.Join(dir, "link")
 	if err := os.Mkdir(target, 0700); err != nil {
@@ -55,4 +56,40 @@ func TestRejectSymlinkAndRegularFile(t *testing.T) {
 	if _, err := DialContext(context.Background(), path); err == nil {
 		t.Fatal("accepted regular file")
 	}
+}
+
+func TestInheritedListenerRequiresPrivatePath(t *testing.T) {
+	path := filepath.Join(socketTestDir(t), "run", "c.sock")
+	original, err := Listen(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer original.Close()
+	file, err := original.(*net.UnixListener).File()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer file.Close()
+	inherited, err := net.FileListener(file)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer inherited.Close()
+	if err := ValidateListener(inherited); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(path, 0666); err != nil {
+		t.Fatal(err)
+	}
+	if err := ValidateListener(inherited); err == nil {
+		t.Fatal("accepted public inherited socket")
+	}
+}
+
+func socketTestDir(t *testing.T) string {
+	t.Helper()
+	dir, err := os.MkdirTemp("/tmp", "conductor-")
+	if err != nil { t.Fatal(err) }
+	t.Cleanup(func() { os.RemoveAll(dir) })
+	return dir
 }
