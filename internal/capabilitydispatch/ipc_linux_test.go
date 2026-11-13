@@ -81,3 +81,21 @@ func TestCallWireAllowsEscapingButBoundsDecodedArguments(t *testing.T) {
 		t.Fatal("oversized wire accepted")
 	}
 }
+
+func TestReservationDecodeAllowsInheritedRequirements(t *testing.T) {
+	for _, count := range []int{288, 256 * 32, 256*32 + 1} {
+		reservation := Reservation{Locks: make([]string, count)}
+		for i := range reservation.Locks {
+			reservation.Locks[i] = "host/lock"
+		}
+		raw, _ := json.Marshal(reservation)
+		var decoded Reservation
+		err := Decode(raw, &decoded)
+		if count <= 256*32 && (err != nil || len(decoded.Locks) != count) {
+			t.Fatal("aggregate requirements refused", count)
+		}
+		if count > 256*32 && err == nil {
+			t.Fatal("oversized collection accepted")
+		}
+	}
+}

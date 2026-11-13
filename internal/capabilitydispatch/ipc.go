@@ -74,7 +74,7 @@ func (p IPC) Prepare(ctx context.Context, request Preparation) (Reservation, err
 	if err != nil {
 		return result, Refused
 	}
-	err = p.post(ctx, "/prepare", raw, 65536, &result)
+	err = p.post(ctx, "/prepare", raw, 6*1048576, &result)
 	return result, err
 }
 func (p IPC) Execute(ctx context.Context, request Execution) (Result, error) {
@@ -111,7 +111,8 @@ func Decode(raw []byte, out any) error {
 		count := 0
 		for scan.More() {
 			count++
-			if count > 256 {
+			// A catalog has at most 256 notes, each contributing up to 32 requirements.
+			if count > 256*32 {
 				return Refused
 			}
 			if delimiter == '{' {
