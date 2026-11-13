@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync/atomic"
 	"testing"
 )
@@ -41,5 +42,24 @@ func TestStrictProtocolRejectsNestedDuplicateFields(t *testing.T) {
 		if Decode([]byte(raw), &result) == nil {
 			t.Fatal("malformed controller reply accepted")
 		}
+	}
+}
+
+func TestExecuteAcceptsEscapedOutputWithinDecodedLimit(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "controller.sock")
+	listener, err := net.Listen("unix", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	output := `"` + strings.Repeat("<", 1048574) + `"`
+	server := &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		json.NewEncoder(w).Encode(Result{Protocol: 1, CallID: "call", CallHash: "hash", Completed: true, Output: output})
+	})}
+	go server.Serve(listener)
+	defer server.Close()
+	client := IPC{socket: path, uid: uint32(os.Geteuid())}
+	result, err := client.Execute(context.Background(), Execution{})
+	if err != nil || result.Output != output {
+		t.Fatalf("valid escaped output refused: %v", err)
 	}
 }

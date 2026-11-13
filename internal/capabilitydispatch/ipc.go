@@ -83,7 +83,7 @@ func (p IPC) Execute(ctx context.Context, request Execution) (Result, error) {
 	if err != nil {
 		return result, Refused
 	}
-	err = p.post(ctx, "/execute", raw, 2100000, &result)
+	err = p.post(ctx, "/execute", raw, 6*1048576+4096, &result)
 	return result, err
 }
 func (p IPC) Cancel(ctx context.Context, id, permit string) error {
