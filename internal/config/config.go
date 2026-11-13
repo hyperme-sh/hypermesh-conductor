@@ -54,6 +54,8 @@ var forbiddenKeys = map[string]struct{}{
 
 // Tier is one configured destination.
 type Tier struct {
+	PolicyProvider       string
+	Locality             string
 	ModelRevision        string
 	RequiredCapabilities []string
 	OCROutputs           []string
@@ -678,7 +680,29 @@ func parseTier(name string, block any) (Tier, error) {
 			return Tier{}, fmt.Errorf("invalid model_revision")
 		}
 	}
+	policyProvider, locality := "", ""
+	if value, present := obj["policy_provider"]; present {
+		var ok bool
+		policyProvider, ok = value.(string)
+		if !ok || policyProvider == "" || len(policyProvider) > 128 || strings.ContainsAny(policyProvider, "\r\n") {
+			return Tier{}, fmt.Errorf("invalid policy_provider")
+		}
+	}
+	if value, present := obj["locality"]; present {
+		var ok bool
+		locality, ok = value.(string)
+		if !ok || (locality != "local" && locality != "remote") {
+			return Tier{}, fmt.Errorf("invalid locality")
+		}
+	}
+	if gateway && policyProvider != "" && policyProvider != "hypermesh" {
+		return Tier{}, fmt.Errorf("gateway policy_provider must be hypermesh")
+	}
+	if caps != nil && locality != "" && (locality == "local") != caps.Local {
+		return Tier{}, fmt.Errorf("locality conflicts with capability record")
+	}
 	return Tier{
+		PolicyProvider: policyProvider, Locality: locality,
 		ModelRevision: modelRevision,
 		OCROutputs:    ocrOutputs, Capabilities: caps, RuntimeRevision: runtime, Direct: direct, CredentialOrigin: origin,
 		Name:         name,

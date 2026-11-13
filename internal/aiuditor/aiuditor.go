@@ -46,15 +46,18 @@ type Routing struct {
 
 // Envelope is the HTTP body posted to AIuditor.
 type Envelope struct {
-	Event      string   `json:"event,omitempty"`
-	Candidates []string `json:"candidates,omitempty"`
-	Request    Request  `json:"request"`
-	Routing    Routing  `json:"routing"`
+	Metadata   []Candidate `json:"-"`
+	Selected   Candidate   `json:"-"`
+	Event      string      `json:"event,omitempty"`
+	Candidates []string    `json:"candidates,omitempty"`
+	Request    Request     `json:"request"`
+	Routing    Routing     `json:"routing"`
 }
 
 // Verdict is allow, deny, or modify. Modify carries a replacement JSON body.
 type Verdict struct {
-	AllowedModels []string `json:"allowed_models,omitempty"`
+	AllowedModels []string         `json:"allowed_models,omitempty"`
+	Route         *RouteConstraint `json:"route,omitempty"`
 	release       func()
 	Action        string          `json:"action"`
 	Reason        string          `json:"reason"`
@@ -119,6 +122,8 @@ var SecretHeaders = map[string]struct{}{
 	"x-api-key":           {},
 	"cookie":              {},
 	"set-cookie":          {},
+	"x-internal-token":    {},
+	"x-tenant-id":         {},
 }
 
 // FilterHeaders copies headers that are safe to send to AIuditor.
@@ -266,6 +271,7 @@ func walkReplace(value any, from, to string) bool {
 
 // HTTP posts the envelope to a configured AIuditor endpoint.
 type HTTP struct {
+	strict  bool
 	URL     string
 	Timeout time.Duration
 	Client  *http.Client
@@ -274,16 +280,19 @@ type HTTP struct {
 // Review calls AIuditor. A non-200 response or a transport error is returned
 // to the caller, which fails closed when that is configured.
 func (h HTTP) Review(ctx context.Context, env Envelope) (Verdict, error) {
+	raw, err := json.Marshal(env)
+	if err != nil {
+		return Verdict{}, err
+	}
+	return h.reviewBytes(ctx, env, raw)
+}
+func (h HTTP) reviewBytes(ctx context.Context, env Envelope, raw []byte) (Verdict, error) {
 	timeout := h.Timeout
 	if timeout <= 0 {
 		timeout = 5 * time.Second
 	}
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
-	raw, err := json.Marshal(env)
-	if err != nil {
-		return Verdict{}, err
-	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, h.URL, bytes.NewReader(raw))
 	if err != nil {
 		return Verdict{}, err
@@ -345,8 +354,15 @@ func (h HTTP) Review(ctx context.Context, env Envelope) (Verdict, error) {
 		return Verdict{}, fmt.Errorf("aiuditor HTTP %d", resp.StatusCode)
 	}
 	var verdict Verdict
-	if err := json.Unmarshal(respBody, &verdict); err != nil {
+	decoder := json.NewDecoder(bytes.NewReader(respBody))
+	if h.strict {
+		decoder.DisallowUnknownFields()
+	}
+	if err := decoder.Decode(&verdict); err != nil {
 		return Verdict{}, fmt.Errorf("aiuditor response was not JSON")
+	}
+	if decoder.Decode(new(any)) != io.EOF {
+		return Verdict{}, fmt.Errorf("aiuditor response has trailing content")
 	}
 	verdict.Reason = ReasonText(verdict.Reason)
 	switch verdict.Action {

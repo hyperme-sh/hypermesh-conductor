@@ -52,7 +52,7 @@ func (p *Proxy) serveOCR(w http.ResponseWriter, r *http.Request) {
 	}
 	required := append([]string(nil), request.Required...)
 	// Review the native request; replacements must pass the same contract again.
-	verdict, err := p.Hop.Review(r.Context(), aiuditor.Envelope{Request: aiuditor.Request{Protocol: "mistral.ocr", Method: "POST", Path: "/v1/ocr", Body: raw}, Routing: aiuditor.Routing{JobClass: "extract", Tier: tier.Name, ModelID: tier.Model}})
+	verdict, err := p.review(r.Context(), aiuditor.Envelope{Request: aiuditor.Request{Protocol: "mistral.ocr", Method: "POST", Path: "/v1/ocr", Body: raw}, Routing: aiuditor.Routing{JobClass: "extract", Tier: tier.Name, ModelID: tier.Model}}, tier, []config.Tier{tier}, false)
 	defer verdict.Release()
 	if err != nil || verdict.Action == aiuditor.Deny {
 		writeJSON(w, 403, map[string]any{"error": "OCR denied by policy"})

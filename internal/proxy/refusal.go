@@ -158,9 +158,15 @@ func (p *Proxy) rerouteRefusal(w http.ResponseWriter, client *http.Request, tier
 	if (tier.TaskTokenLimit > 0 && next.TaskTokenLimit != tier.TaskTokenLimit) || (tier.TaskOutputLimit > 0 && next.TaskOutputLimit != tier.TaskOutputLimit) {
 		return false
 	}
-	verdict, err := p.Hop.Review(client.Context(), aiuditor.Envelope{Event: "upstream_refusal", Candidates: []string{next.Model},
-		Request: aiuditor.Request{Protocol: protocolOfRequest(client), Method: "POST", Path: client.URL.Path, Body: state.body},
-		Routing: aiuditor.Routing{JobClass: record.JobClass, Tier: tier.Name, ModelID: tier.Model, Reason: "upstream refusal"}})
+	var original struct {
+		Stream bool `json:"stream"`
+	}
+	if json.Unmarshal(state.body, &original) != nil {
+		return false
+	}
+	verdict, err := p.review(client.Context(), aiuditor.Envelope{Event: "upstream_refusal", Candidates: []string{next.Model},
+		Request: aiuditor.Request{Protocol: protocolOfRequest(client), Method: "POST", Path: client.URL.Path, Stream: original.Stream, Headers: aiuditor.FilterHeaders(client.Header), Body: state.body},
+		Routing: aiuditor.Routing{JobClass: record.JobClass, Tier: tier.Name, ModelID: tier.Model, Reason: "upstream refusal"}}, tier, []config.Tier{next}, false)
 	defer verdict.Release()
 	if err != nil || verdict.Action != "reroute" {
 		return false
