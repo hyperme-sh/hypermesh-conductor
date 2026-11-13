@@ -518,13 +518,16 @@ func writeNoteDiff(dir, path string) error {
 
 func indexCmd(args []string, stdout, stderr io.Writer) int {
 	if len(args) == 0 {
-		fmt.Fprintln(stderr, "usage: conductor index <rebuild|status>")
+		fmt.Fprintln(stderr, "usage: conductor index <rebuild|status|capabilities>")
 		return 2
 	}
 	fs := flag.NewFlagSet("index", flag.ContinueOnError)
 	fs.SetOutput(stderr)
 	dir := fs.String("notes", "", "notes directory")
 	dbPath := fs.String("db", "", "sqlite index path")
+	scope := fs.String("scope", "", "explicit organization/site capability scope")
+	proposal := fs.String("proposal", "", "draft capability notes to validate without applying")
+	proposalDB := fs.String("proposal-db", "", "optional private draft index path")
 	if err := fs.Parse(args[1:]); err != nil {
 		return 2
 	}
@@ -539,6 +542,42 @@ func indexCmd(args []string, stdout, stderr io.Writer) int {
 	}
 	defer store.Close()
 	switch args[0] {
+	case "capabilities":
+		catalog, err := store.SyncCapabilities(*dir)
+		if err != nil {
+			fmt.Fprintln(stderr, err.Error())
+			return 2
+		}
+		if *proposal != "" {
+			draftStore, err := notes.OpenCollection(*proposal, *proposalDB)
+			if err != nil {
+				fmt.Fprintln(stderr, err.Error())
+				return 2
+			}
+			defer draftStore.Close()
+			draft, err := draftStore.SyncCapabilities(*proposal)
+			if err != nil {
+				fmt.Fprintln(stderr, err.Error())
+				return 2
+			}
+			if err := catalog.CheckProposal(draft); err != nil {
+				fmt.Fprintln(stderr, err.Error())
+				return 2
+			}
+			catalog = draft
+		} else if *proposalDB != "" {
+			fmt.Fprintln(stderr, "proposal-db requires proposal")
+			return 2
+		}
+		entries, err := catalog.Snapshot(*scope)
+		if err != nil {
+			fmt.Fprintln(stderr, err.Error())
+			return 2
+		}
+		if err := json.NewEncoder(stdout).Encode(entries); err != nil {
+			fmt.Fprintln(stderr, err.Error())
+			return 2
+		}
 	case "rebuild":
 		stats, err := store.Rebuild(*dir)
 		if err != nil {
