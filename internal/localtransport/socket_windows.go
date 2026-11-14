@@ -8,6 +8,7 @@ import (
 	"net"
 	"os"
 	"runtime"
+	"strconv"
 	"strings"
 	"time"
 	"unsafe"
@@ -254,10 +255,15 @@ func integrityLevel(token windows.Token) (uint32, error) {
 	}
 	label := (*windows.Tokenmandatorylabel)(unsafe.Pointer(&buffer[0]))
 	sid := label.Label.Sid
-	if sid == nil || !sid.IsValid() || sid.SubAuthorityCount() != 1 || !strings.HasPrefix(sid.String(), "S-1-16-") {
+	if sid == nil || !sid.IsValid() || !strings.HasPrefix(sid.String(), "S-1-16-") {
 		return 0, fmt.Errorf("invalid process integrity label")
 	}
-	level := sid.SubAuthority(0)
+	// Parse the copied SID string: SubAuthority returns a Win32 pointer into
+	// Go-owned token storage, which fails Go's checked pointer rules.
+	level, err := strconv.ParseUint(strings.TrimPrefix(sid.String(), "S-1-16-"), 10, 32)
 	runtime.KeepAlive(buffer)
-	return level, nil
+	if err != nil {
+		return 0, fmt.Errorf("invalid process integrity label")
+	}
+	return uint32(level), nil
 }
